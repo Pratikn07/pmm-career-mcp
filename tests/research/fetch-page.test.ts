@@ -296,7 +296,10 @@ it("bounds selector matching work for large attacker-controlled class attributes
   const startedAt = performance.now();
   await expect(fetchPublicPage("https://acme.example/expensive-selector-matching", {
     resolveAddresses: publicDns,
-    timeoutMs: 50
+    // The request deadline also covers synchronous sanitization. Keep it above
+    // this bounded-work assertion so suite scheduling cannot mask the intended
+    // stylesheet-limit result with an equally safe deadline result.
+    timeoutMs: 1_000
   })).rejects.toThrow(/stylesheet.*limit/i);
   expect(performance.now() - startedAt).toBeLessThan(500);
 }, 15_000);

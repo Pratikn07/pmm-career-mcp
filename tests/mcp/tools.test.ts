@@ -1,5 +1,6 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { expect, it } from "vitest";
 import { createCareerMcpServer, type CareerMcpDependencies } from "../../src/mcp/server.js";
 import { createHttpApp } from "../../src/http/app.js";
@@ -108,4 +109,26 @@ it("returns a safe tool error without exposing an implementation message", async
   await Promise.all([client.close(), server.close()]);
   expect(result.isError).toBe(true);
   expect(JSON.stringify(result)).not.toContain("not called");
+});
+
+it("keeps safe tool errors schema-valid over Streamable HTTP", async () => {
+  const failingDependencies: CareerMcpDependencies = {
+    ...dependencies(),
+    ycProvider: { searchYcCompanies: async () => { throw new Error("provider-secret-detail"); } }
+  };
+  const listener = createHttpApp({ mcpServerFactory: () => createCareerMcpServer(failingDependencies) }).listen(0);
+  await new Promise<void>((resolve) => listener.once("listening", resolve));
+  const address = listener.address();
+  if (address === null || typeof address === "string") throw new Error("Expected a TCP listener");
+  const client = new Client({ name: "test", version: "1.0.0" });
+  try {
+    await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${address.port}/mcp`)) as never);
+    const result = await client.callTool({ name: "search_yc_companies", arguments: {} });
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toEqual({ data: { error: { code: "DATA_INTEGRITY" } } });
+    expect(JSON.stringify(result)).not.toContain("provider-secret-detail");
+  } finally {
+    await client.close();
+    await new Promise<void>((resolve, reject) => listener.close((error) => error ? reject(error) : resolve()));
+  }
 });

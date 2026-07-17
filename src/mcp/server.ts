@@ -63,7 +63,7 @@ function safeError(error: unknown) {
   const message = error instanceof DomainError ? error.message : "The requested operation could not be completed";
   return {
     content: [{ type: "text" as const, text: message }],
-    structuredContent: { error: { code } },
+    structuredContent: { data: { error: { code } } },
     isError: true
   };
 }

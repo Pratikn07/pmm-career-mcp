@@ -70,3 +70,25 @@ For routine LinkedIn token rotation, revoke the old LinkedIn grant if required, 
 - Research is limited to YC companies and allowed public company sources; people coverage is best-effort, never a complete directory.
 - The only external write is a text post through LinkedIn's official API. Drafting, previews, shortlists, targets, and notes stay private in the SQLite volume.
 - A failed or unknown publish attempt is not permission to retry automatically. Resolve it deliberately and create a fresh preview when needed.
+
+## Acceptance evidence and handoff
+
+The table maps the approved design to automated proof or an explicit operator check. “Manual” items are intentionally not performed by the server or test suite.
+
+| Approved criterion | Evidence |
+| --- | --- |
+| Private, single-user, hosted streaming-HTTP MCP with health, Docker, and persistent SQLite | `src/http/app.ts`, `src/index.ts`, `Dockerfile`, migration/repository tests, and `tests/e2e/career-flow.test.ts`. |
+| Production is OAuth-protected; local no-auth is development/test only | `tests/auth/resource-auth.test.ts`, `tests/auth/http-auth.test.ts`, and `tests/config.test.ts` prove issuer/audience/subject/expiry/JWKS checks, protected-resource metadata, and production fail-closed configuration. |
+| YC-only research, public-company sources, best-effort people coverage, citations, freshness, and transparent ranking | `tests/research/*.test.ts` and `tests/ranking/score-target.test.ts`; tool descriptions explicitly state authoritative-page-only/best-effort coverage. |
+| No LinkedIn scraping or unsafe public-page access | URL policy/fetch tests cover LinkedIn denial, SSRF/private-network/redirect/content bounds, and untrusted-content sanitization. |
+| Private pipeline, notes, shortlists, outreach drafts, immutable post history, and versioned schema | `tests/db/repositories.test.ts`, `tests/pipeline/service.test.ts`, and `tests/drafts/service.test.ts`. |
+| Complete tool contract with strict schemas and correct read/write annotations | `tests/mcp/tools.test.ts` and `tests/mcp/annotations.test.ts`; the registered tool set excludes messaging, connection, profile, schedule, and batch tools. |
+| LinkedIn OAuth uses PKCE, encrypted server-side tokens, and a non-secret status response | `tests/linkedin/oauth.test.ts`, `tests/security/crypto.test.ts`, and `get_linkedin_connection_status`; callback and status return no credentials. |
+| Text-only LinkedIn Posts API integration is version-configured and sends no automatic retries | `tests/linkedin/posts-client.test.ts` and `tests/linkedin/publish-service.test.ts`. |
+| Publishing is disabled by default and requires an exact current draft, checksum, visibility, one-use 15-minute preview, and explicit MCP write call | `tests/posts/preview-service.test.ts`, `tests/linkedin/publish-service.test.ts`, and the mocked full flow in `tests/e2e/career-flow.test.ts`. It records success, definite failure, or unknown outcome and never retries ambiguous creation. |
+| No autonomous work, scheduled posts, LinkedIn messages/connections, media posts, multi-user features, or private-profile data | The approved MCP tool inventory and server instructions (`src/mcp/server.ts`) contain none of those capabilities; `tests/mcp/tools.test.ts` guards the inventory. |
+| Secrets are encrypted/redacted and are absent from source, Docker context, and tool errors | `tests/security/crypto.test.ts`, secret-handling tests, `.dockerignore`, and the verification audit below. Test fixtures use clearly fake values only. |
+| Safe error handling, source-change visibility, bounded retries, backups, rotation, and deployment guidance | Research/publish/auth tests plus the backup, rotation, and ambiguous-publish runbooks above. A changed YC page returns a safe error rather than invented results. |
+| Clean verification | On 2026-07-17: `npm ci`, `npm test` (342 tests), `npm run typecheck`, and `npm run build` passed. The production-only dependency audit is clean; the development dependency audit has four non-production moderate advisories. |
+| Temporary HTTPS tunnel smoke | On 2026-07-17, a no-auth development server with publishing disabled was reached through a temporary HTTPS tunnel. MCP initialization listed 18 tools; a safe YC search error, draft, and preview all completed without credentials or a publish call. No ChatGPT connector/app was created. |
+| Production OAuth, ChatGPT connector, LinkedIn authorization, and any real post | **Manual, user-controlled handoff:** deploy to an HTTPS host with a persistent volume; configure the production OAuth values and keep `LINKEDIN_PUBLISH_ENABLED=false`; create the ChatGPT Developer Mode connector yourself; then connect LinkedIn privately. Enable the kill switch only when ready, and make any real post only through a newly previewed draft and an explicit current-conversation request. |
