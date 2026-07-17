@@ -1,4 +1,4 @@
-import { afterAll, afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { createDatabase } from "../../src/db/client.js";
 import { DomainError } from "../../src/domain/errors.js";
 import {
@@ -53,6 +53,51 @@ function expectDomainError(action: () => unknown, code: string): DomainError {
     return error as DomainError;
   }
   throw new Error("Expected a DomainError");
+}
+
+type PersistenceFailureKind = "busy" | "unknown";
+
+const PRIVATE_PERSISTENCE_TEXT = "private-user-persistence-text";
+const PRIVATE_DATABASE_PATH = "/private/path/career.sqlite";
+
+function repositoryFailure(kind: PersistenceFailureKind): Error {
+  const error = new Error(
+    `${kind === "busy" ? "database is locked" : "database I/O failed"} at `
+      + `${PRIVATE_DATABASE_PATH}: ${PRIVATE_PERSISTENCE_TEXT}`
+  );
+  Object.assign(error, {
+    code: kind === "busy" ? "SQLITE_BUSY" : "SQLITE_IOERR",
+    sql: `INSERT INTO private_table VALUES ('${PRIVATE_PERSISTENCE_TEXT}')`,
+    userText: PRIVATE_PERSISTENCE_TEXT
+  });
+  error.stack = `${error.message}\nSQL INSERT at ${PRIVATE_DATABASE_PATH}`;
+  return error;
+}
+
+function expectSanitizedPersistenceError(
+  error: DomainError,
+  kind: PersistenceFailureKind,
+  entity: "target" | "note" | "shortlist"
+): void {
+  expect(error).toMatchObject({
+    code: kind === "busy" ? "CONFLICT" : "DATA_INTEGRITY",
+    message: kind === "busy"
+      ? "Pipeline write could not be completed"
+      : "Pipeline storage operation failed",
+    details: { entity, retryable: kind === "busy" }
+  });
+  expect("cause" in error).toBe(false);
+  const exposed = [
+    error.code,
+    error.message,
+    JSON.stringify(error.details),
+    error.stack ?? ""
+  ].join("\n");
+  expect(exposed).not.toContain(PRIVATE_PERSISTENCE_TEXT);
+  expect(exposed).not.toContain(PRIVATE_DATABASE_PATH);
+  expect(exposed).not.toContain("SQL INSERT");
+  expect(exposed).not.toContain("SQLITE_BUSY");
+  expect(exposed).not.toContain("SQLITE_IOERR");
 }
 
 describe("pipeline statuses", () => {
@@ -138,6 +183,66 @@ describe("pipeline statuses", () => {
       message: "Target was not found",
       details: { entity: "target" }
     });
+  });
+
+  it("keeps exported status policy frozen and validation independent from runtime mutation", () => {
+    const original = [...PIPELINE_STATUSES];
+    const mutableStatuses = PIPELINE_STATUSES as unknown as string[];
+    let mutationThrew = false;
+    let validationError: DomainError | undefined;
+
+    try {
+      try {
+        mutableStatuses.push("private_runtime_status");
+      } catch (error) {
+        mutationThrew = error instanceof TypeError;
+      }
+      try {
+        pipeline.listPipeline({ status: "private_runtime_status" as never });
+      } catch (error) {
+        validationError = error as DomainError;
+      }
+    } finally {
+      if (!Object.isFrozen(PIPELINE_STATUSES)) {
+        mutableStatuses.splice(0, mutableStatuses.length, ...original);
+      }
+    }
+
+    expect(Object.isFrozen(PIPELINE_STATUSES)).toBe(true);
+    expect(mutationThrew).toBe(true);
+    expect(PIPELINE_STATUSES).toEqual(original);
+    expect(validationError).toMatchObject({ code: "VALIDATION_ERROR" });
+  });
+
+  it("deep-freezes exported transitions and keeps authorization independent from mutation", () => {
+    const original = [...PIPELINE_TRANSITIONS.discovered];
+    const mutableDiscovered = PIPELINE_TRANSITIONS.discovered as unknown as string[];
+    let mutationThrew = false;
+    let transitionError: DomainError | undefined;
+
+    try {
+      try {
+        mutableDiscovered.push("connected");
+      } catch (error) {
+        mutationThrew = error instanceof TypeError;
+      }
+      const saved = pipeline.saveTarget(scoreFor("runtime-transition-policy"));
+      try {
+        pipeline.updateStatus(saved.id, "connected");
+      } catch (error) {
+        transitionError = error as DomainError;
+      }
+    } finally {
+      if (!Object.isFrozen(PIPELINE_TRANSITIONS.discovered)) {
+        mutableDiscovered.splice(0, mutableDiscovered.length, ...original);
+      }
+    }
+
+    expect(Object.isFrozen(PIPELINE_TRANSITIONS)).toBe(true);
+    expect(Object.values(PIPELINE_TRANSITIONS).every(Object.isFrozen)).toBe(true);
+    expect(mutationThrew).toBe(true);
+    expect(PIPELINE_TRANSITIONS.discovered).toEqual(original);
+    expect(transitionError).toMatchObject({ code: "INVALID_TRANSITION" });
   });
 });
 
@@ -339,5 +444,79 @@ describe("shortlists", () => {
       targetIds: null
     } as never), "VALIDATION_ERROR");
     expect(db.shortlists.list()).toEqual([]);
+  });
+});
+
+describe("pipeline persistence error boundaries", () => {
+  it.each(["busy", "unknown"] as const)("sanitizes %s target-save failures", (kind) => {
+    const score = scoreFor(`save-failure-${kind}`);
+    const spy = vi.spyOn(db.targets, "upsert").mockImplementation(() => {
+      throw repositoryFailure(kind);
+    });
+    let error: DomainError;
+    try {
+      error = expectDomainError(
+        () => pipeline.saveTarget(score),
+        kind === "busy" ? "CONFLICT" : "DATA_INTEGRITY"
+      );
+    } finally {
+      spy.mockRestore();
+    }
+
+    expectSanitizedPersistenceError(error!, kind, "target");
+  });
+
+  it.each(["busy", "unknown"] as const)("sanitizes %s status-update failures", (kind) => {
+    const target = pipeline.saveTarget(scoreFor(`status-failure-${kind}`));
+    const spy = vi.spyOn(db.targets, "updateStatus").mockImplementation(() => {
+      throw repositoryFailure(kind);
+    });
+    let error: DomainError;
+    try {
+      error = expectDomainError(
+        () => pipeline.updateStatus(target.id, "shortlisted"),
+        kind === "busy" ? "CONFLICT" : "DATA_INTEGRITY"
+      );
+    } finally {
+      spy.mockRestore();
+    }
+
+    expectSanitizedPersistenceError(error!, kind, "target");
+  });
+
+  it.each(["busy", "unknown"] as const)("sanitizes %s note-save failures", (kind) => {
+    const target = pipeline.saveTarget(scoreFor(`note-failure-${kind}`));
+    const spy = vi.spyOn(db.notes, "add").mockImplementation(() => {
+      throw repositoryFailure(kind);
+    });
+    let error: DomainError;
+    try {
+      error = expectDomainError(
+        () => pipeline.recordNote(target.id, "Private note"),
+        kind === "busy" ? "CONFLICT" : "DATA_INTEGRITY"
+      );
+    } finally {
+      spy.mockRestore();
+    }
+
+    expectSanitizedPersistenceError(error!, kind, "note");
+  });
+
+  it.each(["busy", "unknown"] as const)("sanitizes %s shortlist-save failures", (kind) => {
+    const target = pipeline.saveTarget(scoreFor(`shortlist-failure-${kind}`));
+    const spy = vi.spyOn(db.shortlists, "create").mockImplementation(() => {
+      throw repositoryFailure(kind);
+    });
+    let error: DomainError;
+    try {
+      error = expectDomainError(
+        () => pipeline.createShortlist({ name: "Private shortlist", targetIds: [target.id] }),
+        kind === "busy" ? "CONFLICT" : "DATA_INTEGRITY"
+      );
+    } finally {
+      spy.mockRestore();
+    }
+
+    expectSanitizedPersistenceError(error!, kind, "shortlist");
   });
 });

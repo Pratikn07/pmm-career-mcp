@@ -8,7 +8,7 @@ import type {
 import { DomainError, sqliteConstraintKind } from "../domain/errors.js";
 import type { TargetScore } from "../ranking/score-target.js";
 
-export const PIPELINE_STATUSES = [
+const PIPELINE_STATUS_VALUES = [
   "discovered",
   "shortlisted",
   "connect_planned",
@@ -18,13 +18,15 @@ export const PIPELINE_STATUSES = [
   "archived"
 ] as const;
 
-export type PipelineStatus = typeof PIPELINE_STATUSES[number];
+export type PipelineStatus = typeof PIPELINE_STATUS_VALUES[number];
 
-/**
- * Pipeline progress is deliberately forward-only. Any active stage may be
- * archived, archived is terminal, and same-status updates are idempotent.
- */
-export const PIPELINE_TRANSITIONS: Readonly<Record<PipelineStatus, readonly PipelineStatus[]>> = {
+const PIPELINE_STATUS_SET: ReadonlySet<string> = new Set(PIPELINE_STATUS_VALUES);
+
+export const PIPELINE_STATUSES: readonly PipelineStatus[] = Object.freeze([
+  ...PIPELINE_STATUS_VALUES
+]);
+
+const PIPELINE_TRANSITION_VALUES = {
   discovered: ["shortlisted", "archived"],
   shortlisted: ["connect_planned", "archived"],
   connect_planned: ["connected", "archived"],
@@ -32,7 +34,32 @@ export const PIPELINE_TRANSITIONS: Readonly<Record<PipelineStatus, readonly Pipe
   contacted: ["replied", "archived"],
   replied: ["archived"],
   archived: []
+} as const satisfies Readonly<Record<PipelineStatus, readonly PipelineStatus[]>>;
+
+const PIPELINE_TRANSITION_SETS: Readonly<Record<PipelineStatus, ReadonlySet<PipelineStatus>>> = {
+  discovered: new Set(PIPELINE_TRANSITION_VALUES.discovered),
+  shortlisted: new Set(PIPELINE_TRANSITION_VALUES.shortlisted),
+  connect_planned: new Set(PIPELINE_TRANSITION_VALUES.connect_planned),
+  connected: new Set(PIPELINE_TRANSITION_VALUES.connected),
+  contacted: new Set(PIPELINE_TRANSITION_VALUES.contacted),
+  replied: new Set(PIPELINE_TRANSITION_VALUES.replied),
+  archived: new Set(PIPELINE_TRANSITION_VALUES.archived)
 };
+
+/**
+ * Pipeline progress is deliberately forward-only. Any active stage may be
+ * archived, archived is terminal, and same-status updates are idempotent.
+ */
+export const PIPELINE_TRANSITIONS: Readonly<Record<PipelineStatus, readonly PipelineStatus[]>> = {
+  discovered: Object.freeze([...PIPELINE_TRANSITION_VALUES.discovered]),
+  shortlisted: Object.freeze([...PIPELINE_TRANSITION_VALUES.shortlisted]),
+  connect_planned: Object.freeze([...PIPELINE_TRANSITION_VALUES.connect_planned]),
+  connected: Object.freeze([...PIPELINE_TRANSITION_VALUES.connected]),
+  contacted: Object.freeze([...PIPELINE_TRANSITION_VALUES.contacted]),
+  replied: Object.freeze([...PIPELINE_TRANSITION_VALUES.replied]),
+  archived: Object.freeze([...PIPELINE_TRANSITION_VALUES.archived])
+};
+Object.freeze(PIPELINE_TRANSITIONS);
 
 const MAX_ID_LENGTH = 256;
 const MAX_NAME_LENGTH = 200;
@@ -118,7 +145,7 @@ function normalizedExplanation(field: string, value: unknown): string[] {
 }
 
 function isPipelineStatus(value: unknown): value is PipelineStatus {
-  return typeof value === "string" && (PIPELINE_STATUSES as readonly string[]).includes(value);
+  return typeof value === "string" && PIPELINE_STATUS_SET.has(value);
 }
 
 function parseTarget(row: Target): PipelineTarget {
@@ -211,7 +238,41 @@ function mapPipelinePersistenceError(error: unknown, operation: "target" | "note
       entity: operation
     });
   }
-  throw error;
+  const sqliteCode = typeof error === "object"
+    && error !== null
+    && "code" in error
+    && typeof (error as { code?: unknown }).code === "string"
+    ? (error as { code: string }).code
+    : undefined;
+  if (
+    sqliteCode === "SQLITE_BUSY"
+    || sqliteCode?.startsWith("SQLITE_BUSY_") === true
+    || sqliteCode === "SQLITE_LOCKED"
+    || sqliteCode?.startsWith("SQLITE_LOCKED_") === true
+  ) {
+    throw new DomainError("CONFLICT", "Pipeline write could not be completed", {
+      entity: operation,
+      retryable: true
+    });
+  }
+  throw new DomainError("DATA_INTEGRITY", "Pipeline storage operation failed", {
+    entity: operation,
+    retryable: false
+  });
+}
+
+function withPipelinePersistenceBoundary<T>(
+  operation: "target" | "note" | "shortlist",
+  action: () => T
+): T {
+  try {
+    return action();
+  } catch (error) {
+    if (error instanceof DomainError) {
+      throw error;
+    }
+    return mapPipelinePersistenceError(error, operation);
+  }
 }
 
 function normalizeShortlistEntries(input: CreateShortlistInput): PositionedShortlistEntry[] {
@@ -269,22 +330,25 @@ export function createPipelineService(database: CareerDatabase) {
   return {
     saveTarget(input: TargetScore): PipelineTarget {
       const score = normalizeScore(input);
-      const person = database.people.get(score.personId);
-      if (person === undefined) {
-        throw new DomainError("NOT_FOUND", "Person was not found", { entity: "person" });
-      }
-      if (person.companyId !== score.companyId || database.companies.get(score.companyId) === undefined) {
-        throw validationError("score.companyId", "does_not_match_person");
-      }
-      const current = database.targets.getByPerson(score.personId);
-      const status = current === undefined ? "discovered" : parseTarget(current).status;
-      const rationale: StoredRationale = {
-        version: 1,
-        reasons: [...score.reasons],
-        missingEvidence: [...score.missingEvidence]
-      };
+      return withPipelinePersistenceBoundary("target", () => {
+        const person = database.people.get(score.personId);
+        if (person === undefined) {
+          throw new DomainError("NOT_FOUND", "Person was not found", { entity: "person" });
+        }
+        if (
+          person.companyId !== score.companyId
+          || database.companies.get(score.companyId) === undefined
+        ) {
+          throw validationError("score.companyId", "does_not_match_person");
+        }
+        const current = database.targets.getByPerson(score.personId);
+        const status = current === undefined ? "discovered" : parseTarget(current).status;
+        const rationale: StoredRationale = {
+          version: 1,
+          reasons: [...score.reasons],
+          missingEvidence: [...score.missingEvidence]
+        };
 
-      try {
         return parseTarget(database.targets.upsert({
           personId: score.personId,
           pmmOpportunity: score.pmmOpportunity,
@@ -295,9 +359,7 @@ export function createPipelineService(database: CareerDatabase) {
           status,
           rationale: JSON.stringify(rationale)
         }));
-      } catch (error) {
-        return mapPipelinePersistenceError(error, "target");
-      }
+      });
     },
 
     updateStatus(targetIdInput: string, statusInput: PipelineStatus): PipelineTarget {
@@ -305,47 +367,40 @@ export function createPipelineService(database: CareerDatabase) {
       if (!isPipelineStatus(statusInput)) {
         throw validationError("status", "unsupported_status");
       }
-      const currentRow = database.targets.get(targetId);
-      if (currentRow === undefined) {
-        throw new DomainError("NOT_FOUND", "Target was not found", { entity: "target" });
-      }
-      const current = parseTarget(currentRow);
-      if (current.status === statusInput) {
-        return current;
-      }
-      if (!PIPELINE_TRANSITIONS[current.status].includes(statusInput)) {
-        throw new DomainError(
-          "INVALID_TRANSITION",
-          "Pipeline status transition is not allowed",
-          { from: current.status, to: statusInput }
-        );
-      }
-      try {
+      return withPipelinePersistenceBoundary("target", () => {
+        const currentRow = database.targets.get(targetId);
+        if (currentRow === undefined) {
+          throw new DomainError("NOT_FOUND", "Target was not found", { entity: "target" });
+        }
+        const current = parseTarget(currentRow);
+        if (current.status === statusInput) {
+          return current;
+        }
+        if (!PIPELINE_TRANSITION_SETS[current.status].has(statusInput)) {
+          throw new DomainError(
+            "INVALID_TRANSITION",
+            "Pipeline status transition is not allowed",
+            { from: current.status, to: statusInput }
+          );
+        }
         const updated = database.targets.updateStatus(targetId, statusInput);
         if (updated === undefined) {
           throw new DomainError("NOT_FOUND", "Target was not found", { entity: "target" });
         }
         return parseTarget(updated);
-      } catch (error) {
-        if (error instanceof DomainError) {
-          throw error;
-        }
-        return mapPipelinePersistenceError(error, "target");
-      }
+      });
     },
 
     recordNote(targetIdInput: string, textInput: string): SavedTargetNote {
       const targetId = normalizedId("targetId", targetIdInput);
       const text = normalizedText("note.text", textInput, MAX_NOTE_LENGTH);
-      if (database.targets.get(targetId) === undefined) {
-        throw new DomainError("NOT_FOUND", "Target was not found", { entity: "target" });
-      }
-      try {
+      return withPipelinePersistenceBoundary("note", () => {
+        if (database.targets.get(targetId) === undefined) {
+          throw new DomainError("NOT_FOUND", "Target was not found", { entity: "target" });
+        }
         const note = database.notes.add({ targetId, text });
         return { ...note, updatedAt: note.createdAt };
-      } catch (error) {
-        return mapPipelinePersistenceError(error, "note");
-      }
+      });
     },
 
     listPipeline(filter: PipelineListFilter = {}): PipelineTarget[] {
@@ -370,13 +425,12 @@ export function createPipelineService(database: CareerDatabase) {
       }
       const name = normalizedText("shortlist.name", input.name, MAX_SHORTLIST_NAME_LENGTH);
       const entries = normalizeShortlistEntries(input);
-      for (const entry of entries) {
-        if (database.targets.get(entry.targetId) === undefined) {
-          throw new DomainError("NOT_FOUND", "Target was not found", { entity: "target" });
+      return withPipelinePersistenceBoundary("shortlist", () => {
+        for (const entry of entries) {
+          if (database.targets.get(entry.targetId) === undefined) {
+            throw new DomainError("NOT_FOUND", "Target was not found", { entity: "target" });
+          }
         }
-      }
-
-      try {
         const shortlist = database.shortlists.create({
           name,
           targetIds: entries.map((entry) => entry.targetId)
@@ -391,12 +445,7 @@ export function createPipelineService(database: CareerDatabase) {
           ...saved,
           entries: saved.entries.map((entry: ShortlistEntry) => ({ ...entry }))
         };
-      } catch (error) {
-        if (error instanceof DomainError) {
-          throw error;
-        }
-        return mapPipelinePersistenceError(error, "shortlist");
-      }
+      });
     }
   };
 }

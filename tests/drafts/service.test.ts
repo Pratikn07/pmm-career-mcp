@@ -3,6 +3,7 @@ import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { createDatabase } from "../../src/db/client.js";
 import {
   POST_CHECKSUM_CONTRACT,
+  POST_VISIBILITIES,
   computePostChecksum,
   createDraftService
 } from "../../src/drafts/service.js";
@@ -269,6 +270,35 @@ describe("post drafts", () => {
 
   it.each(["PUBLIC", "CONNECTIONS"] as const)("supports %s visibility", (visibility) => {
     expect(drafts.createPost({ text: "Visible", visibility }).visibility).toBe(visibility);
+  });
+
+  it("freezes exported visibilities and keeps validation independent from runtime mutation", () => {
+    const original = [...POST_VISIBILITIES];
+    const mutableVisibilities = POST_VISIBILITIES as unknown as string[];
+    let mutationThrew = false;
+    let validationError: DomainError | undefined;
+
+    try {
+      try {
+        mutableVisibilities.push("PRIVATE");
+      } catch (error) {
+        mutationThrew = error instanceof TypeError;
+      }
+      try {
+        drafts.createPost({ text: "Private", visibility: "PRIVATE" as never });
+      } catch (error) {
+        validationError = error as DomainError;
+      }
+    } finally {
+      if (!Object.isFrozen(POST_VISIBILITIES)) {
+        mutableVisibilities.splice(0, mutableVisibilities.length, ...original);
+      }
+    }
+
+    expect(Object.isFrozen(POST_VISIBILITIES)).toBe(true);
+    expect(mutationThrew).toBe(true);
+    expect(POST_VISIBILITIES).toEqual(original);
+    expect(validationError).toMatchObject({ code: "VALIDATION_ERROR" });
   });
 
   it("rejects unsupported visibility, blank text, media, extra fields, and oversized text", () => {

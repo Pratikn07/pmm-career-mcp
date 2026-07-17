@@ -4,9 +4,15 @@ import type { OutreachDraft, PostDraft } from "../db/repositories.js";
 import { DomainError, sqliteConstraintKind } from "../domain/errors.js";
 
 export const POST_CHECKSUM_CONTRACT = "pmm-career-mcp.post-draft.sha256.v1";
-export const POST_VISIBILITIES = ["PUBLIC", "CONNECTIONS"] as const;
+const POST_VISIBILITY_VALUES = ["PUBLIC", "CONNECTIONS"] as const;
 
-export type PostVisibility = typeof POST_VISIBILITIES[number];
+export type PostVisibility = typeof POST_VISIBILITY_VALUES[number];
+
+const POST_VISIBILITY_SET: ReadonlySet<string> = new Set(POST_VISIBILITY_VALUES);
+
+export const POST_VISIBILITIES: readonly PostVisibility[] = Object.freeze([
+  ...POST_VISIBILITY_VALUES
+]);
 
 const MAX_ID_LENGTH = 256;
 const MAX_PURPOSE_LENGTH = 100;
@@ -64,7 +70,7 @@ function normalizedPurpose(value: unknown): string {
 }
 
 function isPostVisibility(value: unknown): value is PostVisibility {
-  return typeof value === "string" && (POST_VISIBILITIES as readonly string[]).includes(value);
+  return typeof value === "string" && POST_VISIBILITY_SET.has(value);
 }
 
 function publicPostDraft(row: PostDraft): PostDraftVersion {
