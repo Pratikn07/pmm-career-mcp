@@ -86,6 +86,13 @@ describe("protected resource authentication", () => {
     })).toThrow(/credentials/);
   });
 
+  it("refuses a credentialed authorization server before metadata can expose it", () => {
+    expect(() => protectedResourceMetadata({
+      ...fixture.config,
+      oidcIssuer: "https://issuer-user:issuer-password@issuer.example"
+    })).toThrow(/credentials/);
+  });
+
   it("accepts a correctly signed, issuer-bound, audience-bound token for the configured subject", async () => {
     const app = express();
     app.use(createResourceAuth(fixture.config));

@@ -72,6 +72,13 @@ describe("loadConfig", () => {
     }
   });
 
+  it.each(["development", "test"] as const)("allows a local Supabase URL in %s", (nodeEnv) => {
+    expect(loadConfig({
+      NODE_ENV: nodeEnv,
+      SUPABASE_URL: "http://127.0.0.1:54321/"
+    }).supabaseUrl).toBe("http://127.0.0.1:54321");
+  });
+
   it("normalizes the canonical public URLs for OAuth configuration", () => {
     const config = loadConfig(productionConfig);
     expect(config.baseUrl).toBe("https://career.example");

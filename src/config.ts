@@ -39,10 +39,10 @@ function canonicalUrl(value: string, name: string): string {
   return url.toString().replace(/\/+$/, "");
 }
 
-function canonicalSupabaseUrl(value: string): string {
+function canonicalSupabaseUrl(value: string, requirePublicProjectOrigin: boolean): string {
   const canonical = canonicalUrl(value, "SUPABASE_URL");
   const url = new URL(canonical);
-  if (url.protocol !== "https:" || url.port !== "" || url.pathname !== "/" || !/^[a-z0-9-]+\.supabase\.co$/i.test(url.hostname)) {
+  if (requirePublicProjectOrigin && (url.protocol !== "https:" || url.port !== "" || url.pathname !== "/" || !/^[a-z0-9-]+\.supabase\.co$/i.test(url.hostname))) {
     throw new Error("SUPABASE_URL must be a Supabase project HTTPS origin");
   }
   return canonical;
@@ -85,7 +85,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
     if (new URL(baseUrl).protocol !== "https:") {
       throw new Error("BASE_URL must use HTTPS in production");
     }
-    const supabaseUrl = canonicalSupabaseUrl(required(parsed.SUPABASE_URL, "SUPABASE_URL"));
+    const supabaseUrl = canonicalSupabaseUrl(required(parsed.SUPABASE_URL, "SUPABASE_URL"), true);
     required(parsed.SUPABASE_PUBLISHABLE_KEY, "SUPABASE_PUBLISHABLE_KEY");
 
     const issuer = canonicalUrl(required(parsed.OIDC_ISSUER, "OIDC_ISSUER"), "OIDC_ISSUER");
@@ -109,7 +109,9 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
   }
 
   const baseUrl = canonicalUrl(parsed.BASE_URL, "BASE_URL");
-  const supabaseUrl = parsed.SUPABASE_URL === undefined ? undefined : canonicalSupabaseUrl(parsed.SUPABASE_URL);
+  const supabaseUrl = parsed.SUPABASE_URL === undefined
+    ? undefined
+    : canonicalSupabaseUrl(parsed.SUPABASE_URL, parsed.NODE_ENV === "production");
   const oidcIssuer = parsed.OIDC_ISSUER === undefined ? undefined : canonicalUrl(parsed.OIDC_ISSUER, "OIDC_ISSUER");
 
   return {

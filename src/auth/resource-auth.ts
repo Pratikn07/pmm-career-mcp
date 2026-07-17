@@ -28,6 +28,17 @@ function canonicalBaseUrl(baseUrl: string): string {
   return url.toString().replace(/\/+$/, "");
 }
 
+function canonicalAuthorizationServerUrl(issuer: string): string {
+  const url = new URL(issuer);
+  if (url.username !== "" || url.password !== "") {
+    throw new Error("OAuth authorization server URL must not include credentials");
+  }
+  if (url.search !== "" || url.hash !== "") {
+    throw new Error("OAuth authorization server URL must not include a query or fragment");
+  }
+  return url.toString().replace(/\/+$/, "");
+}
+
 function requireOAuthConfig(config: AppConfig): { issuer: string; audience: string; subject: string } {
   if (config.authMode !== "oauth") throw new Error("OAuth resource authentication is not enabled");
   if (config.oidcIssuer === undefined || config.oidcAudience === undefined || config.allowedSubject === undefined) {
@@ -37,7 +48,7 @@ function requireOAuthConfig(config: AppConfig): { issuer: string; audience: stri
   if (config.oidcAudience !== audience) {
     throw new Error("OAuth audience must equal the canonical protected resource URL");
   }
-  return { issuer: config.oidcIssuer, audience, subject: config.allowedSubject };
+  return { issuer: canonicalAuthorizationServerUrl(config.oidcIssuer), audience, subject: config.allowedSubject };
 }
 
 export function protectedResourceMetadata(config: AppConfig): OAuthProtectedResourceMetadata {
