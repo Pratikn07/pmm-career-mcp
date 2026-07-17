@@ -301,7 +301,7 @@ export function createPeopleDiscovery(
   }
 
   const discoverPublicPeople = async (companyId: string): Promise<DiscoveryResult> => {
-    const company = dependencies.repositories.companies.get(companyId);
+    const company = await dependencies.repositories.companies.get(companyId);
     if (company === undefined) {
       throw new Error(`Company ${companyId} was not found`);
     }
@@ -601,7 +601,7 @@ export function createPeopleDiscovery(
     const sortedPeople = Array.from(uniquePeople.values()).sort((left, right) => {
       return left.name.localeCompare(right.name, "en") || left.role.localeCompare(right.role, "en");
     });
-    const refreshedRows = dependencies.repositories.people.refreshDiscovery({
+    const refreshedRows = await dependencies.repositories.people.refreshDiscovery({
       companyId,
       replaceMissingDiscovery: refreshCoverageComplete && authoritativeRecognized,
       people: sortedPeople.map((person) => ({

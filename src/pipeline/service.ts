@@ -261,12 +261,12 @@ function mapPipelinePersistenceError(error: unknown, operation: "target" | "note
   });
 }
 
-function withPipelinePersistenceBoundary<T>(
+async function withPipelinePersistenceBoundary<T>(
   operation: "target" | "note" | "shortlist",
-  action: () => T
-): T {
+  action: () => Promise<T>
+): Promise<T> {
   try {
-    return action();
+    return await action();
   } catch (error) {
     if (error instanceof DomainError) {
       throw error;
@@ -328,20 +328,20 @@ export type PipelineService = ReturnType<typeof createPipelineService>;
 
 export function createPipelineService(database: CareerDatabase) {
   return {
-    saveTarget(input: TargetScore): PipelineTarget {
+    async saveTarget(input: TargetScore): Promise<PipelineTarget> {
       const score = normalizeScore(input);
-      return withPipelinePersistenceBoundary("target", () => {
-        const person = database.people.get(score.personId);
+      return await withPipelinePersistenceBoundary("target", async () => {
+        const person = await database.people.get(score.personId);
         if (person === undefined) {
           throw new DomainError("NOT_FOUND", "Person was not found", { entity: "person" });
         }
         if (
           person.companyId !== score.companyId
-          || database.companies.get(score.companyId) === undefined
+          || (await database.companies.get(score.companyId)) === undefined
         ) {
           throw validationError("score.companyId", "does_not_match_person");
         }
-        const current = database.targets.getByPerson(score.personId);
+        const current = await database.targets.getByPerson(score.personId);
         const status = current === undefined ? "discovered" : parseTarget(current).status;
         const rationale: StoredRationale = {
           version: 1,
@@ -349,7 +349,7 @@ export function createPipelineService(database: CareerDatabase) {
           missingEvidence: [...score.missingEvidence]
         };
 
-        return parseTarget(database.targets.upsert({
+        return parseTarget(await database.targets.upsert({
           personId: score.personId,
           pmmOpportunity: score.pmmOpportunity,
           referralPotential: score.referralPotential,
@@ -362,13 +362,16 @@ export function createPipelineService(database: CareerDatabase) {
       });
     },
 
-    updateStatus(targetIdInput: string, statusInput: PipelineStatus): PipelineTarget {
+    async updateStatus(
+      targetIdInput: string,
+      statusInput: PipelineStatus
+    ): Promise<PipelineTarget> {
       const targetId = normalizedId("targetId", targetIdInput);
       if (!isPipelineStatus(statusInput)) {
         throw validationError("status", "unsupported_status");
       }
-      return withPipelinePersistenceBoundary("target", () => {
-        const currentRow = database.targets.get(targetId);
+      return await withPipelinePersistenceBoundary("target", async () => {
+        const currentRow = await database.targets.get(targetId);
         if (currentRow === undefined) {
           throw new DomainError("NOT_FOUND", "Target was not found", { entity: "target" });
         }
@@ -383,7 +386,7 @@ export function createPipelineService(database: CareerDatabase) {
             { from: current.status, to: statusInput }
           );
         }
-        const updated = database.targets.updateStatus(targetId, statusInput);
+        const updated = await database.targets.updateStatus(targetId, statusInput);
         if (updated === undefined) {
           throw new DomainError("NOT_FOUND", "Target was not found", { entity: "target" });
         }
@@ -391,19 +394,19 @@ export function createPipelineService(database: CareerDatabase) {
       });
     },
 
-    recordNote(targetIdInput: string, textInput: string): SavedTargetNote {
+    async recordNote(targetIdInput: string, textInput: string): Promise<SavedTargetNote> {
       const targetId = normalizedId("targetId", targetIdInput);
       const text = normalizedText("note.text", textInput, MAX_NOTE_LENGTH);
-      return withPipelinePersistenceBoundary("note", () => {
-        if (database.targets.get(targetId) === undefined) {
+      return await withPipelinePersistenceBoundary("note", async () => {
+        if (await database.targets.get(targetId) === undefined) {
           throw new DomainError("NOT_FOUND", "Target was not found", { entity: "target" });
         }
-        const note = database.notes.add({ targetId, text });
+        const note = await database.notes.add({ targetId, text });
         return { ...note, updatedAt: note.createdAt };
       });
     },
 
-    listPipeline(filter: PipelineListFilter = {}): PipelineTarget[] {
+    async listPipeline(filter: PipelineListFilter = {}): Promise<PipelineTarget[]> {
       if (typeof filter !== "object" || filter === null || Array.isArray(filter)) {
         throw validationError("filter", "must_be_object");
       }
@@ -413,29 +416,31 @@ export function createPipelineService(database: CareerDatabase) {
       if (filter.status !== undefined && !isPipelineStatus(filter.status)) {
         throw validationError("filter.status", "unsupported_status");
       }
-      return database.targets.list({
-        ...(companyId === undefined ? {} : { companyId }),
-        ...(filter.status === undefined ? {} : { status: filter.status })
-      }).map(parseTarget);
+      return await withPipelinePersistenceBoundary("target", async () => (
+        (await database.targets.list({
+          ...(companyId === undefined ? {} : { companyId }),
+          ...(filter.status === undefined ? {} : { status: filter.status })
+        })).map(parseTarget)
+      ));
     },
 
-    createShortlist(input: CreateShortlistInput): ShortlistWithEntries {
+    async createShortlist(input: CreateShortlistInput): Promise<ShortlistWithEntries> {
       if (typeof input !== "object" || input === null) {
         throw validationError("shortlist", "must_be_object");
       }
       const name = normalizedText("shortlist.name", input.name, MAX_SHORTLIST_NAME_LENGTH);
       const entries = normalizeShortlistEntries(input);
-      return withPipelinePersistenceBoundary("shortlist", () => {
+      return await withPipelinePersistenceBoundary("shortlist", async () => {
         for (const entry of entries) {
-          if (database.targets.get(entry.targetId) === undefined) {
+          if (await database.targets.get(entry.targetId) === undefined) {
             throw new DomainError("NOT_FOUND", "Target was not found", { entity: "target" });
           }
         }
-        const shortlist = database.shortlists.create({
+        const shortlist = await database.shortlists.create({
           name,
           targetIds: entries.map((entry) => entry.targetId)
         });
-        const saved = database.shortlists.getWithEntries(shortlist.id);
+        const saved = await database.shortlists.getWithEntries(shortlist.id);
         if (saved === undefined) {
           throw new DomainError("DATA_INTEGRITY", "Saved shortlist could not be loaded", {
             entity: "shortlist"

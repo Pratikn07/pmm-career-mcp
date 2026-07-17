@@ -5,23 +5,23 @@ import { encryptJson } from "../../src/security/crypto.js";
 import { createLinkedInPostsClient } from "../../src/linkedin/posts-client.js";
 
 const KEY = "b".repeat(64);
-const db = createDatabase(":memory:");
+const db = (await createDatabase(":memory:"));
 
-afterEach(() => {
-  db.resetForTests();
+afterEach(async () => {
+  (await db.resetForTests());
   nock.cleanAll();
 });
-afterAll(() => db.close());
+afterAll(async () => (await db.close()));
 
-function client(fetch?: typeof globalThis.fetch) {
-  db.oauthTokens.upsert({
+async function client(fetch?: typeof globalThis.fetch) {
+  (await db.oauthTokens.upsert({
     provider: "linkedin",
     ciphertext: JSON.stringify(encryptJson({
       accessToken: "access-token-that-must-not-leak",
       authorUrn: "urn:li:person:person-123"
     }, KEY)),
     expiresAt: "2030-07-17T13:00:00.000Z"
-  });
+  }));
   return createLinkedInPostsClient(db, {
     tokenEncryptionKey: KEY,
     linkedinVersion: "202607",
@@ -50,7 +50,7 @@ describe("versioned LinkedIn Posts API client", () => {
       .matchHeader("x-restli-protocol-version", "2.0.0")
       .reply(201, undefined, { "x-restli-id": "urn:li:share:123" });
 
-    await expect(client().createTextPost({
+    await expect((await client()).createTextPost({
       text: "A safe text-only post",
       visibility: "CONNECTIONS"
     })).resolves.toEqual({ status: 201, postUrn: "urn:li:share:123" });
@@ -62,7 +62,7 @@ describe("versioned LinkedIn Posts API client", () => {
       .post("/rest/posts")
       .reply(201);
 
-    await expect(client().createTextPost({ text: "No ID", visibility: "PUBLIC" })).resolves.toEqual({
+    await expect((await client()).createTextPost({ text: "No ID", visibility: "PUBLIC" })).resolves.toEqual({
       status: 201
     });
     expect(scope.isDone()).toBe(true);
@@ -74,7 +74,7 @@ describe("versioned LinkedIn Posts API client", () => {
       .once()
       .reply(503, { error: "temporary" });
 
-    await expect(client().createTextPost({ text: "One request", visibility: "PUBLIC" })).resolves.toEqual({
+    await expect((await client()).createTextPost({ text: "One request", visibility: "PUBLIC" })).resolves.toEqual({
       status: 503
     });
     expect(scope.isDone()).toBe(true);
@@ -86,7 +86,7 @@ describe("versioned LinkedIn Posts API client", () => {
       throw new Error(`timeout ${privateValue}`);
     };
 
-    await expect(client(fetch).createTextPost({ text: "Timeout", visibility: "PUBLIC" })).resolves.toEqual({
+    await expect((await client(fetch)).createTextPost({ text: "Timeout", visibility: "PUBLIC" })).resolves.toEqual({
       status: 0
     });
   });

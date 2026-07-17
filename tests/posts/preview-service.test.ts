@@ -11,17 +11,17 @@ import {
   type PreviewResult
 } from "../../src/posts/preview-service.js";
 
-const db = createDatabase(":memory:");
+const db = (await createDatabase(":memory:"));
 const drafts = createDraftService(db);
 let nowMs = Date.parse("2026-07-16T12:00:00.000Z");
 const clock = () => new Date(nowMs);
 const previews = createPreviewService(db, { clock });
 
-afterEach(() => {
-  db.resetForTests();
+afterEach(async () => {
+  (await db.resetForTests());
   nowMs = Date.parse("2026-07-16T12:00:00.000Z");
 });
-afterAll(() => db.close());
+afterAll(async () => (await db.close()));
 
 function expectedFor(preview: PreviewResult): PreviewExpected {
   return {
@@ -33,9 +33,13 @@ function expectedFor(preview: PreviewResult): PreviewExpected {
   };
 }
 
-function expectDomainError(action: () => unknown, code: string, token?: string): DomainError {
+async function expectDomainError(
+  action: () => Promise<unknown>,
+  code: string,
+  token?: string
+): Promise<DomainError> {
   try {
-    action();
+    await action();
   } catch (error) {
     expect(error).toBeInstanceOf(DomainError);
     expect(error).toMatchObject({ code });
@@ -51,13 +55,13 @@ function expectDomainError(action: () => unknown, code: string, token?: string):
 }
 
 describe("post previews", () => {
-  it("returns the exact latest saved version and stores only a domain-separated token hash", () => {
-    const post = drafts.createPost({
+  it("returns the exact latest saved version and stores only a domain-separated token hash", async () => {
+    const post = (await drafts.createPost({
       text: "Café\r\n🙂 exact  spacing",
       visibility: "PUBLIC"
-    });
+    }));
 
-    const preview = previews.create(post.id, post.version);
+    const preview = (await previews.create(post.id, post.version));
 
     expect(preview).toEqual({
       postId: post.id,
@@ -75,7 +79,7 @@ describe("post previews", () => {
       .update("\0", "utf8")
       .update(Buffer.from(preview.previewToken, "base64url"))
       .digest("hex");
-    const rows = db.previews.listForPostDraft(post.versionId);
+    const rows = (await db.previews.listForPostDraft(post.versionId));
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({
       postDraftId: post.versionId,
@@ -88,12 +92,12 @@ describe("post previews", () => {
     expect(JSON.stringify(rows[0])).not.toContain(preview.previewToken);
   });
 
-  it("generates unique high-entropy 32-byte base64url tokens by default", () => {
-    const post = drafts.createPost({ text: "Entropy", visibility: "CONNECTIONS" });
+  it("generates unique high-entropy 32-byte base64url tokens by default", async () => {
+    const post = (await drafts.createPost({ text: "Entropy", visibility: "CONNECTIONS" }));
 
-    const tokens = Array.from({ length: 64 }, () => (
-      previews.create(post.id, post.version).previewToken
-    ));
+    const tokens = await Promise.all(Array.from({ length: 64 }, async () => (
+      (await previews.create(post.id, post.version)).previewToken
+    )));
 
     expect(new Set(tokens).size).toBe(64);
     for (const token of tokens) {
@@ -102,8 +106,8 @@ describe("post previews", () => {
     }
   });
 
-  it("uses the injected random-byte provider and rejects invalid provider output safely", () => {
-    const post = drafts.createPost({ text: "Injected entropy", visibility: "PUBLIC" });
+  it("uses the injected random-byte provider and rejects invalid provider output safely", async () => {
+    const post = (await drafts.createPost({ text: "Injected entropy", visibility: "PUBLIC" }));
     const requestedSizes: number[] = [];
     const deterministic = createPreviewService(db, {
       clock,
@@ -113,7 +117,7 @@ describe("post previews", () => {
       }
     });
 
-    const preview = deterministic.create(post.id, post.version);
+    const preview = (await deterministic.create(post.id, post.version));
 
     expect(requestedSizes).toEqual([32]);
     expect(Buffer.from(preview.previewToken, "base64url")).toEqual(Buffer.alloc(32, 0xa5));
@@ -122,20 +126,20 @@ describe("post previews", () => {
       clock,
       randomBytes: () => Buffer.alloc(31)
     });
-    expectDomainError(
-      () => invalidProvider.create(post.id, post.version),
+    (await expectDomainError(
+      async () => (await invalidProvider.create(post.id, post.version)),
       "DATA_INTEGRITY"
-    );
+    ));
   });
 
-  it("requires the requested version to exist and still be the current latest version", () => {
-    const first = drafts.createPost({ text: "First", visibility: "PUBLIC" });
-    const second = drafts.revisePost(first.id, "Second");
+  it("requires the requested version to exist and still be the current latest version", async () => {
+    const first = (await drafts.createPost({ text: "First", visibility: "PUBLIC" }));
+    const second = (await drafts.revisePost(first.id, "Second"));
 
-    expectDomainError(() => previews.create("missing-post", 1), "NOT_FOUND");
-    expectDomainError(() => previews.create(first.id, 999), "NOT_FOUND");
-    expectDomainError(() => previews.create(first.id, first.version), "PREVIEW_STALE");
-    expect(previews.create(second.id, second.version)).toMatchObject({
+    (await expectDomainError(async () => (await previews.create("missing-post", 1)), "NOT_FOUND"));
+    (await expectDomainError(async () => (await previews.create(first.id, 999)), "NOT_FOUND"));
+    (await expectDomainError(async () => (await previews.create(first.id, first.version)), "PREVIEW_STALE"));
+    expect((await previews.create(second.id, second.version))).toMatchObject({
       postId: second.id,
       versionId: second.versionId,
       text: second.text,
@@ -143,43 +147,43 @@ describe("post previews", () => {
     });
   });
 
-  it("consumes once atomically and rejects replay without exposing the token", () => {
-    const post = drafts.createPost({ text: "One use", visibility: "PUBLIC" });
-    const preview = previews.create(post.id, post.version);
+  it("consumes once atomically and rejects replay without exposing the token", async () => {
+    const post = (await drafts.createPost({ text: "One use", visibility: "PUBLIC" }));
+    const preview = (await previews.create(post.id, post.version));
 
-    expect(previews.consume(preview.previewToken, expectedFor(preview))).toBeUndefined();
-    expect(db.previews.listForPostDraft(post.versionId)[0]?.consumedAt).toBe(
+    expect((await previews.consume(preview.previewToken, expectedFor(preview)))).toBeUndefined();
+    expect((await db.previews.listForPostDraft(post.versionId))[0]?.consumedAt).toBe(
       "2026-07-16T12:00:00.000Z"
     );
 
-    const replay = expectDomainError(
-      () => previews.consume(preview.previewToken, expectedFor(preview)),
+    const replay = (await expectDomainError(
+      async () => (await previews.consume(preview.previewToken, expectedFor(preview))),
       "PREVIEW_CONSUMED",
       preview.previewToken
-    );
+    ));
     expect(replay.message).toBe("Preview token has already been used");
   });
 
-  it("uses a 15-minute lifetime and treats the exact expiry instant as expired", () => {
-    const post = drafts.createPost({ text: "Boundary", visibility: "PUBLIC" });
-    const beforeBoundary = previews.create(post.id, post.version);
-    const atBoundary = previews.create(post.id, post.version);
+  it("uses a 15-minute lifetime and treats the exact expiry instant as expired", async () => {
+    const post = (await drafts.createPost({ text: "Boundary", visibility: "PUBLIC" }));
+    const beforeBoundary = (await previews.create(post.id, post.version));
+    const atBoundary = (await previews.create(post.id, post.version));
 
     nowMs += 15 * 60 * 1_000 - 1;
-    expect(previews.consume(beforeBoundary.previewToken, expectedFor(beforeBoundary))).toBeUndefined();
+    expect((await previews.consume(beforeBoundary.previewToken, expectedFor(beforeBoundary)))).toBeUndefined();
 
     nowMs += 1;
-    expectDomainError(
-      () => previews.consume(atBoundary.previewToken, expectedFor(atBoundary)),
+    (await expectDomainError(
+      async () => (await previews.consume(atBoundary.previewToken, expectedFor(atBoundary))),
       "PREVIEW_EXPIRED",
       atBoundary.previewToken
-    );
-    expect(db.previews.listForPostDraft(post.versionId)[1]?.consumedAt).toBeNull();
+    ));
+    expect((await db.previews.listForPostDraft(post.versionId))[1]?.consumedAt).toBeNull();
   });
 
-  it("rejects malformed and empty tokens before persistence lookup", () => {
-    const post = drafts.createPost({ text: "Malformed", visibility: "PUBLIC" });
-    const preview = previews.create(post.id, post.version);
+  it("rejects malformed and empty tokens before persistence lookup", async () => {
+    const post = (await drafts.createPost({ text: "Malformed", visibility: "PUBLIC" }));
+    const preview = (await previews.create(post.id, post.version));
     const malformed = [
       "",
       "   ",
@@ -190,20 +194,20 @@ describe("post previews", () => {
     ];
 
     for (const token of malformed) {
-      expectDomainError(
-        () => previews.consume(token, expectedFor(preview)),
+      (await expectDomainError(
+        async () => (await previews.consume(token, expectedFor(preview))),
         "PREVIEW_INVALID",
         token
-      );
+      ));
     }
-    expect(db.previews.listForPostDraft(post.versionId)[0]?.consumedAt).toBeNull();
+    expect((await db.previews.listForPostDraft(post.versionId))[0]?.consumedAt).toBeNull();
   });
 
-  it("rejects cross-draft, version-row, version, checksum, and visibility substitution atomically", () => {
-    const firstPost = drafts.createPost({ text: "First", visibility: "PUBLIC" });
-    const secondPost = drafts.createPost({ text: "Second", visibility: "CONNECTIONS" });
-    const first = previews.create(firstPost.id, firstPost.version);
-    const second = previews.create(secondPost.id, secondPost.version);
+  it("rejects cross-draft, version-row, version, checksum, and visibility substitution atomically", async () => {
+    const firstPost = (await drafts.createPost({ text: "First", visibility: "PUBLIC" }));
+    const secondPost = (await drafts.createPost({ text: "Second", visibility: "CONNECTIONS" }));
+    const first = (await previews.create(firstPost.id, firstPost.version));
+    const second = (await previews.create(secondPost.id, secondPost.version));
     const substitutions: PreviewExpected[] = [
       { ...expectedFor(first), postId: second.postId },
       { ...expectedFor(first), versionId: second.versionId },
@@ -213,50 +217,50 @@ describe("post previews", () => {
     ];
 
     for (const expected of substitutions) {
-      expectDomainError(
-        () => previews.consume(first.previewToken, expected),
+      (await expectDomainError(
+        async () => (await previews.consume(first.previewToken, expected)),
         "PREVIEW_MISMATCH",
         first.previewToken
-      );
-      expect(db.previews.listForPostDraft(first.versionId)[0]?.consumedAt).toBeNull();
+      ));
+      expect((await db.previews.listForPostDraft(first.versionId))[0]?.consumedAt).toBeNull();
     }
 
-    expect(previews.consume(first.previewToken, expectedFor(first))).toBeUndefined();
+    expect((await previews.consume(first.previewToken, expectedFor(first)))).toBeUndefined();
   });
 
-  it("rejects a revision made after preview without consuming the stale authorization", () => {
-    const first = drafts.createPost({ text: "First", visibility: "PUBLIC" });
-    const preview = previews.create(first.id, first.version);
-    drafts.revisePost(first.id, "Revised after preview");
+  it("rejects a revision made after preview without consuming the stale authorization", async () => {
+    const first = (await drafts.createPost({ text: "First", visibility: "PUBLIC" }));
+    const preview = (await previews.create(first.id, first.version));
+    (await drafts.revisePost(first.id, "Revised after preview"));
 
-    expectDomainError(
-      () => previews.consume(preview.previewToken, expectedFor(preview)),
+    (await expectDomainError(
+      async () => (await previews.consume(preview.previewToken, expectedFor(preview))),
       "PREVIEW_STALE",
       preview.previewToken
-    );
-    expect(db.previews.listForPostDraft(first.versionId)[0]?.consumedAt).toBeNull();
+    ));
+    expect((await db.previews.listForPostDraft(first.versionId))[0]?.consumedAt).toBeNull();
   });
 
-  it("maps a competing repository consumption to a typed replay error", () => {
-    const post = drafts.createPost({ text: "Race", visibility: "PUBLIC" });
-    const preview = previews.create(post.id, post.version);
+  it("maps a competing repository consumption to a typed replay error", async () => {
+    const post = (await drafts.createPost({ text: "Race", visibility: "PUBLIC" }));
+    const preview = (await previews.create(post.id, post.version));
     const tokenHash = createHash("sha256")
       .update(PREVIEW_TOKEN_HASH_CONTEXT, "utf8")
       .update("\0", "utf8")
       .update(Buffer.from(preview.previewToken, "base64url"))
       .digest("hex");
-    db.previews.consume(tokenHash, "2026-07-16T12:00:00.000Z");
+    (await db.previews.consume(tokenHash, "2026-07-16T12:00:00.000Z"));
 
-    expectDomainError(
-      () => previews.consume(preview.previewToken, expectedFor(preview)),
+    (await expectDomainError(
+      async () => (await previews.consume(preview.previewToken, expectedFor(preview))),
       "PREVIEW_CONSUMED",
       preview.previewToken
-    );
+    ));
   });
 
-  it("validates expected metadata and never includes user values in errors", () => {
-    const post = drafts.createPost({ text: "Metadata", visibility: "PUBLIC" });
-    const preview = previews.create(post.id, post.version);
+  it("validates expected metadata and never includes user values in errors", async () => {
+    const post = (await drafts.createPost({ text: "Metadata", visibility: "PUBLIC" }));
+    const preview = (await previews.create(post.id, post.version));
     const privateId = "private-id-that-must-not-leak".repeat(20);
     const invalidInputs: unknown[] = [
       null,
@@ -270,11 +274,11 @@ describe("post previews", () => {
     ];
 
     for (const expected of invalidInputs) {
-      const error = expectDomainError(
-        () => previews.consume(preview.previewToken, expected as PreviewExpected),
+      const error = (await expectDomainError(
+        async () => (await previews.consume(preview.previewToken, expected as PreviewExpected)),
         "VALIDATION_ERROR",
         preview.previewToken
-      );
+      ));
       expect(JSON.stringify(error)).not.toContain(privateId);
     }
   });

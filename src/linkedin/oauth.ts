@@ -173,7 +173,7 @@ export function createLinkedInOAuth(database: CareerDatabase, dependencies: Link
     const refreshToken = nonEmptyString(token.refresh_token) ? token.refresh_token : undefined;
     const expiresAt = new Date(currentTime(clock) + expiresIn * 1_000).toISOString();
     try {
-      database.oauthTokens.upsert({
+      await database.oauthTokens.upsert({
         provider: "linkedin",
         ciphertext: JSON.stringify(encryptJson({
           accessToken: token.access_token,

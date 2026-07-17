@@ -182,7 +182,7 @@ export function createPreviewService(
   const randomBytes = dependencies.randomBytes ?? secureRandomBytes;
 
   return {
-    create(postIdInput: string, versionInput: number): PreviewResult {
+    async create(postIdInput: string, versionInput: number): Promise<PreviewResult> {
       const postId = validId("preview.postId", postIdInput);
       if (!Number.isSafeInteger(versionInput) || versionInput < 1) {
         throw validationError("preview.version", "must_be_positive_integer");
@@ -206,7 +206,7 @@ export function createPreviewService(
       const expiresAt = new Date(now.getTime() + TOKEN_LIFETIME_MS).toISOString();
 
       try {
-        const result = database.previews.createForLatest({
+        const result = await database.previews.createForLatest({
           draftId: postId,
           version: versionInput,
           tokenHash,
@@ -254,12 +254,12 @@ export function createPreviewService(
       }
     },
 
-    consume(tokenInput: string, expectedInput: PreviewExpected): void {
+    async consume(tokenInput: string, expectedInput: PreviewExpected): Promise<void> {
       const tokenHash = hashPreviewToken(tokenInput);
       const expected = parseExpected(expectedInput);
       const consumedAt = canonicalNow(clock).toISOString();
       try {
-        const result = database.previews.consumeExact({
+        const result = await database.previews.consumeExact({
           tokenHash,
           consumedAt,
           expected,
@@ -273,12 +273,15 @@ export function createPreviewService(
       }
     },
 
-    consumeForPublish(tokenInput: string, expectedInput: PreviewExpected): PreviewPublishClaim {
+    async consumeForPublish(
+      tokenInput: string,
+      expectedInput: PreviewExpected
+    ): Promise<PreviewPublishClaim> {
       const tokenHash = hashPreviewToken(tokenInput);
       const expected = parseExpected(expectedInput);
       const consumedAt = canonicalNow(clock).toISOString();
       try {
-        const result = database.previews.consumeExact({
+        const result = await database.previews.consumeExact({
           tokenHash,
           consumedAt,
           expected,

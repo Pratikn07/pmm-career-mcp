@@ -6,14 +6,14 @@ import { DomainError } from "../../src/domain/errors.js";
 import { createLinkedInOAuth } from "../../src/linkedin/oauth.js";
 
 const KEY = "a".repeat(64);
-const db = createDatabase(":memory:");
+const db = (await createDatabase(":memory:"));
 let now = Date.parse("2026-07-17T12:00:00.000Z");
 
-afterEach(() => {
-  db.resetForTests();
+afterEach(async () => {
+  (await db.resetForTests());
   now = Date.parse("2026-07-17T12:00:00.000Z");
 });
-afterAll(() => db.close());
+afterAll(async () => (await db.close()));
 
 function fakeRandomBytes(size: number): Buffer {
   return Buffer.alloc(size, 7);
@@ -84,7 +84,7 @@ describe("LinkedIn OAuth", () => {
       code_verifier: Buffer.alloc(32, 7).toString("base64url")
     });
 
-    const stored = db.oauthTokens.getByProvider("linkedin")!;
+    const stored = (await db.oauthTokens.getByProvider("linkedin"))!;
     expect(JSON.stringify(stored)).not.toContain("access-token-that-must-not-leak");
     expect(JSON.stringify(stored)).not.toContain("refresh-token-that-must-not-leak");
     expect(decryptJson(JSON.parse(stored.ciphertext), KEY)).toEqual({
@@ -148,6 +148,6 @@ describe("LinkedIn OAuth", () => {
     await expect(service.exchangeCallback({ code: "authorization-code", state })).rejects.toMatchObject({
       code: "OAUTH_PROVIDER_ERROR"
     });
-    expect(db.oauthTokens.getByProvider("linkedin")).toBeUndefined();
+    expect((await db.oauthTokens.getByProvider("linkedin"))).toBeUndefined();
   });
 });

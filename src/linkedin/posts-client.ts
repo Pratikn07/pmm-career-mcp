@@ -46,8 +46,16 @@ function parseEnvelope(value: string): EncryptedEnvelope {
   }
 }
 
-function loadCredential(database: CareerDatabase, encryptionKey: string): StoredLinkedInCredential {
-  const stored = database.oauthTokens.getByProvider("linkedin");
+async function loadCredential(
+  database: CareerDatabase,
+  encryptionKey: string
+): Promise<StoredLinkedInCredential> {
+  let stored;
+  try {
+    stored = await database.oauthTokens.getByProvider("linkedin");
+  } catch {
+    throw credentialError();
+  }
   if (stored === undefined) {
     throw credentialError();
   }
@@ -83,7 +91,7 @@ export function createLinkedInPostsClient(
     ) {
       throw new DomainError("VALIDATION_ERROR", "LinkedIn post input is invalid");
     }
-    const credential = loadCredential(database, dependencies.tokenEncryptionKey);
+    const credential = await loadCredential(database, dependencies.tokenEncryptionKey);
     let response: Response;
     try {
       response = await fetch(POSTS_ENDPOINT, {

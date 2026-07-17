@@ -8,12 +8,12 @@ function dependencies(): CareerMcpDependencies {
     ycProvider: { searchYcCompanies: async () => [] },
     peopleDiscovery: { discoverPublicPeople: async () => ({ people: [], evidence: [], checkedAt: "2026-07-17T00:00:00.000Z", coverage: "authoritative-pages-only", warnings: [] }) },
     jobDiscovery: { findPmmOpportunities: async () => ({ opportunities: [], checkedAt: "2026-07-17T00:00:00.000Z", warnings: [] }) },
-    pipeline: { saveTarget: () => { throw new Error("not called"); }, updateStatus: () => { throw new Error("not called"); }, recordNote: () => { throw new Error("not called"); }, listPipeline: () => [], createShortlist: () => { throw new Error("not called"); } },
-    drafts: { createOutreach: () => { throw new Error("not called"); }, createPost: () => { throw new Error("not called"); }, revisePost: () => { throw new Error("not called"); }, getPostHistory: () => [] },
+    pipeline: { saveTarget: async () => { throw new Error("not called"); }, updateStatus: async () => { throw new Error("not called"); }, recordNote: async () => { throw new Error("not called"); }, listPipeline: async () => [], createShortlist: async () => { throw new Error("not called"); } },
+    drafts: { createOutreach: async () => { throw new Error("not called"); }, createPost: async () => { throw new Error("not called"); }, revisePost: async () => { throw new Error("not called"); }, getPostHistory: async () => [] },
     previews: { create: () => { throw new Error("not called"); } },
     publish: { publish: async () => ({ state: "publish_failed" as const }) },
     linkedin: { createAuthorizationUrl: () => "https://www.linkedin.com/oauth/v2/authorization" },
-    getLinkedInConnectionStatus: () => ({ connected: false, valid: false, publishingEnabled: false })
+    getLinkedInConnectionStatus: async () => ({ connected: false, valid: false, publishingEnabled: false })
   };
 }
 

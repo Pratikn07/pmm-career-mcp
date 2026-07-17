@@ -67,18 +67,18 @@ function publishInput(preview: Record<string, unknown>) {
 }
 
 async function startStack(publishEnabled: boolean): Promise<TestStack> {
-  const database = createDatabase(":memory:");
+  const database = (await createDatabase(":memory:"));
   if (publishEnabled) {
-    database.oauthTokens.upsert({
+    (await database.oauthTokens.upsert({
       provider: "linkedin",
       ciphertext: JSON.stringify(encryptJson({
         accessToken: "e2e-access-token",
         authorUrn: "urn:li:person:e2e-author"
       }, "a".repeat(64))),
       expiresAt: "2030-07-17T13:00:00.000Z"
-    });
+    }));
   }
-  const runtime = createCareerApplication({
+  const runtime = (await createCareerApplication({
     database,
     config: {
       nodeEnv: "test",
@@ -94,7 +94,7 @@ async function startStack(publishEnabled: boolean): Promise<TestStack> {
     fetchPage: async (url) => mockedCompanyPage(url),
     resolveAddresses: async () => ["2606:4700:4700::1111"],
     now: () => new Date(E2E_NOW)
-  });
+  }));
   const server = runtime.app.listen(0);
   await new Promise<void>((resolve) => server.once("listening", resolve));
   const address = server.address();
@@ -109,7 +109,7 @@ async function startStack(publishEnabled: boolean): Promise<TestStack> {
     async close() {
       await client.close();
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
-      database.close();
+      (await database.close());
     }
   };
   stacks.push(stack);

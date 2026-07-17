@@ -344,7 +344,7 @@ export function createJobDiscovery(dependencies: JobDiscoveryDependencies): JobD
     const checkedTimes: string[] = [];
 
     for (const companyId of Array.from(new Set(companyIds)).sort()) {
-      const company = dependencies.repositories.companies.get(companyId);
+      const company = await dependencies.repositories.companies.get(companyId);
       if (company === undefined) {
         warnings.push({ sourceUrl: `company:${companyId}`, message: "Company was not found" });
         continue;

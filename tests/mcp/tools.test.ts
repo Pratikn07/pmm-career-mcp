@@ -6,6 +6,16 @@ import { createCareerMcpServer, type CareerMcpDependencies } from "../../src/mcp
 import { createHttpApp } from "../../src/http/app.js";
 import request from "supertest";
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 const expectedTools = [
   "search_yc_companies",
   "discover_public_people",
@@ -40,19 +50,19 @@ function dependencies(): CareerMcpDependencies {
       saveTarget: () => { throw new Error("not called"); },
       updateStatus: () => { throw new Error("not called"); },
       recordNote: () => { throw new Error("not called"); },
-      listPipeline: () => [],
+      listPipeline: async () => [],
       createShortlist: () => { throw new Error("not called"); }
     },
     drafts: {
       createOutreach: () => { throw new Error("not called"); },
       createPost: () => { throw new Error("not called"); },
       revisePost: () => { throw new Error("not called"); },
-      getPostHistory: () => []
+      getPostHistory: async () => []
     },
     previews: { create: () => { throw new Error("not called"); } },
     publish: { publish: async () => ({ state: "publish_failed" as const }) },
     linkedin: { createAuthorizationUrl: () => "https://www.linkedin.com/oauth/v2/authorization" },
-    getLinkedInConnectionStatus: () => ({ connected: false, valid: false, publishingEnabled: false })
+    getLinkedInConnectionStatus: async () => ({ connected: false, valid: false, publishingEnabled: false })
   };
 }
 
@@ -136,6 +146,58 @@ it("returns a safe tool error without exposing an implementation message", async
   await Promise.all([client.close(), server.close()]);
   expect(result.isError).toBe(true);
   expect(JSON.stringify(result)).not.toContain("not called");
+});
+
+it("waits for a database-backed service promise before returning a tool result", async () => {
+  const post = deferred<{ id: string }>();
+  const started = deferred<void>();
+  const asyncDependencies = dependencies();
+  asyncDependencies.drafts.createPost = (() => {
+    started.resolve();
+    return post.promise;
+  }) as unknown as CareerMcpDependencies["drafts"]["createPost"];
+  const server = createCareerMcpServer(asyncDependencies);
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "test", version: "1.0.0" });
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+
+  let settled = false;
+  const resultPromise = client.callTool({
+    name: "draft_linkedin_post",
+    arguments: { text: "An asynchronously saved post", visibility: "PUBLIC" }
+  }).then((result) => {
+    settled = true;
+    return result;
+  });
+  await started.promise;
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  expect(settled).toBe(false);
+
+  post.resolve({ id: "saved-post" });
+  const result = await resultPromise;
+  await Promise.all([client.close(), server.close()]);
+  expect(result.structuredContent).toMatchObject({ data: { post: { id: "saved-post" } } });
+});
+
+it("turns a rejected database-backed service promise into a safe tool error", async () => {
+  const asyncDependencies = dependencies();
+  asyncDependencies.drafts.createPost = (async () => {
+    throw new Error("database-connection-secret");
+  }) as CareerMcpDependencies["drafts"]["createPost"];
+  const server = createCareerMcpServer(asyncDependencies);
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "test", version: "1.0.0" });
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+
+  const result = await client.callTool({
+    name: "draft_linkedin_post",
+    arguments: { text: "A safely failed post", visibility: "PUBLIC" }
+  });
+  await Promise.all([client.close(), server.close()]);
+
+  expect(result.isError).toBe(true);
+  expect(result.structuredContent).toEqual({ data: { error: { code: "DATA_INTEGRITY" } } });
+  expect(JSON.stringify(result)).not.toContain("database-connection-secret");
 });
 
 it("keeps safe tool errors schema-valid over Streamable HTTP", async () => {

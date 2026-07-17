@@ -165,7 +165,7 @@ export function createPublishService(database: CareerDatabase, dependencies: Pub
         throw new DomainError("PUBLISH_DISABLED", "LinkedIn publishing is disabled");
       }
       const input = parseInput(inputValue);
-      const claim = dependencies.previewService.consumeForPublish(input.previewToken, {
+      const claim = await dependencies.previewService.consumeForPublish(input.previewToken, {
         postId: input.postId,
         versionId: input.versionId,
         version: input.version,
@@ -175,12 +175,12 @@ export function createPublishService(database: CareerDatabase, dependencies: Pub
 
       let attemptId: string;
       try {
-        attemptId = database.publishAttempts.record({
+        attemptId = (await database.publishAttempts.record({
           postDraftId: claim.versionId,
           version: claim.version,
           requestedAt: nowIso(clock),
           responseCategory: "pending"
-        }).id;
+        })).id;
       } catch {
         throw new DomainError("DATA_INTEGRITY", "Publish attempt could not be recorded", {
           entity: "publish_attempt"
@@ -198,7 +198,7 @@ export function createPublishService(database: CareerDatabase, dependencies: Pub
       }
 
       try {
-        const updatedAttempt = database.publishAttempts.updateResult(attemptId, {
+        const updatedAttempt = await database.publishAttempts.updateResult(attemptId, {
           responseCategory: completion.responseCategory,
           ...(completion.postUrn === undefined ? {} : { postUrn: completion.postUrn }),
           ...(completion.sanitizedError === undefined
@@ -206,13 +206,16 @@ export function createPublishService(database: CareerDatabase, dependencies: Pub
             : { sanitizedError: completion.sanitizedError }),
           completedAt: nowIso(clock)
         });
-        const updatedPost = database.postDrafts.transitionState({
+        if (updatedAttempt === undefined) {
+          return { state: "publish_unknown" };
+        }
+        const updatedPost = await database.postDrafts.transitionState({
           versionId: claim.versionId,
           version: claim.version,
           expectedState: "publishing",
           nextState: completion.nextState
         });
-        if (updatedAttempt === undefined || updatedPost === undefined) {
+        if (updatedPost === undefined) {
           return { state: "publish_unknown" };
         }
       } catch {

@@ -126,7 +126,7 @@ export type DraftService = ReturnType<typeof createDraftService>;
 
 export function createDraftService(database: CareerDatabase) {
   return {
-    createOutreach(input: CreateOutreachInput): OutreachDraft {
+    async createOutreach(input: CreateOutreachInput): Promise<OutreachDraft> {
       if (typeof input !== "object" || input === null) {
         throw validationError("outreach", "must_be_object");
       }
@@ -148,12 +148,12 @@ export function createDraftService(database: CareerDatabase) {
         });
       }
 
-      const target = database.targets.get(targetId);
+      const target = await database.targets.get(targetId);
       if (target === undefined) {
         throw new DomainError("NOT_FOUND", "Target was not found", { entity: "target" });
       }
       for (const evidenceId of evidenceIds) {
-        const item = database.evidence.get(evidenceId);
+        const item = await database.evidence.get(evidenceId);
         if (item === undefined) {
           throw new DomainError("NOT_FOUND", "Evidence was not found", { entity: "evidence" });
         }
@@ -167,7 +167,7 @@ export function createDraftService(database: CareerDatabase) {
       }
 
       try {
-        return database.outreachDrafts.createVersion({
+        return await database.outreachDrafts.createVersion({
           targetId,
           purpose,
           text,
@@ -178,7 +178,7 @@ export function createDraftService(database: CareerDatabase) {
       }
     },
 
-    createPost(input: CreatePostInput): PostDraftVersion {
+    async createPost(input: CreatePostInput): Promise<PostDraftVersion> {
       if (typeof input !== "object" || input === null || Array.isArray(input)) {
         throw validationError("post", "must_be_object");
       }
@@ -194,7 +194,7 @@ export function createDraftService(database: CareerDatabase) {
       }
 
       try {
-        return publicPostDraft(database.postDrafts.createVersion({
+        return publicPostDraft(await database.postDrafts.createVersion({
           text,
           visibility: input.visibility,
           checksum: (version) => computePostChecksum(text, version),
@@ -208,10 +208,10 @@ export function createDraftService(database: CareerDatabase) {
       }
     },
 
-    revisePost(draftIdInput: string, textInput: string): PostDraftVersion {
+    async revisePost(draftIdInput: string, textInput: string): Promise<PostDraftVersion> {
       const draftId = normalizedId("post.id", draftIdInput);
       const text = normalizedText("post.text", textInput, MAX_POST_TEXT_LENGTH);
-      const latest = database.postDrafts.listVersions(draftId).at(-1);
+      const latest = (await database.postDrafts.listVersions(draftId)).at(-1);
       if (latest === undefined) {
         throw new DomainError("NOT_FOUND", "Post draft was not found", {
           entity: "post_draft"
@@ -224,7 +224,7 @@ export function createDraftService(database: CareerDatabase) {
       }
 
       try {
-        return publicPostDraft(database.postDrafts.createVersion({
+        return publicPostDraft(await database.postDrafts.createVersion({
           draftId,
           text,
           visibility: latest.visibility,
@@ -239,18 +239,21 @@ export function createDraftService(database: CareerDatabase) {
       }
     },
 
-    getPostVersion(draftIdInput: string, version: number): PostDraftVersion | undefined {
+    async getPostVersion(
+      draftIdInput: string,
+      version: number
+    ): Promise<PostDraftVersion | undefined> {
       const draftId = normalizedId("post.id", draftIdInput);
       if (!Number.isSafeInteger(version) || version < 1) {
         throw validationError("post.version", "must_be_positive_integer");
       }
-      const row = database.postDrafts.getVersion(draftId, version);
+      const row = await database.postDrafts.getVersion(draftId, version);
       return row === undefined ? undefined : publicPostDraft(row);
     },
 
-    getPostHistory(draftIdInput: string): PostDraftVersion[] {
+    async getPostHistory(draftIdInput: string): Promise<PostDraftVersion[]> {
       const draftId = normalizedId("post.id", draftIdInput);
-      return database.postDrafts.listVersions(draftId).map(publicPostDraft);
+      return (await database.postDrafts.listVersions(draftId)).map(publicPostDraft);
     }
   };
 }

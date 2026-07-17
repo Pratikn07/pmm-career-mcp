@@ -167,7 +167,7 @@ function timingSafeTextEqual(left: string, right: string): boolean {
 export function createRepositories(database: Database) {
   return {
     settings: {
-      set(key: string, value: unknown): Setting {
+      async set(key: string, value: unknown): Promise<Setting> {
         const updatedAt = nowIso();
         return database.insert(settings).values({
           id: randomUUID(),
@@ -179,13 +179,13 @@ export function createRepositories(database: Database) {
           set: { valueJson: JSON.stringify(value), updatedAt }
         }).returning().get();
       },
-      get<T = unknown>(key: string): T | undefined {
+      async get<T = unknown>(key: string): Promise<T | undefined> {
         const setting = database.select().from(settings).where(eq(settings.key, key)).get();
         return setting === undefined ? undefined : JSON.parse(setting.valueJson) as T;
       }
     },
     companies: {
-      upsert(input: CompanyUpsertInput): Company {
+      async upsert(input: CompanyUpsertInput): Promise<Company> {
         const now = nowIso();
         const checkedAt = input.checkedAt === undefined
           ? undefined
@@ -221,18 +221,18 @@ export function createRepositories(database: Database) {
         }).run();
         return database.select().from(companies).where(eq(companies.ycId, input.ycId)).get()!;
       },
-      get(id: string): Company | undefined {
+      async get(id: string): Promise<Company | undefined> {
         return database.select().from(companies).where(eq(companies.id, id)).get();
       },
-      getByYcId(ycId: string): Company | undefined {
+      async getByYcId(ycId: string): Promise<Company | undefined> {
         return database.select().from(companies).where(eq(companies.ycId, ycId)).get();
       },
-      list(): Company[] {
+      async list(): Promise<Company[]> {
         return database.select().from(companies).orderBy(asc(companies.name), asc(companies.id)).all();
       }
     },
     people: {
-      upsert(input: PersonUpsertInput): Person {
+      async upsert(input: PersonUpsertInput): Promise<Person> {
         const now = nowIso();
         const checkedAt = input.checkedAt === undefined
           ? undefined
@@ -260,16 +260,16 @@ export function createRepositories(database: Database) {
           eq(people.role, input.role)
         )).get()!;
       },
-      get(id: string): Person | undefined {
+      async get(id: string): Promise<Person | undefined> {
         return database.select().from(people).where(eq(people.id, id)).get();
       },
-      listByCompany(companyId: string): Person[] {
+      async listByCompany(companyId: string): Promise<Person[]> {
         return database.select().from(people).where(eq(people.companyId, companyId)).orderBy(
           asc(people.name),
           asc(people.role)
         ).all();
       },
-      getWithEvidence(id: string): PersonWithEvidence | undefined {
+      async getWithEvidence(id: string): Promise<PersonWithEvidence | undefined> {
         const person = database.select().from(people).where(eq(people.id, id)).get();
         if (person === undefined) {
           return undefined;
@@ -282,7 +282,9 @@ export function createRepositories(database: Database) {
           ).all()
         };
       },
-      refreshDiscovery(input: CompanyPersonDiscoveryRefreshInput): PersonWithEvidence[] {
+      async refreshDiscovery(
+        input: CompanyPersonDiscoveryRefreshInput
+      ): Promise<PersonWithEvidence[]> {
         return database.transaction((transaction) => {
           const existingPeople = transaction.select().from(people).where(
             eq(people.companyId, input.companyId)
@@ -389,7 +391,7 @@ export function createRepositories(database: Database) {
       }
     },
     evidence: {
-      add(input: EvidenceAddInput): Evidence {
+      async add(input: EvidenceAddInput): Promise<Evidence> {
         return database.insert(evidence).values({
           id: randomUUID(),
           personId: input.personId,
@@ -402,10 +404,10 @@ export function createRepositories(database: Database) {
           createdAt: nowIso()
         }).returning().get();
       },
-      get(id: string): Evidence | undefined {
+      async get(id: string): Promise<Evidence | undefined> {
         return database.select().from(evidence).where(eq(evidence.id, id)).get();
       },
-      listForPerson(personId: string): Evidence[] {
+      async listForPerson(personId: string): Promise<Evidence[]> {
         return database.select().from(evidence).where(eq(evidence.personId, personId)).orderBy(
           asc(evidence.checkedAt),
           asc(evidence.id)
@@ -413,7 +415,7 @@ export function createRepositories(database: Database) {
       }
     },
     targets: {
-      upsert(input: TargetUpsertInput): Target {
+      async upsert(input: TargetUpsertInput): Promise<Target> {
         const now = nowIso();
         database.insert(targets).values({
           id: randomUUID(),
@@ -435,18 +437,18 @@ export function createRepositories(database: Database) {
         }).run();
         return database.select().from(targets).where(eq(targets.personId, input.personId)).get()!;
       },
-      get(id: string): Target | undefined {
+      async get(id: string): Promise<Target | undefined> {
         return database.select().from(targets).where(eq(targets.id, id)).get();
       },
-      getByPerson(personId: string): Target | undefined {
+      async getByPerson(personId: string): Promise<Target | undefined> {
         return database.select().from(targets).where(eq(targets.personId, personId)).get();
       },
-      updateStatus(id: string, status: string): Target | undefined {
+      async updateStatus(id: string, status: string): Promise<Target | undefined> {
         return database.update(targets).set({ status, updatedAt: nowIso() }).where(
           eq(targets.id, id)
         ).returning().get();
       },
-      list(filter: TargetListFilter = {}): Target[] {
+      async list(filter: TargetListFilter = {}): Promise<Target[]> {
         const conditions = [
           ...(filter.companyId === undefined ? [] : [eq(people.companyId, filter.companyId)]),
           ...(filter.status === undefined ? [] : [eq(targets.status, filter.status)])
@@ -468,7 +470,7 @@ export function createRepositories(database: Database) {
       }
     },
     notes: {
-      add(input: { targetId: string; text: string }): TargetNote {
+      async add(input: { targetId: string; text: string }): Promise<TargetNote> {
         return database.insert(targetNotes).values({
           id: randomUUID(),
           targetId: input.targetId,
@@ -476,14 +478,14 @@ export function createRepositories(database: Database) {
           createdAt: nowIso()
         }).returning().get();
       },
-      listForTarget(targetId: string): TargetNote[] {
+      async listForTarget(targetId: string): Promise<TargetNote[]> {
         return database.select().from(targetNotes).where(eq(targetNotes.targetId, targetId)).orderBy(
           sql`${targetNotes}.rowid`
         ).all();
       }
     },
     outreachDrafts: {
-      createVersion(input: OutreachDraftVersionInput): OutreachDraft {
+      async createVersion(input: OutreachDraftVersionInput): Promise<OutreachDraft> {
         return database.transaction((transaction) => {
           const latest = transaction.select({ version: max(outreachDrafts.version) }).from(
             outreachDrafts
@@ -505,7 +507,11 @@ export function createRepositories(database: Database) {
           return decodeOutreachDraft(row);
         });
       },
-      getVersion(targetId: string, purpose: string, version: number): OutreachDraft | undefined {
+      async getVersion(
+        targetId: string,
+        purpose: string,
+        version: number
+      ): Promise<OutreachDraft | undefined> {
         const row = database.select().from(outreachDrafts).where(and(
           eq(outreachDrafts.targetId, targetId),
           eq(outreachDrafts.purpose, purpose),
@@ -513,7 +519,7 @@ export function createRepositories(database: Database) {
         )).get();
         return row === undefined ? undefined : decodeOutreachDraft(row);
       },
-      listForTarget(targetId: string): OutreachDraft[] {
+      async listForTarget(targetId: string): Promise<OutreachDraft[]> {
         return database.select().from(outreachDrafts).where(
           eq(outreachDrafts.targetId, targetId)
         ).orderBy(asc(outreachDrafts.purpose), asc(outreachDrafts.version)).all().map(
@@ -522,7 +528,7 @@ export function createRepositories(database: Database) {
       }
     },
     shortlists: {
-      create(input: { name: string; targetIds: string[] }): Shortlist {
+      async create(input: { name: string; targetIds: string[] }): Promise<Shortlist> {
         return database.transaction((transaction) => {
           const now = nowIso();
           const shortlist = transaction.insert(shortlists).values({
@@ -543,7 +549,7 @@ export function createRepositories(database: Database) {
           return shortlist;
         });
       },
-      getWithEntries(id: string): ShortlistWithEntries | undefined {
+      async getWithEntries(id: string): Promise<ShortlistWithEntries | undefined> {
         const shortlist = database.select().from(shortlists).where(eq(shortlists.id, id)).get();
         if (shortlist === undefined) {
           return undefined;
@@ -555,7 +561,7 @@ export function createRepositories(database: Database) {
           ).orderBy(asc(shortlistEntries.position)).all()
         };
       },
-      list(): Shortlist[] {
+      async list(): Promise<Shortlist[]> {
         return database.select().from(shortlists).orderBy(
           asc(shortlists.createdAt),
           asc(shortlists.id)
@@ -563,7 +569,7 @@ export function createRepositories(database: Database) {
       }
     },
     postDrafts: {
-      createVersion(input: PostDraftVersionInput): PostDraft {
+      async createVersion(input: PostDraftVersionInput): Promise<PostDraft> {
         return database.transaction((transaction) => {
           const draftId = input.draftId ?? randomUUID();
           const latest = transaction.select({ version: max(postDrafts.version) }).from(
@@ -586,23 +592,23 @@ export function createRepositories(database: Database) {
           }).returning().get();
         });
       },
-      getVersion(draftId: string, version: number): PostDraft | undefined {
+      async getVersion(draftId: string, version: number): Promise<PostDraft | undefined> {
         return database.select().from(postDrafts).where(and(
           eq(postDrafts.draftId, draftId),
           eq(postDrafts.version, version)
         )).get();
       },
-      listVersions(draftId: string): PostDraft[] {
+      async listVersions(draftId: string): Promise<PostDraft[]> {
         return database.select().from(postDrafts).where(eq(postDrafts.draftId, draftId)).orderBy(
           asc(postDrafts.version)
         ).all();
       },
-      transitionState(input: {
+      async transitionState(input: {
         versionId: string;
         version: number;
         expectedState: string;
         nextState: string;
-      }): PostDraft | undefined {
+      }): Promise<PostDraft | undefined> {
         return database.update(postDrafts).set({
           state: input.nextState,
           updatedAt: nowIso()
@@ -614,28 +620,30 @@ export function createRepositories(database: Database) {
       }
     },
     previews: {
-      create(input: Omit<typeof postPreviews.$inferInsert, "id" | "consumedAt">): PostPreview {
+      async create(
+        input: Omit<typeof postPreviews.$inferInsert, "id" | "consumedAt">
+      ): Promise<PostPreview> {
         return database.insert(postPreviews).values({
           id: randomUUID(),
           ...input,
           expiresAt: assertIsoTimestamp("preview.expiresAt", input.expiresAt)
         }).returning().get();
       },
-      getByTokenHash(tokenHash: string): PostPreview | undefined {
+      async getByTokenHash(tokenHash: string): Promise<PostPreview | undefined> {
         return database.select().from(postPreviews).where(eq(postPreviews.tokenHash, tokenHash)).get();
       },
-      listForPostDraft(postDraftId: string): PostPreview[] {
+      async listForPostDraft(postDraftId: string): Promise<PostPreview[]> {
         return database.select().from(postPreviews).where(
           eq(postPreviews.postDraftId, postDraftId)
         ).orderBy(sql`${postPreviews}.rowid`).all();
       },
-      createForLatest(input: {
+      async createForLatest(input: {
         draftId: string;
         version: number;
         tokenHash: string;
         expiresAt: string;
         allowedStates: readonly string[];
-      }): PreviewCreationResult {
+      }): Promise<PreviewCreationResult> {
         const expiresAt = assertIsoTimestamp("preview.expiresAt", input.expiresAt);
         return database.transaction((transaction) => {
           const post = transaction.select().from(postDrafts).where(and(
@@ -664,13 +672,13 @@ export function createRepositories(database: Database) {
           return { outcome: "created", post, preview };
         });
       },
-      consumeExact(input: {
+      async consumeExact(input: {
         tokenHash: string;
         consumedAt: string;
         expected: PreviewExpectedRow;
         allowedStates: readonly string[];
         claimState?: string;
-      }): PreviewConsumptionResult {
+      }): Promise<PreviewConsumptionResult> {
         const consumedAt = assertIsoTimestamp("preview.consumedAt", input.consumedAt);
         return database.transaction((transaction) => {
           const preview = transaction.select().from(postPreviews).where(
@@ -736,7 +744,7 @@ export function createRepositories(database: Database) {
           return { outcome: "consumed", post, preview: consumed };
         });
       },
-      consume(tokenHash: string, consumedAt: string): PostPreview | undefined {
+      async consume(tokenHash: string, consumedAt: string): Promise<PostPreview | undefined> {
         assertIsoTimestamp("preview.consumedAt", consumedAt);
         return database.transaction((transaction) => transaction.update(postPreviews).set({
           consumedAt
@@ -747,7 +755,9 @@ export function createRepositories(database: Database) {
       }
     },
     publishAttempts: {
-      record(input: Omit<typeof publishAttempts.$inferInsert, "id">): PublishAttempt {
+      async record(
+        input: Omit<typeof publishAttempts.$inferInsert, "id">
+      ): Promise<PublishAttempt> {
         assertIsoTimestamp("publishAttempt.requestedAt", input.requestedAt);
         if (input.completedAt !== undefined && input.completedAt !== null) {
           assertIsoTimestamp("publishAttempt.completedAt", input.completedAt);
@@ -757,12 +767,12 @@ export function createRepositories(database: Database) {
           ...input
         }).returning().get());
       },
-      updateResult(id: string, input: {
+      async updateResult(id: string, input: {
         responseCategory: string;
         postUrn?: string;
         sanitizedError?: string;
         completedAt: string;
-      }): PublishAttempt | undefined {
+      }): Promise<PublishAttempt | undefined> {
         assertIsoTimestamp("publishAttempt.completedAt", input.completedAt);
         return database.update(publishAttempts).set({
           responseCategory: input.responseCategory,
@@ -771,19 +781,19 @@ export function createRepositories(database: Database) {
           completedAt: input.completedAt
         }).where(eq(publishAttempts.id, id)).returning().get();
       },
-      listForPostDraft(postDraftId: string): PublishAttempt[] {
+      async listForPostDraft(postDraftId: string): Promise<PublishAttempt[]> {
         return database.select().from(publishAttempts).where(
           eq(publishAttempts.postDraftId, postDraftId)
         ).orderBy(asc(publishAttempts.requestedAt), asc(publishAttempts.id)).all();
       }
     },
     oauthTokens: {
-      upsert(input: {
+      async upsert(input: {
         provider: string;
         ciphertext: string;
         refreshMetadataCiphertext?: string;
         expiresAt?: string;
-      }): OAuthToken {
+      }): Promise<OAuthToken> {
         const now = nowIso();
         const expiresAt = input.expiresAt === undefined
           ? undefined
@@ -811,7 +821,7 @@ export function createRepositories(database: Database) {
           eq(oauthTokens.provider, input.provider)
         ).get()!;
       },
-      getByProvider(provider: string): OAuthToken | undefined {
+      async getByProvider(provider: string): Promise<OAuthToken | undefined> {
         return database.select().from(oauthTokens).where(eq(oauthTokens.provider, provider)).get();
       }
     }

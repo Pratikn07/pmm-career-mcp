@@ -11,17 +11,17 @@ import {
   type PreviewResult
 } from "../../src/posts/preview-service.js";
 
-const db = createDatabase(":memory:");
+const db = (await createDatabase(":memory:"));
 const drafts = createDraftService(db);
 let nowMs = Date.parse("2026-07-16T12:00:00.000Z");
 const clock = () => new Date(nowMs);
 const previews = createPreviewService(db, { clock });
 
-afterEach(() => {
-  db.resetForTests();
+afterEach(async () => {
+  (await db.resetForTests());
   nowMs = Date.parse("2026-07-16T12:00:00.000Z");
 });
-afterAll(() => db.close());
+afterAll(async () => (await db.close()));
 
 function inputFor(preview: PreviewResult): PublishInput {
   return {
@@ -34,9 +34,12 @@ function inputFor(preview: PreviewResult): PublishInput {
   };
 }
 
-function expectDomainError(action: () => unknown, code: string): DomainError {
+async function expectDomainError(
+  action: () => Promise<unknown>,
+  code: string
+): Promise<DomainError> {
   try {
-    action();
+    await action();
   } catch (error) {
     expect(error).toBeInstanceOf(DomainError);
     expect(error).toMatchObject({ code });
@@ -47,8 +50,8 @@ function expectDomainError(action: () => unknown, code: string): DomainError {
 
 describe("safe LinkedIn publishing", () => {
   it("checks the disabled kill switch before it consumes a preview or calls the client", async () => {
-    const post = drafts.createPost({ text: "Do not send", visibility: "PUBLIC" });
-    const preview = previews.create(post.id, post.version);
+    const post = (await drafts.createPost({ text: "Do not send", visibility: "PUBLIC" }));
+    const preview = (await previews.create(post.id, post.version));
     const client = { createTextPost: vi.fn() };
     const service = createPublishService(db, {
       previewService: previews,
@@ -62,13 +65,13 @@ describe("safe LinkedIn publishing", () => {
     });
 
     expect(client.createTextPost).not.toHaveBeenCalled();
-    expect(db.previews.listForPostDraft(post.versionId)[0]?.consumedAt).toBeNull();
-    expect(db.publishAttempts.listForPostDraft(post.versionId)).toEqual([]);
+    expect((await db.previews.listForPostDraft(post.versionId))[0]?.consumedAt).toBeNull();
+    expect((await db.publishAttempts.listForPostDraft(post.versionId))).toEqual([]);
   });
 
   it("rejects a malformed or missing preview token before recording an attempt", async () => {
-    const post = drafts.createPost({ text: "Token required", visibility: "PUBLIC" });
-    const preview = previews.create(post.id, post.version);
+    const post = (await drafts.createPost({ text: "Token required", visibility: "PUBLIC" }));
+    const preview = (await previews.create(post.id, post.version));
     const client = { createTextPost: vi.fn() };
     const service = createPublishService(db, {
       previewService: previews,
@@ -82,16 +85,16 @@ describe("safe LinkedIn publishing", () => {
     });
 
     expect(client.createTextPost).not.toHaveBeenCalled();
-    expect(db.previews.listForPostDraft(post.versionId)[0]?.consumedAt).toBeNull();
-    expect(db.publishAttempts.listForPostDraft(post.versionId)).toEqual([]);
+    expect((await db.previews.listForPostDraft(post.versionId))[0]?.consumedAt).toBeNull();
+    expect((await db.publishAttempts.listForPostDraft(post.versionId))).toEqual([]);
   });
 
   it("records an attempt before one successful fake-client call and marks the exact version published", async () => {
-    const post = drafts.createPost({ text: "Ship this exact text", visibility: "CONNECTIONS" });
-    const preview = previews.create(post.id, post.version);
+    const post = (await drafts.createPost({ text: "Ship this exact text", visibility: "CONNECTIONS" }));
+    const preview = (await previews.create(post.id, post.version));
     const client = {
       createTextPost: vi.fn(async () => {
-        const attempts = db.publishAttempts.listForPostDraft(post.versionId);
+        const attempts = (await db.publishAttempts.listForPostDraft(post.versionId));
         expect(attempts).toHaveLength(1);
         expect(attempts[0]).toMatchObject({
           responseCategory: "pending",
@@ -118,8 +121,8 @@ describe("safe LinkedIn publishing", () => {
       text: preview.text,
       visibility: preview.visibility
     });
-    expect(db.postDrafts.getVersion(post.id, post.version)).toMatchObject({ state: "published" });
-    expect(db.publishAttempts.listForPostDraft(post.versionId)[0]).toMatchObject({
+    expect((await db.postDrafts.getVersion(post.id, post.version))).toMatchObject({ state: "published" });
+    expect((await db.publishAttempts.listForPostDraft(post.versionId))[0]).toMatchObject({
       responseCategory: "published",
       postUrn: "urn:li:share:123",
       completedAt: "2026-07-16T12:00:00.000Z"
@@ -127,11 +130,11 @@ describe("safe LinkedIn publishing", () => {
   });
 
   it("does not call the client for an expired or revised preview", async () => {
-    const expiredPost = drafts.createPost({ text: "Expired", visibility: "PUBLIC" });
-    const expired = previews.create(expiredPost.id, expiredPost.version);
-    const revisedPost = drafts.createPost({ text: "First", visibility: "PUBLIC" });
-    const stale = previews.create(revisedPost.id, revisedPost.version);
-    drafts.revisePost(revisedPost.id, "Revised");
+    const expiredPost = (await drafts.createPost({ text: "Expired", visibility: "PUBLIC" }));
+    const expired = (await previews.create(expiredPost.id, expiredPost.version));
+    const revisedPost = (await drafts.createPost({ text: "First", visibility: "PUBLIC" }));
+    const stale = (await previews.create(revisedPost.id, revisedPost.version));
+    (await drafts.revisePost(revisedPost.id, "Revised"));
     const client = { createTextPost: vi.fn() };
     const service = createPublishService(db, {
       previewService: previews,
@@ -145,13 +148,13 @@ describe("safe LinkedIn publishing", () => {
     await expect(service.publish(inputFor(expired))).rejects.toMatchObject({ code: "PREVIEW_EXPIRED" });
 
     expect(client.createTextPost).not.toHaveBeenCalled();
-    expect(db.publishAttempts.listForPostDraft(expiredPost.versionId)).toEqual([]);
-    expect(db.publishAttempts.listForPostDraft(revisedPost.versionId)).toEqual([]);
+    expect((await db.publishAttempts.listForPostDraft(expiredPost.versionId))).toEqual([]);
+    expect((await db.publishAttempts.listForPostDraft(revisedPost.versionId))).toEqual([]);
   });
 
   it("records a definite 4xx rejection as publish_failed without exposing response secrets", async () => {
-    const post = drafts.createPost({ text: "Can fail", visibility: "PUBLIC" });
-    const preview = previews.create(post.id, post.version);
+    const post = (await drafts.createPost({ text: "Can fail", visibility: "PUBLIC" }));
+    const preview = (await previews.create(post.id, post.version));
     const privateToken = "very-private-access-token";
     const client = {
       createTextPost: vi.fn().mockResolvedValue({
@@ -170,8 +173,8 @@ describe("safe LinkedIn publishing", () => {
     await expect(service.publish(inputFor(preview))).resolves.toEqual({ state: "publish_failed" });
 
     expect(client.createTextPost).toHaveBeenCalledTimes(1);
-    expect(db.postDrafts.getVersion(post.id, post.version)).toMatchObject({ state: "publish_failed" });
-    const attempt = db.publishAttempts.listForPostDraft(post.versionId)[0];
+    expect((await db.postDrafts.getVersion(post.id, post.version))).toMatchObject({ state: "publish_failed" });
+    const attempt = (await db.publishAttempts.listForPostDraft(post.versionId))[0];
     expect(attempt).toMatchObject({ responseCategory: "definite_rejection" });
     expect(JSON.stringify(attempt)).not.toContain(privateToken);
   });
@@ -185,8 +188,8 @@ describe("safe LinkedIn publishing", () => {
     ];
 
     for (const outcome of cases) {
-      const post = drafts.createPost({ text: "Never duplicate", visibility: "PUBLIC" });
-      const preview = previews.create(post.id, post.version);
+      const post = (await drafts.createPost({ text: "Never duplicate", visibility: "PUBLIC" }));
+      const preview = (await previews.create(post.id, post.version));
       const client = {
         createTextPost: vi.fn().mockImplementation(async () => {
           if (outcome instanceof Error) {
@@ -208,8 +211,8 @@ describe("safe LinkedIn publishing", () => {
       });
 
       expect(client.createTextPost).toHaveBeenCalledTimes(1);
-      expect(db.postDrafts.getVersion(post.id, post.version)).toMatchObject({ state: "publish_unknown" });
-      const attempt = db.publishAttempts.listForPostDraft(post.versionId)[0];
+      expect((await db.postDrafts.getVersion(post.id, post.version))).toMatchObject({ state: "publish_unknown" });
+      const attempt = (await db.publishAttempts.listForPostDraft(post.versionId))[0];
       expect(attempt).toMatchObject({ responseCategory: "ambiguous" });
       expect(JSON.stringify(attempt)).not.toContain("private-token");
     }

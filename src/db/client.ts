@@ -8,11 +8,12 @@ import { createRepositories } from "./repositories.js";
 import { schema } from "./schema.js";
 
 export type CareerDatabase = ReturnType<typeof createRepositories> & {
-  close(): void;
+  checkReady(): Promise<void>;
+  close(): Promise<void>;
 };
 
 export type TestCareerDatabase = CareerDatabase & {
-  resetForTests(): void;
+  resetForTests(): Promise<void>;
 };
 
 function findMigrationsFolder(): string {
@@ -35,9 +36,11 @@ function findMigrationsFolder(): string {
   }
 }
 
-export function createDatabase(path: ":memory:"): TestCareerDatabase;
-export function createDatabase(path: string): CareerDatabase;
-export function createDatabase(path: string): CareerDatabase | TestCareerDatabase {
+export function createDatabase(path: ":memory:"): Promise<TestCareerDatabase>;
+export function createDatabase(path: string): Promise<CareerDatabase>;
+export async function createDatabase(
+  path: string
+): Promise<CareerDatabase | TestCareerDatabase> {
   if (path !== ":memory:") {
     mkdirSync(dirname(resolve(path)), { recursive: true });
   }
@@ -53,7 +56,12 @@ export function createDatabase(path: string): CareerDatabase | TestCareerDatabas
   const repositories = createRepositories(database);
   const careerDatabase: CareerDatabase = {
     ...repositories,
-    close: () => sqlite.close()
+    checkReady: async () => {
+      sqlite.prepare("SELECT 1").get();
+    },
+    close: async () => {
+      sqlite.close();
+    }
   };
 
   if (path !== ":memory:") {
@@ -62,7 +70,7 @@ export function createDatabase(path: string): CareerDatabase | TestCareerDatabas
 
   return {
     ...careerDatabase,
-    resetForTests: () => {
+    resetForTests: async () => {
       sqlite.exec(`
         DELETE FROM publish_attempts;
         DELETE FROM post_previews;

@@ -1,5 +1,6 @@
 import { fileURLToPath } from "node:url";
 import type { Express } from "express";
+import type { Server } from "node:http";
 import { loadConfig, type AppConfig } from "./config.js";
 import { createDatabase, type CareerDatabase } from "./db/client.js";
 import { DomainError } from "./domain/errors.js";
@@ -62,8 +63,8 @@ function persistedYcProvider(
   return {
     async searchYcCompanies(query: CompanySearchQuery): Promise<CompanyResult[]> {
       const imported = await provider.searchYcCompanies(query);
-      return imported.map((company) => {
-        const stored = database.companies.upsert({
+      return await Promise.all(imported.map(async (company) => {
+        const stored = await database.companies.upsert({
           ycId: company.ycId,
           name: company.name,
           ...(company.batch === undefined ? {} : { batch: company.batch }),
@@ -76,7 +77,7 @@ function persistedYcProvider(
           checkedAt: company.checkedAt
         });
         return { ...company, id: stored.id };
-      });
+      }));
     }
   };
 }
@@ -109,8 +110,10 @@ function oauthFromEnvironment(
  * Composes the production server and also provides an injection seam for the
  * offline end-to-end test. No service is contacted until its MCP tool is called.
  */
-export function createCareerApplication(options: ApplicationOptions): CareerApplication {
-  const database = options.database ?? createDatabase(options.config.databasePath);
+export async function createCareerApplication(
+  options: ApplicationOptions
+): Promise<CareerApplication> {
+  const database = options.database ?? await createDatabase(options.config.databasePath);
   const now = options.now ?? (() => new Date());
   const ycProvider = persistedYcProvider(database, options.ycSource ?? createPublicYcSource(), now);
   const peopleDiscovery = createPeopleDiscovery({
@@ -151,8 +154,8 @@ export function createCareerApplication(options: ApplicationOptions): CareerAppl
       previews,
       publish,
       linkedin,
-      getLinkedInConnectionStatus: () => {
-        const token = database.oauthTokens.getByProvider("linkedin");
+      getLinkedInConnectionStatus: async () => {
+        const token = await database.oauthTokens.getByProvider("linkedin");
         return {
           connected: token !== undefined,
           valid: token !== undefined && (token.expiresAt === null || Date.parse(token.expiresAt) > now().getTime()),
@@ -178,22 +181,56 @@ export function createCareerApplication(options: ApplicationOptions): CareerAppl
   return { app, database };
 }
 
-export function startServer(env: NodeJS.ProcessEnv = process.env) {
+export type StartServerDependencies = {
+  createDatabase?: (databasePath: string) => Promise<CareerDatabase>;
+};
+
+export type RunningCareerApplication = CareerApplication & {
+  server: Server;
+  close(): Promise<void>;
+};
+
+export async function startServer(
+  env: NodeJS.ProcessEnv = process.env,
+  dependencies: StartServerDependencies = {}
+): Promise<RunningCareerApplication> {
   const config = loadConfig(env);
-  const database = createDatabase(config.databasePath);
+  const database = await (dependencies.createDatabase ?? createDatabase)(config.databasePath);
   const linkedin = oauthFromEnvironment(database, config, env);
-  const runtime = createCareerApplication({ config, database, linkedinOAuth: linkedin });
+  const runtime = await createCareerApplication({ config, database, linkedinOAuth: linkedin });
   const server = runtime.app.listen(config.port);
-  const close = () => {
-    server.close((error) => {
-      runtime.database.close();
-      if (error !== undefined) process.exitCode = 1;
+  let closing: Promise<void> | undefined;
+  const close = (): Promise<void> => {
+    closing ??= new Promise<void>((resolve, reject) => {
+      server.close(async (httpError) => {
+        let databaseError: unknown;
+        try {
+          await runtime.database.close();
+        } catch (error) {
+          databaseError = error;
+        }
+        if (httpError !== undefined) {
+          reject(httpError);
+        } else if (databaseError !== undefined) {
+          reject(databaseError);
+        } else {
+          resolve();
+        }
+      });
+    });
+    return closing;
+  };
+  const handleSignal = () => {
+    void close().catch(() => {
+      process.exitCode = 1;
     });
   };
-  for (const signal of ["SIGTERM", "SIGINT"] as const) process.once(signal, close);
-  return { ...runtime, server };
+  for (const signal of ["SIGTERM", "SIGINT"] as const) process.once(signal, handleSignal);
+  return { ...runtime, server, close };
 }
 
 if (process.argv[1] !== undefined && fileURLToPath(import.meta.url) === process.argv[1]) {
-  startServer();
+  void startServer().catch(() => {
+    process.exitCode = 1;
+  });
 }
