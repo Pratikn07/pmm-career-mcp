@@ -64,6 +64,31 @@ it("extracts normalized visible page text and marks it as untrusted", async () =
   );
 });
 
+it("preserves sanitized HTML structure for downstream public-page parsers", async () => {
+  nock("https://acme.example")
+    .get("/structured-team")
+    .reply(200, `
+      <html>
+        <body>
+          <main><article class="person"><a href="/people/ada" onclick="sendPrivateData()">Ada Example</a></article></main>
+          <script>stealCredentials()</script>
+          <form><input value="private"></form>
+          <p hidden>Hidden biography</p>
+        </body>
+      </html>
+    `, { "Content-Type": "text/html" });
+
+  const result = await fetchPublicPage("https://acme.example/structured-team", {
+    resolveAddresses: publicDns
+  });
+
+  expect(result.html).toContain('<article class="person">');
+  expect(result.html).toContain('href="/people/ada"');
+  expect(result.html).not.toMatch(
+    /script|form|Hidden biography|stealCredentials|private|onclick|sendPrivateData/i
+  );
+});
+
 it("removes instruction-like text even when it contains nested markup", async () => {
   nock("https://acme.example")
     .get("/nested-injection")

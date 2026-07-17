@@ -23,6 +23,7 @@ export type FetchedPage = {
   url: string;
   title: string;
   text: string;
+  html: string;
   checkedAt: string;
   contentType: string;
   untrusted: true;
@@ -714,7 +715,7 @@ function removeAdjacentInstructionBlocks($: ReturnType<typeof load>): void {
   $(Array.from(blocksToRemove)).remove();
 }
 
-function extractHtml(html: string): { title: string; text: string } {
+function extractHtml(html: string): { title: string; text: string; html: string } {
   const $ = load(html);
   const title = sanitizedExtractedText($("title").first().text());
 
@@ -743,10 +744,24 @@ function extractHtml(html: string): { title: string; text: string } {
   $("body *").filter((_index, element) => {
     return $(element).children().length === 0 && containsInstructionLikeText($(element).text());
   }).remove();
+  $("*").each((_index, element) => {
+    if (!("attribs" in element)) {
+      return;
+    }
+    for (const attribute of Object.keys(element.attribs)) {
+      if (/^on/i.test(attribute)) {
+        $(element).removeAttr(attribute);
+      }
+    }
+  });
   $("p, div, section, article, header, footer, main, nav, aside, h1, h2, h3, h4, h5, h6, li, tr")
     .append("\n");
 
-  return { title, text: sanitizedExtractedText($("body").text()) };
+  return {
+    title,
+    text: sanitizedExtractedText($("body").text()),
+    html: $("body").html() ?? ""
+  };
 }
 
 function createPinnedLookup(address: string): LookupFunction {
@@ -960,13 +975,14 @@ export async function fetchPublicPage(
         }
         const body = await readResponse(response, maxBytes, signal);
         const extracted = contentType === "text/plain"
-          ? { title: "", text: sanitizedExtractedText(body) }
+          ? { title: "", text: sanitizedExtractedText(body), html: "" }
           : extractHtml(body);
 
         return {
           url: currentUrl.href,
           title: extracted.title,
           text: extracted.text,
+          html: extracted.html,
           checkedAt: new Date().toISOString(),
           contentType,
           untrusted: true
