@@ -81,6 +81,36 @@ describe("YC company provider", () => {
     expect(requestedUrls).toEqual([YC_DIRECTORY_URL]);
   });
 
+  it("rejects a production YC source redirected to an off-origin page", async () => {
+    const html = await readFile(fixturePath, "utf8");
+    const source = createPublicYcSource(async () => ({
+      url: "https://attacker.example/directory",
+      title: "Fake YC directory",
+      text: "Fake companies",
+      html,
+      checkedAt: CHECKED_AT,
+      contentType: "text/html",
+      untrusted: true
+    }));
+
+    await expect(createYcProvider(source).search({})).rejects.toThrow(/final.*origin/i);
+  });
+
+  it("rejects a production YC source redirected to a non-directory YC path", async () => {
+    const html = await readFile(fixturePath, "utf8");
+    const source = createPublicYcSource(async () => ({
+      url: "https://www.ycombinator.com/companies/acme-ai",
+      title: "Acme AI",
+      text: "Company page",
+      html,
+      checkedAt: CHECKED_AT,
+      contentType: "text/html",
+      untrusted: true
+    }));
+
+    await expect(createYcProvider(source).search({})).rejects.toThrow(/final.*pathname/i);
+  });
+
   it.each([
     [{ batch: "w24" }, ["Acme AI", "Orbit Health"]],
     [{ keyword: "AI" }, ["Acme AI"]],
@@ -110,5 +140,48 @@ describe("YC company provider", () => {
     const provider = createYcProvider(await fixtureSource({ checkedAt: "yesterday" }));
 
     await expect(provider.search({})).rejects.toThrow(/checkedAt.*ISO/i);
+  });
+
+  it("rejects future-dated YC source evidence beyond the allowed clock skew", async () => {
+    const provider = createYcProvider(await fixtureSource({
+      checkedAt: "2026-07-16T12:06:00.000Z"
+    }), {
+      now: () => new Date("2026-07-16T12:00:00.000Z")
+    });
+
+    await expect(provider.search({})).rejects.toThrow(/5-minute future-skew/i);
+  });
+
+  it("retains stale YC results with an explicit 30-day policy warning", async () => {
+    const provider = createYcProvider(await fixtureSource({
+      checkedAt: "2026-05-01T00:00:00.000Z"
+    }), {
+      now: () => new Date("2026-07-16T12:00:00.000Z")
+    });
+
+    const results = await provider.search({ keyword: "Acme" });
+
+    expect(results[0]?.warnings).toEqual([{
+      code: "stale-source",
+      sourceUrl: YC_DIRECTORY_URL,
+      message: "YC source is older than the 30-day freshness policy"
+    }]);
+  });
+
+  it("skips oversized YC names and URLs with explicit invalid-data warnings", async () => {
+    const fixture = await readFile(fixturePath, "utf8");
+    const html = fixture
+      .replace(">Acme AI</a>", `>${"N".repeat(161)}</a>`)
+      .replace("https://beacon.example/", `https://beacon.example/${"u".repeat(2_100)}`);
+    const provider = createYcProvider(await fixtureSource({ html }));
+
+    const results = await provider.search({});
+
+    expect(results.map(({ name }) => name)).toEqual(["Orbit Health"]);
+    expect(results[0]?.warnings.filter(({ code }) => code === "invalid-data")).toHaveLength(2);
+    expect(results[0]?.warnings.map(({ message }) => message)).toEqual(expect.arrayContaining([
+      expect.stringMatching(/company name exceeds/i),
+      expect.stringMatching(/company website URL exceeds/i)
+    ]));
   });
 });

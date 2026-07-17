@@ -30,6 +30,7 @@ export type CompanyResult = {
   websiteUrl?: string;
   checkedAt: string;
   sources: Evidence[];
+  warnings: SourceWarning[];
 };
 
 export type PersonWithEvidence = {
@@ -46,6 +47,7 @@ export type PersonWithEvidence = {
 export type DiscoveryCoverage = "authoritative-pages-only" | "search-extended";
 
 export type SourceWarning = {
+  code?: "source-failed" | "source-changed" | "budget-exhausted" | "invalid-data" | "stale-source";
   sourceUrl: string;
   message: string;
 };
@@ -68,7 +70,8 @@ export type Opportunity = {
   active: boolean;
 };
 
-export type OpportunitySearchResult = Opportunity[] & {
+export type OpportunitySearchResult = {
+  opportunities: Opportunity[];
   warnings: SourceWarning[];
   checkedAt: string;
 };
@@ -79,8 +82,16 @@ export type CareerPreferences = {
   industries: string[];
 };
 
+export type DiscoveryBudgets = {
+  maxOfficialPagesPerCompany: number;
+  maxSearchResultsPerCompany: number;
+  maxTotalRequestsPerCompany: number;
+  maxElapsedMsPerCompany: number;
+};
+
 export type SearchResult = {
   title: string;
   url: string;
   snippet: string;
+  checkedAt: string;
 };

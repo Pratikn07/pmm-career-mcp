@@ -68,6 +68,17 @@ export type EvidenceAddInput = {
   confidence: number;
 };
 
+export type CompanyPersonDiscoveryRefreshInput = {
+  companyId: string;
+  people: Array<{
+    name: string;
+    role: string;
+    publicProfileUrl?: string;
+    checkedAt: string;
+    evidence: Array<Omit<EvidenceAddInput, "personId">>;
+  }>;
+};
+
 export type TargetUpsertInput = {
   personId: string;
   pmmOpportunity: number;
@@ -114,6 +125,11 @@ function assertIsoTimestamp(field: string, value: string): string {
 function decodeOutreachDraft(row: OutreachDraftRow): OutreachDraft {
   const { evidenceIdsJson, ...draft } = row;
   return { ...draft, evidenceIds: JSON.parse(evidenceIdsJson) as string[] };
+}
+
+function normalizedPersonIdentity(name: string, role: string): string {
+  const normalize = (value: string) => value.replace(/\s+/g, " ").trim().toLocaleLowerCase("en");
+  return `${normalize(name)}\u0000${normalize(role)}`;
 }
 
 export function createRepositories(database: Database) {
@@ -233,6 +249,93 @@ export function createRepositories(database: Database) {
             asc(evidence.id)
           ).all()
         };
+      },
+      refreshDiscovery(input: CompanyPersonDiscoveryRefreshInput): PersonWithEvidence[] {
+        return database.transaction((transaction) => {
+          const existingPeople = transaction.select().from(people).where(
+            eq(people.companyId, input.companyId)
+          ).orderBy(asc(people.name), asc(people.role), asc(people.id)).all();
+          const existingByIdentity = new Map<string, Person>();
+          for (const person of existingPeople) {
+            const key = normalizedPersonIdentity(person.name, person.role);
+            if (!existingByIdentity.has(key)) {
+              existingByIdentity.set(key, person);
+            }
+          }
+          const refreshed: PersonWithEvidence[] = [];
+          for (const personInput of input.people) {
+            const name = personInput.name.replace(/\s+/g, " ").trim();
+            const role = personInput.role.replace(/\s+/g, " ").trim();
+            const checkedAt = assertIsoTimestamp("person.checkedAt", personInput.checkedAt);
+            const identity = normalizedPersonIdentity(name, role);
+            const existing = existingByIdentity.get(identity);
+            const now = nowIso();
+            const person = existing === undefined
+              ? transaction.insert(people).values({
+                  id: randomUUID(),
+                  companyId: input.companyId,
+                  name,
+                  role,
+                  publicProfileUrl: personInput.publicProfileUrl ?? null,
+                  checkedAt,
+                  createdAt: now,
+                  updatedAt: now
+                }).returning().get()
+              : transaction.update(people).set({
+                  name,
+                  role,
+                  publicProfileUrl: personInput.publicProfileUrl ?? null,
+                  checkedAt,
+                  updatedAt: now
+                }).where(eq(people.id, existing.id)).returning().get()!;
+            existingByIdentity.set(identity, person);
+
+            const priorDiscoveryEvidence = transaction.select().from(evidence).where(and(
+              eq(evidence.personId, person.id),
+              eq(evidence.factType, "public_role")
+            )).orderBy(asc(evidence.sourceUrl), asc(evidence.id)).all();
+            const unmatchedEvidence = new Set(priorDiscoveryEvidence.map((item) => item.id));
+            const refreshedEvidence: Evidence[] = [];
+            for (const evidenceInput of personInput.evidence) {
+              const evidenceCheckedAt = assertIsoTimestamp(
+                "evidence.checkedAt",
+                evidenceInput.checkedAt
+              );
+              const prior = priorDiscoveryEvidence.find((item) => {
+                return unmatchedEvidence.has(item.id)
+                  && item.sourceUrl === evidenceInput.sourceUrl
+                  && item.factType === (evidenceInput.factType ?? null);
+              });
+              const row = prior === undefined
+                ? transaction.insert(evidence).values({
+                    id: randomUUID(),
+                    personId: person.id,
+                    sourceUrl: evidenceInput.sourceUrl,
+                    title: evidenceInput.title ?? null,
+                    factType: evidenceInput.factType ?? null,
+                    fact: evidenceInput.fact,
+                    checkedAt: evidenceCheckedAt,
+                    confidence: evidenceInput.confidence,
+                    createdAt: nowIso()
+                  }).returning().get()
+                : transaction.update(evidence).set({
+                    title: evidenceInput.title ?? null,
+                    fact: evidenceInput.fact,
+                    checkedAt: evidenceCheckedAt,
+                    confidence: evidenceInput.confidence
+                  }).where(eq(evidence.id, prior.id)).returning().get()!;
+              if (prior !== undefined) {
+                unmatchedEvidence.delete(prior.id);
+              }
+              refreshedEvidence.push(row);
+            }
+            for (const staleEvidenceId of unmatchedEvidence) {
+              transaction.delete(evidence).where(eq(evidence.id, staleEvidenceId)).run();
+            }
+            refreshed.push({ ...person, evidence: refreshedEvidence });
+          }
+          return refreshed;
+        });
       }
     },
     evidence: {

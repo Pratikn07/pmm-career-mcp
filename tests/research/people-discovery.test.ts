@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createDatabase, type TestCareerDatabase } from "../../src/db/client.js";
 import type { FetchedPage } from "../../src/research/fetch-page.js";
+import * as peopleDiscoveryModule from "../../src/research/people-discovery.js";
 import { createPeopleDiscovery } from "../../src/research/people-discovery.js";
 import {
   DisabledSearchProvider,
@@ -34,6 +35,10 @@ describe("public people discovery", () => {
   });
 
   afterEach(() => database.close());
+
+  it("exports an explicit injected service factory without a misleading dependency-taking free function", () => {
+    expect(Object.keys(peopleDiscoveryModule).sort()).toEqual(["createPeopleDiscovery"]);
+  });
 
   it("discovers, normalizes, deduplicates, and persists people from official pages", async () => {
     const company = database.companies.upsert({
@@ -141,6 +146,69 @@ describe("public people discovery", () => {
     }]);
   });
 
+  it("parses conventional semantic team cards without fixture-only data attributes", async () => {
+    const company = database.companies.upsert({
+      ycId: "semantic-people",
+      name: "Semantic People",
+      websiteUrl: HOME_URL
+    });
+    const fetchPage = async (url: string): Promise<FetchedPage> => {
+      if (url === HOME_URL) {
+        return fetchedPage(url, '<nav><a href="/leadership">Leadership</a></nav>', "Company");
+      }
+      return fetchedPage(url, `
+        <main>
+          <article class="team-member">
+            <h2>Ada Semantic</h2>
+            <p class="role">Chief Executive Officer</p>
+            <a href="https://www.linkedin.com/in/ada-semantic">LinkedIn</a>
+          </article>
+          <article class="person-card">
+            <h3>Maya Semantic</h3>
+            <div class="job-title">VP Product Marketing</div>
+          </article>
+        </main>
+      `, "Leadership");
+    };
+
+    const result = await createPeopleDiscovery({
+      repositories: database,
+      fetchPage
+    }).discoverPublicPeople(company.id);
+
+    expect(result.people.map(({ name, role }) => `${name} — ${role}`)).toEqual([
+      "Ada Semantic — Chief Executive Officer",
+      "Maya Semantic — VP Product Marketing"
+    ]);
+    expect(result.warnings).toEqual([]);
+  });
+
+  it("returns a source-changed partial warning for an unrecognized discovered team page", async () => {
+    const company = database.companies.upsert({
+      ycId: "changed-people-layout",
+      name: "Changed People Layout",
+      websiteUrl: HOME_URL
+    });
+    const fetchPage = async (url: string): Promise<FetchedPage> => {
+      if (url === HOME_URL) {
+        return fetchedPage(url, '<a href="/team">Team</a>', "Company");
+      }
+      return fetchedPage(url, "<main><h1>Meet everyone</h1><div>Layout version 99</div></main>", "Team");
+    };
+
+    const result = await createPeopleDiscovery({
+      repositories: database,
+      fetchPage
+    }).discoverPublicPeople(company.id);
+
+    expect(result.people).toEqual([]);
+    expect(result.warnings).toEqual([{
+      code: "source-changed",
+      sourceUrl: TEAM_URL,
+      message: "Official people page has no recognized team or leadership structure"
+    }]);
+  });
+
   it("rejects discovery when the stored company has no official website", async () => {
     const company = database.companies.upsert({ ycId: "no-site", name: "No Site" });
 
@@ -175,7 +243,8 @@ describe("public people discovery", () => {
         return [{
           title: "Acme leadership interview",
           url: "https://press.example/acme-team",
-          snippet: "Public interview"
+          snippet: "Public interview",
+          checkedAt: CHECKED_AT
         }];
       }
     };
@@ -207,5 +276,427 @@ describe("public people discovery", () => {
       "search",
       "fetch:https://press.example/acme-team"
     ]);
+  });
+
+  it("bounds official people-page fan-out and reports deterministic truncation", async () => {
+    const company = database.companies.upsert({
+      ycId: "bounded-official-people",
+      name: "Bounded Official People",
+      websiteUrl: HOME_URL
+    });
+    const requestedUrls: string[] = [];
+    const links = Array.from({ length: 30 }, (_value, index) => {
+      return `<a href="/team-${index}">Team ${index}</a>`;
+    }).join("");
+    const service = createPeopleDiscovery({
+      repositories: database,
+      budgets: {
+        maxOfficialPagesPerCompany: 2,
+        maxSearchResultsPerCompany: 2,
+        maxTotalRequestsPerCompany: 4,
+        maxElapsedMsPerCompany: 1_000
+      },
+      fetchPage: async (url) => {
+        requestedUrls.push(url);
+        if (url === HOME_URL) {
+          return fetchedPage(url, links, "Company");
+        }
+        const suffix = new URL(url).pathname.split("-").at(-1);
+        return fetchedPage(url, `
+          <article class="team-member"><h2>Person ${suffix}</h2><p>Founder</p></article>
+        `, "Team");
+      }
+    });
+
+    const result = await service.discoverPublicPeople(company.id);
+
+    expect(requestedUrls).toEqual([HOME_URL, "https://acme.example/team-0", "https://acme.example/team-1"]);
+    expect(result.people).toHaveLength(2);
+    expect(result.warnings).toContainEqual({
+      code: "budget-exhausted",
+      sourceUrl: HOME_URL,
+      message: "Official people page budget truncated 30 candidates to 2"
+    });
+  });
+
+  it("slices over-returned search results and enforces aggregate elapsed time", async () => {
+    const company = database.companies.upsert({
+      ycId: "bounded-search-people",
+      name: "Bounded Search People",
+      websiteUrl: HOME_URL
+    });
+    let elapsedMs = 0;
+    const requestedUrls: string[] = [];
+    const searchProvider: SearchProvider = {
+      coverage: "search-extended",
+      search: async () => Array.from({ length: 20 }, (_value, index) => ({
+        title: `Person result ${index}`,
+        url: `https://press.example/person-${index}`,
+        snippet: "Public profile",
+        checkedAt: CHECKED_AT
+      }))
+    };
+    const service = createPeopleDiscovery({
+      repositories: database,
+      searchProvider,
+      elapsedNow: () => elapsedMs,
+      budgets: {
+        maxOfficialPagesPerCompany: 2,
+        maxSearchResultsPerCompany: 2,
+        maxTotalRequestsPerCompany: 5,
+        maxElapsedMsPerCompany: 1_000
+      },
+      fetchPage: async (url) => {
+        requestedUrls.push(url);
+        elapsedMs += 600;
+        if (url === HOME_URL) {
+          return fetchedPage(url, "<main>Company</main>", "Company");
+        }
+        return fetchedPage(url, `
+          <article class="person-card"><h2>Search Person</h2><p>Advisor</p></article>
+        `, "Public profile");
+      }
+    });
+
+    const result = await service.discoverPublicPeople(company.id);
+
+    expect(requestedUrls).toEqual([HOME_URL, "https://press.example/person-0"]);
+    expect(result.warnings).toContainEqual({
+      code: "budget-exhausted",
+      sourceUrl: HOME_URL,
+      message: "Search result budget truncated 20 results to 2"
+    });
+    expect(result.warnings).toContainEqual({
+      code: "budget-exhausted",
+      sourceUrl: HOME_URL,
+      message: "People discovery elapsed-time budget of 1000ms was exhausted"
+    });
+  });
+
+  it("reports aggregate elapsed-budget exhaustion after the initial people page", async () => {
+    const company = database.companies.upsert({
+      ycId: "elapsed-root-people",
+      name: "Elapsed Root People",
+      websiteUrl: TEAM_URL
+    });
+    let elapsedMs = 0;
+    const service = createPeopleDiscovery({
+      repositories: database,
+      elapsedNow: () => elapsedMs,
+      budgets: {
+        maxOfficialPagesPerCompany: 2,
+        maxSearchResultsPerCompany: 2,
+        maxTotalRequestsPerCompany: 4,
+        maxElapsedMsPerCompany: 1_000
+      },
+      fetchPage: async (url) => {
+        elapsedMs = 1_100;
+        return fetchedPage(url, `
+          <article class="team-member"><h2>Root Person</h2><p>Founder</p></article>
+        `, "Team");
+      }
+    });
+
+    const result = await service.discoverPublicPeople(company.id);
+
+    expect(result.people).toHaveLength(1);
+    expect(result.warnings).toContainEqual({
+      code: "budget-exhausted",
+      sourceUrl: TEAM_URL,
+      message: "People discovery elapsed-time budget of 1000ms was exhausted"
+    });
+  });
+
+  it("skips oversized names, roles, facts, and profile URLs before database writes", async () => {
+    const company = database.companies.upsert({
+      ycId: "bounded-person-fields",
+      name: "Bounded Person Fields",
+      websiteUrl: TEAM_URL
+    });
+    const service = createPeopleDiscovery({
+      repositories: database,
+      fetchPage: async () => fetchedPage(TEAM_URL, `
+        <article class="team-member"><h2>${"N".repeat(161)}</h2><p>Founder</p></article>
+        <article class="team-member"><h2>Role Example</h2><p>${"R".repeat(241)}</p></article>
+        <article class="team-member"><h2>${"F".repeat(150)}</h2><p>${"P".repeat(170)}</p></article>
+        <article class="team-member">
+          <h2>Profile Example</h2><p>Founder</p>
+          <a href="https://www.linkedin.com/in/${"u".repeat(2_100)}">LinkedIn</a>
+        </article>
+      `, "Team")
+    });
+
+    const result = await service.discoverPublicPeople(company.id);
+
+    expect(result.people).toEqual([]);
+    expect(database.people.listByCompany(company.id)).toEqual([]);
+    expect(result.warnings.filter(({ code }) => code === "invalid-data")).toHaveLength(4);
+    expect(result.warnings.map(({ message }) => message)).toEqual(expect.arrayContaining([
+      expect.stringMatching(/name exceeds/i),
+      expect.stringMatching(/role exceeds/i),
+      expect.stringMatching(/evidence fact exceeds/i),
+      expect.stringMatching(/profile URL exceeds/i)
+    ]));
+  });
+
+  it("accepts stale official evidence with an explicit age warning", async () => {
+    const company = database.companies.upsert({
+      ycId: "stale-people-source",
+      name: "Stale People Source",
+      websiteUrl: TEAM_URL
+    });
+    const service = createPeopleDiscovery({
+      repositories: database,
+      now: () => new Date("2026-07-16T13:00:00.000Z"),
+      fetchPage: async () => ({
+        ...fetchedPage(TEAM_URL, `
+          <article class="team-member"><h2>Stale Example</h2><p>Founder</p></article>
+        `, "Team"),
+        checkedAt: "2026-05-01T00:00:00.000Z"
+      })
+    });
+
+    const result = await service.discoverPublicPeople(company.id);
+
+    expect(result.people.map(({ name }) => name)).toEqual(["Stale Example"]);
+    expect(result.warnings).toContainEqual({
+      code: "stale-source",
+      sourceUrl: TEAM_URL,
+      message: "Public people source is older than the 30-day freshness policy"
+    });
+  });
+
+  it("rejects future-dated official evidence before database writes", async () => {
+    const company = database.companies.upsert({
+      ycId: "future-people-source",
+      name: "Future People Source",
+      websiteUrl: TEAM_URL
+    });
+    const service = createPeopleDiscovery({
+      repositories: database,
+      now: () => new Date("2026-07-16T13:00:00.000Z"),
+      fetchPage: async () => ({
+        ...fetchedPage(TEAM_URL, `
+          <article class="team-member"><h2>Future Example</h2><p>Founder</p></article>
+        `, "Team"),
+        checkedAt: "2026-07-16T13:06:00.000Z"
+      })
+    });
+
+    const result = await service.discoverPublicPeople(company.id);
+
+    expect(result.people).toEqual([]);
+    expect(database.people.listByCompany(company.id)).toEqual([]);
+    expect(result.warnings).toContainEqual({
+      code: "invalid-data",
+      sourceUrl: TEAM_URL,
+      message: "Public people source checkedAt exceeds the 5-minute future-skew allowance"
+    });
+  });
+
+  it("validates stale and future timestamps supplied by a search adapter before fetching results", async () => {
+    const company = database.companies.upsert({
+      ycId: "dated-search-results",
+      name: "Dated Search Results",
+      websiteUrl: HOME_URL
+    });
+    const requestedUrls: string[] = [];
+    const searchProvider: SearchProvider = {
+      coverage: "search-extended",
+      search: async () => [{
+        title: "Stale result",
+        url: "https://press.example/stale-person",
+        snippet: "Profile",
+        checkedAt: "2026-05-01T00:00:00.000Z"
+      }, {
+        title: "Future result",
+        url: "https://press.example/future-person",
+        snippet: "Profile",
+        checkedAt: "2026-07-16T13:06:00.000Z"
+      }]
+    };
+    const service = createPeopleDiscovery({
+      repositories: database,
+      searchProvider,
+      now: () => new Date("2026-07-16T13:00:00.000Z"),
+      fetchPage: async (url) => {
+        requestedUrls.push(url);
+        if (url === HOME_URL) {
+          return fetchedPage(url, "<main>Company</main>", "Company");
+        }
+        return fetchedPage(url, `
+          <article class="person-card"><h2>Search Dated</h2><p>Advisor</p></article>
+        `, "Profile");
+      }
+    });
+
+    const result = await service.discoverPublicPeople(company.id);
+
+    expect(requestedUrls).toEqual([HOME_URL, "https://press.example/stale-person"]);
+    expect(result.warnings).toContainEqual({
+      code: "stale-source",
+      sourceUrl: "https://press.example/stale-person",
+      message: "Search result is older than the 30-day freshness policy"
+    });
+    expect(result.warnings).toContainEqual({
+      code: "invalid-data",
+      sourceUrl: "https://press.example/future-person",
+      message: "Search result checkedAt exceeds the 5-minute future-skew allowance"
+    });
+  });
+
+  it("refreshes people and discovery evidence idempotently", async () => {
+    const company = database.companies.upsert({
+      ycId: "idempotent-people",
+      name: "Idempotent People",
+      websiteUrl: TEAM_URL
+    });
+    const service = createPeopleDiscovery({
+      repositories: database,
+      fetchPage: async () => fetchedPage(TEAM_URL, `
+        <article class="team-member"><h2>Ada Refresh</h2><p>Founder</p></article>
+      `, "Team")
+    });
+
+    const first = await service.discoverPublicPeople(company.id);
+    const second = await service.discoverPublicPeople(company.id);
+    const persisted = database.people.getWithEvidence(first.people[0]!.id);
+
+    expect(second.people[0]?.id).toBe(first.people[0]?.id);
+    expect(second.people[0]?.evidence[0]?.id).toBe(first.people[0]?.evidence[0]?.id);
+    expect(persisted?.evidence).toHaveLength(1);
+  });
+
+  it("normalizes persistent identity across case and whitespace drift and clears a removed profile link", async () => {
+    const company = database.companies.upsert({
+      ycId: "normalized-refresh-people",
+      name: "Normalized Refresh People",
+      websiteUrl: TEAM_URL
+    });
+    let html = `
+      <article class="team-member">
+        <h2>Ada Example</h2><p>VP Product Marketing</p>
+        <a href="https://www.linkedin.com/in/ada-example">LinkedIn</a>
+      </article>
+    `;
+    const service = createPeopleDiscovery({
+      repositories: database,
+      fetchPage: async () => fetchedPage(TEAM_URL, html, "Team")
+    });
+    const first = await service.discoverPublicPeople(company.id);
+    html = `
+      <article class="team-member">
+        <h2>  ada   example </h2><p> vp   product marketing </p>
+      </article>
+    `;
+
+    const second = await service.discoverPublicPeople(company.id);
+    const persisted = database.people.listByCompany(company.id);
+
+    expect(persisted).toHaveLength(1);
+    expect(second.people[0]?.id).toBe(first.people[0]?.id);
+    expect(persisted[0]).toMatchObject({
+      name: "ada example",
+      role: "vp product marketing",
+      publicProfileUrl: null
+    });
+  });
+
+  it("rolls back an entire company refresh when one normalized identity cannot be updated", async () => {
+    const company = database.companies.upsert({
+      ycId: "rollback-refresh-people",
+      name: "Rollback Refresh People",
+      websiteUrl: TEAM_URL
+    });
+    const aaron = database.people.upsert({
+      companyId: company.id,
+      name: "Aaron Changed",
+      role: "Founder",
+      publicProfileUrl: "https://www.linkedin.com/in/aaron-old"
+    });
+    database.people.upsert({ companyId: company.id, name: "Ada  Example", role: "CEO" });
+    database.people.upsert({ companyId: company.id, name: "Ada Example", role: "CEO" });
+    const service = createPeopleDiscovery({
+      repositories: database,
+      fetchPage: async () => fetchedPage(TEAM_URL, `
+        <article class="team-member">
+          <h2>Aaron Changed</h2><p>Founder</p>
+          <a href="https://www.linkedin.com/in/aaron-new">LinkedIn</a>
+        </article>
+        <article class="team-member"><h2>Ada Example</h2><p>CEO</p></article>
+      `, "Team")
+    });
+
+    await expect(service.discoverPublicPeople(company.id)).rejects.toThrow(/UNIQUE/i);
+
+    expect(database.people.get(aaron.id)?.publicProfileUrl).toBe(
+      "https://www.linkedin.com/in/aaron-old"
+    );
+    expect(database.evidence.listForPerson(aaron.id)).toEqual([]);
+  });
+
+  it("rejects missing search freshness and oversized search URLs before fetching", async () => {
+    const company = database.companies.upsert({
+      ycId: "invalid-search-fields",
+      name: "Invalid Search Fields",
+      websiteUrl: HOME_URL
+    });
+    const requestedUrls: string[] = [];
+    const searchProvider = {
+      coverage: "search-extended" as const,
+      search: async () => [{
+        title: "Missing timestamp",
+        url: "https://press.example/missing-time",
+        snippet: "Profile"
+      }, {
+        title: "Oversized URL",
+        url: `https://press.example/${"u".repeat(2_100)}`,
+        snippet: "Profile",
+        checkedAt: CHECKED_AT
+      }]
+    } as SearchProvider;
+    const service = createPeopleDiscovery({
+      repositories: database,
+      searchProvider,
+      fetchPage: async (url) => {
+        requestedUrls.push(url);
+        return fetchedPage(url, "<main>Company</main>", "Company");
+      }
+    });
+
+    const result = await service.discoverPublicPeople(company.id);
+
+    expect(requestedUrls).toEqual([HOME_URL]);
+    expect(result.warnings.map(({ message }) => message)).toEqual(expect.arrayContaining([
+      "Search result checkedAt is required",
+      expect.stringMatching(/search result URL exceeds/i)
+    ]));
+  });
+
+  it("rejects an oversized official people candidate URL before fetching", async () => {
+    const company = database.companies.upsert({
+      ycId: "oversized-official-person-url",
+      name: "Oversized Official Person URL",
+      websiteUrl: HOME_URL
+    });
+    const requestedUrls: string[] = [];
+    const service = createPeopleDiscovery({
+      repositories: database,
+      fetchPage: async (url) => {
+        requestedUrls.push(url);
+        return fetchedPage(url, `
+          <a href="/team-${"u".repeat(2_100)}">Team</a>
+        `, "Company");
+      }
+    });
+
+    const result = await service.discoverPublicPeople(company.id);
+
+    expect(requestedUrls).toEqual([HOME_URL]);
+    expect(result.warnings).toContainEqual({
+      code: "invalid-data",
+      sourceUrl: HOME_URL,
+      message: "Official people candidate URL exceeds 2048 characters or 4096 UTF-8 bytes"
+    });
   });
 });

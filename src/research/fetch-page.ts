@@ -47,6 +47,22 @@ const MAX_STYLESHEET_SELECTOR_PARTS = 8;
 const MAX_STYLESHEET_CUSTOM_PROPERTIES = 64;
 const MAX_STYLESHEET_MATCH_WORK = 50_000;
 const MAX_INSTRUCTION_BLOCK_SCAN_WORK = 50_000;
+const MAX_STRUCTURAL_ATTRIBUTE_CHARS = 512;
+const MAX_STRUCTURAL_HREF_CHARS = 2_048;
+const STRUCTURAL_HTML_TAGS = new Set([
+  "a", "address", "article", "aside", "b", "blockquote", "br", "dd", "div", "dl", "dt",
+  "em", "footer", "h1", "h2", "h3", "h4", "h5", "h6", "header", "i", "li", "main",
+  "nav", "ol", "p", "section", "small", "span", "strong", "table", "tbody", "td", "th",
+  "thead", "time", "tr", "ul"
+]);
+const STRUCTURAL_HTML_ATTRIBUTES = new Set([
+  "aria-describedby", "aria-label", "aria-labelledby", "class", "id", "role",
+  "data-careers-list", "data-company-batch", "data-company-hiring", "data-company-industry",
+  "data-company-location", "data-company-status", "data-company-website", "data-job-id",
+  "data-job-location", "data-job-posting", "data-job-status", "data-job-title", "data-job-url",
+  "data-person-name", "data-person-role", "data-team-member", "data-yc-company-directory",
+  "data-yc-company-id"
+]);
 
 type HostWaiter = {
   signal: AbortSignal;
@@ -715,7 +731,84 @@ function removeAdjacentInstructionBlocks($: ReturnType<typeof load>): void {
   $(Array.from(blocksToRemove)).remove();
 }
 
-function extractHtml(html: string): { title: string; text: string; html: string } {
+function normalizedStructuralHref(value: string, baseUrl: URL): string | undefined {
+  if (value.length > MAX_STRUCTURAL_HREF_CHARS) {
+    return undefined;
+  }
+  try {
+    const url = new URL(value, baseUrl);
+    if (
+      (url.protocol !== "http:" && url.protocol !== "https:")
+      || url.username !== ""
+      || url.password !== ""
+    ) {
+      return undefined;
+    }
+    return url.href;
+  } catch {
+    return undefined;
+  }
+}
+
+function removeInstructionSubtrees($: ReturnType<typeof load>): void {
+  for (const element of $("body *").toArray().reverse()) {
+    if (containsInstructionLikeText($(element).text())) {
+      $(element).remove();
+    }
+  }
+  for (const node of $("body").contents().toArray()) {
+    if (node.type === "text" && containsInstructionLikeText(node.data)) {
+      $(node).remove();
+    }
+  }
+}
+
+function sanitizeStructuralHtml($: ReturnType<typeof load>, baseUrl: URL): void {
+  $("body, body *").contents().filter((_index, node) => node.type === "comment").remove();
+  for (const element of $("body *").toArray().reverse()) {
+    if (!("tagName" in element)) {
+      $(element).remove();
+      continue;
+    }
+    const tagName = element.tagName.toLowerCase();
+    if (!STRUCTURAL_HTML_TAGS.has(tagName)) {
+      $(element).replaceWith($(element).contents());
+      continue;
+    }
+    if (!("attribs" in element)) {
+      continue;
+    }
+    const retainedAttributes: Array<readonly [string, string]> = [];
+    for (const [rawName, rawValue] of Object.entries(element.attribs)) {
+      const name = rawName.toLowerCase();
+      if (tagName === "a" && name === "href") {
+        const href = normalizedStructuralHref(rawValue.trim(), baseUrl);
+        if (href !== undefined) {
+          retainedAttributes.push(["href", href]);
+        }
+        continue;
+      }
+      if (!STRUCTURAL_HTML_ATTRIBUTES.has(name)) {
+        continue;
+      }
+      const value = normalizedText(rawValue);
+      if (
+        value.length <= MAX_STRUCTURAL_ATTRIBUTE_CHARS
+        && !containsInstructionLikeText(value)
+      ) {
+        retainedAttributes.push([name, value]);
+      }
+    }
+    for (const name of Object.keys(element.attribs)) {
+      $(element).removeAttr(name);
+    }
+    for (const [name, value] of retainedAttributes) {
+      $(element).attr(name, value);
+    }
+  }
+}
+
+function extractHtml(html: string, baseUrl: URL): { title: string; text: string; html: string } {
   const $ = load(html);
   const title = sanitizedExtractedText($("title").first().text());
 
@@ -735,25 +828,8 @@ function extractHtml(html: string): { title: string; text: string; html: string 
   }).remove();
   $("br").replaceWith("\n");
   removeAdjacentInstructionBlocks($);
-  const instructionBlocks = $(INSTRUCTION_BLOCK_SELECTOR).toArray().reverse();
-  for (const element of instructionBlocks) {
-    if (containsInstructionLikeText($(element).text())) {
-      $(element).remove();
-    }
-  }
-  $("body *").filter((_index, element) => {
-    return $(element).children().length === 0 && containsInstructionLikeText($(element).text());
-  }).remove();
-  $("*").each((_index, element) => {
-    if (!("attribs" in element)) {
-      return;
-    }
-    for (const attribute of Object.keys(element.attribs)) {
-      if (/^on/i.test(attribute)) {
-        $(element).removeAttr(attribute);
-      }
-    }
-  });
+  removeInstructionSubtrees($);
+  sanitizeStructuralHtml($, baseUrl);
   $("p, div, section, article, header, footer, main, nav, aside, h1, h2, h3, h4, h5, h6, li, tr")
     .append("\n");
 
@@ -976,7 +1052,7 @@ export async function fetchPublicPage(
         const body = await readResponse(response, maxBytes, signal);
         const extracted = contentType === "text/plain"
           ? { title: "", text: sanitizedExtractedText(body), html: "" }
-          : extractHtml(body);
+          : extractHtml(body, currentUrl);
 
         return {
           url: currentUrl.href,
