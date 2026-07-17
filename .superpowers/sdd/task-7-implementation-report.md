@@ -32,3 +32,11 @@ No live Supabase project, dashboard, credentials, migration application, or OAut
 - Added faked resolver/operation tests for the confirmation gate, hostname rejection, private IPv4/IPv6/mapped-address results, rollback after read/write failures, independent fresh-marker verification, and independent connection closure.
 
 Follow-up verification: focused Task 7 tests passed (3 files / 33 tests); the complete suite passed (33 files / 460 tests); type checking, production build, and `git diff --check` passed. No live smoke command was run.
+
+## Second security-review follow-up
+
+- Restored standard credential-bearing PostgreSQL URL support. The smoke script preserves URL userinfo only for the pinned Postgres client and never emits it. It now requires port `5432`, database path `/postgres`, no query, no fragment, and the restricted Supabase database/pooler hostname shapes.
+- Simplified the resolver policy to IPv4 only: every IPv6 result is rejected, including ordinary global, NAT64, 6to4, IPv4-mapped, loopback, ULA, and link-local forms. IPv4 private/reserved rejection and IP pinning remain unchanged.
+- Added fake-only coverage that proves a realistic pooler URL's credentials reach the pinned client factory privately, while arbitrary hosts still fail before DNS/connection work.
+
+Second follow-up verification: focused Task 7 tests passed (3 files / 38 tests); the complete suite passed (33 files / 465 tests); type checking, production build, and `git diff --check` passed. No live DNS, database, dashboard, credentials, or smoke command was used.

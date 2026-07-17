@@ -4,6 +4,7 @@ import {
   runLiveSupabaseSmoke,
   runSupabaseSmoke,
   validateLiveSupabaseDatabaseUrl,
+  type PinnedSupabaseDatabaseTarget,
   type SupabaseSmokeOperations
 } from "../../scripts/smoke-supabase.js";
 
@@ -29,7 +30,8 @@ describe("Supabase live target guard", () => {
   it.each([
     "file:///tmp/career.db",
     "https://db.project-ref.supabase.co/postgres",
-    "postgresql://user:password@db.project-ref.supabase.co:5432/postgres",
+    "postgresql://db.project-ref.supabase.co:6543/postgres",
+    "postgresql://db.project-ref.supabase.co:5432/not-postgres",
     "postgresql://db.project-ref.supabase.co:5432/postgres?sslmode=require",
     "postgresql://db.project-ref.supabase.co:5432/postgres#fragment",
     "postgresql://localhost.:5432/postgres",
@@ -42,8 +44,11 @@ describe("Supabase live target guard", () => {
     expect(() => validateLiveSupabaseDatabaseUrl(value)).toThrow(/live Supabase PostgreSQL/i);
   });
 
-  it("accepts only a credential-free official Supabase database hostname", () => {
+  it("accepts an official Supabase database hostname with private URL credentials", () => {
     expect(validateLiveSupabaseDatabaseUrl(canonicalUrl)).toBe(canonicalUrl);
+    expect(validateLiveSupabaseDatabaseUrl(
+      "postgresql://postgres.project-ref:fake-password@aws-0-us-east-1.pooler.supabase.com:5432/postgres"
+    )).toContain("pooler.supabase.com");
     expect(validateLiveSupabaseDatabaseUrl("postgresql://aws-0-us-east-1.pooler.supabase.com:5432/postgres"))
       .toContain("pooler.supabase.com");
   });
@@ -55,12 +60,15 @@ describe("Supabase live target guard", () => {
   });
 
   it.each([
+    "2606:4700:4700::1111",
+    "64:ff9b::c000:0201",
+    "2002:c000:0201::",
     "::1",
     "::ffff:127.0.0.1",
     "::ffff:7f00:1",
     "fc00::1",
     "fe80::1"
-  ])("rejects private, mapped, and link-local IPv6 resolver results: %s", async (address) => {
+  ])("rejects every IPv6 resolver result, including mapped and transition forms: %s", async (address) => {
     await expect(resolveAndPinLiveSupabaseDatabaseUrl(canonicalUrl, async () => [{ address, family: 6 }]))
       .rejects.toThrow(/live Supabase PostgreSQL/i);
   });
@@ -96,6 +104,26 @@ describe("Supabase live target guard", () => {
 
     expect(lookup).not.toHaveBeenCalled();
     expect(createOperations).not.toHaveBeenCalled();
+  });
+
+  it("passes a credential-bearing pooler URL privately to the pinned client factory", async () => {
+    const createOperations = vi.fn(async (_target: PinnedSupabaseDatabaseTarget) => operations());
+    const databaseUrl = "postgresql://postgres.project-ref:fake-password@aws-0-us-east-1.pooler.supabase.com:5432/postgres";
+
+    await runLiveSupabaseSmoke({
+      CONFIRM_LIVE_SUPABASE_SMOKE: "yes",
+      DATABASE_URL: databaseUrl
+    }, {
+      lookup: async () => [{ address: "1.1.1.1", family: 4 }],
+      createOperations
+    });
+
+    const target = createOperations.mock.calls[0]?.[0];
+    if (target === undefined) throw new Error("client factory was not called");
+    const pinnedUrl = new URL(target.databaseUrl);
+    expect(pinnedUrl.hostname).toBe("1.1.1.1");
+    expect(pinnedUrl.username).toBe("postgres.project-ref");
+    expect(pinnedUrl.password).toBe("fake-password");
   });
 });
 

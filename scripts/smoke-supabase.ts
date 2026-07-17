@@ -53,8 +53,8 @@ function hostnameFromDatabaseUrl(databaseUrl: string): string {
       || /^[a-z0-9-]+\.pooler\.supabase\.com$/.test(hostname);
     if (
       (parsed.protocol !== "postgres:" && parsed.protocol !== "postgresql:")
-      || parsed.username !== ""
-      || parsed.password !== ""
+      || parsed.port !== "5432"
+      || parsed.pathname !== "/postgres"
       || parsed.search !== ""
       || parsed.hash !== ""
       || !allowedSupabaseHost
@@ -102,53 +102,8 @@ function isPublicIpv4(address: string): boolean {
   );
 }
 
-function ipv6Bytes(address: string): number[] | undefined {
-  const normalized = address.toLowerCase();
-  const halves = normalized.split("::");
-  if (halves.length > 2) return undefined;
-  const expand = (value: string): string[] | undefined => {
-    if (value.length === 0) return [];
-    const parts = value.split(":");
-    const embedded = parts.at(-1);
-    if (embedded !== undefined && embedded.includes(".")) {
-      const octets = ipv4Octets(embedded);
-      if (octets === undefined) return undefined;
-      parts.splice(-1, 1, ((octets[0]! << 8) | octets[1]!).toString(16), ((octets[2]! << 8) | octets[3]!).toString(16));
-    }
-    return parts.every((part) => /^[0-9a-f]{1,4}$/.test(part)) ? parts : undefined;
-  };
-  const left = expand(halves[0] ?? "");
-  const right = expand(halves[1] ?? "");
-  if (left === undefined || right === undefined) return undefined;
-  const missing = 8 - left.length - right.length;
-  if ((halves.length === 1 && missing !== 0) || missing < 0) return undefined;
-  const groups = [...left, ...Array<string>(missing).fill("0"), ...right];
-  if (groups.length !== 8) return undefined;
-  return groups.flatMap((group) => {
-    const value = Number.parseInt(group, 16);
-    return [value >> 8, value & 0xff];
-  });
-}
-
-function isPublicIpv6(address: string): boolean {
-  const bytes = ipv6Bytes(address);
-  if (bytes === undefined) return false;
-  const mappedIpv4 = bytes.slice(0, 12).every((byte, index) => byte === (index === 10 || index === 11 ? 0xff : 0));
-  if (mappedIpv4) return isPublicIpv4(bytes.slice(12).join("."));
-  const [first, second, third, fourth] = bytes;
-  if (first === undefined || second === undefined || third === undefined || fourth === undefined) return false;
-  return !(
-    first === 0
-    || first === 0xff
-    || (first & 0xfe) === 0xfc
-    || (first === 0xfe && (second & 0xc0) === 0x80)
-    || (first === 0x20 && second === 0x01 && third === 0x0d && fourth === 0xb8)
-  );
-}
-
 function isPublicIp(address: string): boolean {
-  const family = isIP(address);
-  return family === 4 ? isPublicIpv4(address) : family === 6 ? isPublicIpv6(address) : false;
+  return isIP(address) === 4 && isPublicIpv4(address);
 }
 
 const defaultLookup: DnsResolver = async (hostname) => dnsLookup(hostname, { all: true, verbatim: true });
