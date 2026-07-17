@@ -13,9 +13,11 @@
     "pretest": "npm run build",
     "dev": "node --env-file-if-exists=.env --import tsx --watch src/index.ts",
     "start": "node --env-file-if-exists=.env dist/src/index.js",
+    "smoke:supabase": "tsx scripts/smoke-supabase.ts",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "verify:oauth-token": "tsx scripts/verify-oauth-token.ts"
   },
   "keywords": [],
   "author": "",
