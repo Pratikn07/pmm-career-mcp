@@ -116,7 +116,7 @@ export function createHttpApp(deps: HttpDependencies): Express {
         response.status(404).end();
         return;
       }
-      response.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+      response.setHeader("Cache-Control", "no-cache");
       response.setHeader("X-Content-Type-Options", "nosniff");
       response.type("application/javascript").sendFile("consent-client.js", {
         root: publicDirectory,

@@ -23,3 +23,16 @@
 - `npm run typecheck` — passed
 - `npm run build` — passed
 - `git diff --check` — passed
+
+## Security review corrections
+
+- Added `scripts/` to the Docker build stage before `npm run build`, with a regression test that enforces the copy/build order. The Docker image build now proves the consent bundle is produced in-image.
+- Tightened the consent-page CSP so `connect-src` permits only the configured Supabase origin; it no longer allows same-origin browser connections.
+- Changed the fixed-name browser bundle cache policy from a one-year immutable response to `no-cache`, ensuring clients revalidate after deployments.
+
+### Correction verification
+
+- `npm test -- tests/oauth/consent-page.test.ts tests/build/dockerfile.test.ts tests/oauth/consent-client.test.ts tests/health.test.ts` — 14 passed
+- `npm test` — 29 files, 419 tests passed
+- `npm run typecheck` and `npm run build` — passed
+- `docker build -t pmm-career-mcp:supabase-task5-security .` — passed

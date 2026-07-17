@@ -24,7 +24,7 @@ export function hasConsentPageConfiguration(config: AppConfig): config is AppCon
 }
 
 export function consentContentSecurityPolicy(supabaseUrl: string): string {
-  return `default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self' ${new URL(supabaseUrl).origin}; frame-ancestors 'none'; form-action 'none'; base-uri 'none'`;
+  return `default-src 'none'; script-src 'self'; style-src 'self'; connect-src ${new URL(supabaseUrl).origin}; frame-ancestors 'none'; form-action 'none'; base-uri 'none'`;
 }
 
 export function applyConsentSecurityHeaders(

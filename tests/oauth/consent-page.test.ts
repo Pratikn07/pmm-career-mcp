@@ -60,21 +60,21 @@ describe("Supabase OAuth consent page", () => {
 
     const response = await request(app).get(`/oauth/consent?authorization_id=${validAuthorizationId}`);
 
-    expect(response.headers["content-security-policy"]).toBe("default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self' http://127.0.0.1:54321; frame-ancestors 'none'; form-action 'none'; base-uri 'none'");
+    expect(response.headers["content-security-policy"]).toBe("default-src 'none'; script-src 'self'; style-src 'self'; connect-src http://127.0.0.1:54321; frame-ancestors 'none'; form-action 'none'; base-uri 'none'");
     expect(response.headers["cache-control"]).toBe("no-store");
     expect(response.headers["x-frame-options"]).toBe("DENY");
     expect(response.headers["referrer-policy"]).toBe("no-referrer");
     expect(response.text).not.toMatch(/<(?:script|link)[^>]+https?:\/\//i);
   });
 
-  it("serves the local client bundle with immutable cache headers", async () => {
+  it("serves the fixed local client bundle with a revalidation cache policy", async () => {
     const app = createHttpApp({ config: oauthConfig(), mcpHandler: (_request, response) => response.sendStatus(204) });
 
     const response = await request(app).get("/oauth/consent-client.js");
 
     expect(response.status).toBe(200);
     expect(response.headers["content-type"]).toMatch(/^application\/javascript/);
-    expect(response.headers["cache-control"]).toBe("public, max-age=31536000, immutable");
+    expect(response.headers["cache-control"]).toBe("no-cache");
     expect(response.headers.location).toBeUndefined();
   });
 });
