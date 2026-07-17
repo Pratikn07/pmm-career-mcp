@@ -151,6 +151,7 @@ export async function createCareerApplication(
   const linkedin = options.linkedinOAuth ?? unavailableLinkedInOAuth();
   const app = createHttpApp({
     config: options.config,
+    checkReady: () => database.checkReady(),
     mcpServerFactory: () => createCareerMcpServer({
       ycProvider,
       peopleDiscovery,
@@ -207,8 +208,17 @@ export async function startServer(
   const database = await (dependencies.createDatabase ?? createDatabase)(config.databaseUrl, {
     requireTls: config.nodeEnv === "production"
   });
-  const linkedin = oauthFromEnvironment(database, config, env);
-  const runtime = await createCareerApplication({ config, database, linkedinOAuth: linkedin });
+  let runtime: CareerApplication;
+  try {
+    // createDatabase applies migrations. Probe before listening so a process
+    // only receives traffic after the migrated database is usable.
+    await database.checkReady();
+    const linkedin = oauthFromEnvironment(database, config, env);
+    runtime = await createCareerApplication({ config, database, linkedinOAuth: linkedin });
+  } catch (error) {
+    await database.close().catch(() => undefined);
+    throw error;
+  }
   const server = runtime.app.listen(config.port);
   let closing: Promise<void> | undefined;
   const close = (): Promise<void> => {

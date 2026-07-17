@@ -13,6 +13,8 @@ import { resolve } from "node:path";
 type CommonHttpDependencies = {
   /** Required by hosted OAuth deployments; omitted only for existing local test handlers. */
   config?: AppConfig;
+  /** A lightweight query that confirms the migrated database is reachable. */
+  checkReady?: () => Promise<void>;
 };
 
 type LegacyHttpDependencies = CommonHttpDependencies & {
@@ -97,6 +99,18 @@ export function createHttpApp(deps: HttpDependencies): Express {
 
   app.get("/health", (_request, response) => {
     response.json({ status: "ok" });
+  });
+  app.get("/ready", async (_request, response) => {
+    if (deps.checkReady === undefined) {
+      response.status(503).json({ status: "not_ready" });
+      return;
+    }
+    try {
+      await deps.checkReady();
+      response.json({ status: "ready" });
+    } catch {
+      response.status(503).json({ status: "not_ready" });
+    }
   });
   const consentConfig = deps.config;
   if (consentConfig !== undefined && hasConsentPageConfiguration(consentConfig)) {

@@ -1,6 +1,8 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { spawn } from "node:child_process";
 import express from "express";
+import { once } from "node:events";
 import type { Server } from "node:http";
 import { afterEach, expect, it, vi } from "vitest";
 import type { CareerDatabase } from "../../src/db/client.js";
@@ -56,9 +58,12 @@ function fakeServer(order: string[] = []) {
   return { server, isClosed: () => closed };
 }
 
-function fakeDatabase(close: () => Promise<void> = async () => undefined): CareerDatabase {
+function fakeDatabase(
+  close: () => Promise<void> = async () => undefined,
+  checkReady: () => Promise<void> = async () => undefined
+): CareerDatabase {
   return {
-    checkReady: async () => undefined,
+    checkReady,
     close
   } as unknown as CareerDatabase;
 }
@@ -85,9 +90,33 @@ afterEach(() => {
   vi.unstubAllEnvs();
 });
 
-it("waits for database creation before opening the HTTP listener", async () => {
+it("fails closed when the production entrypoint is invoked with Docker's relative command path", async () => {
+  const databasePassword = "placeholder-db-password";
+  const child = spawn(process.execPath, ["dist/src/index.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      NODE_ENV: "production",
+      DATABASE_URL: `postgresql://app:${databasePassword}@127.0.0.1:1/career_mcp`,
+      BASE_URL: "https://career.example",
+      AUTH_MODE: "none"
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  let output = "";
+  child.stdout.on("data", (chunk: Buffer) => { output += chunk.toString(); });
+  child.stderr.on("data", (chunk: Buffer) => { output += chunk.toString(); });
+
+  const [code] = await once(child, "exit") as [number | null];
+
+  expect(code).toBe(1);
+  expect(output).not.toContain(databasePassword);
+});
+
+it("waits for database migration and readiness before opening the HTTP listener", async () => {
   const databaseCreation = deferred<CareerDatabase>();
-  const database = fakeDatabase();
+  const readiness = deferred<void>();
+  const database = fakeDatabase(undefined, () => readiness.promise);
   const createDatabase = vi.fn(() => databaseCreation.promise);
   const listener = fakeServer();
   const listen = vi.spyOn(express.application, "listen").mockReturnValue(listener.server);
@@ -103,6 +132,10 @@ it("waits for database creation before opening the HTTP listener", async () => {
     expect(listen).not.toHaveBeenCalled();
 
     databaseCreation.resolve(database);
+    await Promise.resolve();
+    expect(listen).not.toHaveBeenCalled();
+
+    readiness.resolve();
     runtime = await startup;
     expect(listen).toHaveBeenCalledOnce();
   } finally {
@@ -110,6 +143,19 @@ it("waits for database creation before opening the HTTP listener", async () => {
     runtime ??= await startup.catch(() => undefined);
     await closeUnexpectedRuntime(runtime);
   }
+});
+
+it("does not open an HTTP listener when the database readiness probe fails", async () => {
+  const createDatabase = vi.fn(async () => fakeDatabase(
+    async () => undefined,
+    async () => { throw new Error("database readiness unavailable"); }
+  ));
+  const listener = fakeServer();
+  const listen = vi.spyOn(express.application, "listen").mockReturnValue(listener.server);
+  vi.spyOn(process, "once").mockReturnValue(process);
+
+  await expect(startServer(testEnvironment(), { createDatabase })).rejects.toThrow("database readiness unavailable");
+  expect(listen).not.toHaveBeenCalled();
 });
 
 it("passes production TLS intent from injected config instead of global process state", async () => {
@@ -238,5 +284,41 @@ it("closes HTTP before closing the database", async () => {
     expect(order).toEqual(["http", "database"]);
   } finally {
     await closeUnexpectedRuntime(runtime);
+  }
+});
+
+it("handles competing shutdown signals only once and closes HTTP before the pool", async () => {
+  const order: string[] = [];
+  const databaseClose = vi.fn(async () => { order.push("database"); });
+  const database = fakeDatabase(databaseClose);
+  let finishClose!: () => void;
+  const server = {
+    close: vi.fn((callback?: (error?: Error) => void) => {
+      order.push("http");
+      finishClose = () => callback?.();
+      return server;
+    })
+  } as unknown as Server;
+  const handlers = new Map<string, () => void>();
+  vi.spyOn(express.application, "listen").mockReturnValue(server);
+  vi.spyOn(process, "once").mockImplementation((signal, handler) => {
+    handlers.set(String(signal), handler as () => void);
+    return process;
+  });
+  const runtime = await startServer(testEnvironment(), {
+    createDatabase: async () => database
+  });
+
+  try {
+    handlers.get("SIGTERM")?.();
+    handlers.get("SIGINT")?.();
+    expect(server.close).toHaveBeenCalledOnce();
+    expect(databaseClose).not.toHaveBeenCalled();
+
+    finishClose();
+    await vi.waitFor(() => expect(databaseClose).toHaveBeenCalledOnce());
+    expect(order).toEqual(["http", "database"]);
+  } finally {
+    await runtime.close();
   }
 });

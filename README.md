@@ -15,15 +15,17 @@ npm run dev
 curl --fail http://127.0.0.1:3000/health
 ```
 
-The server creates and migrates the SQLite database at `DATABASE_PATH` on startup. For local development, `AUTH_MODE=none` is allowed only outside production and publishing stays off by default.
+The server applies its committed PostgreSQL migrations and verifies database readiness before opening its HTTP listener. For local development, `AUTH_MODE=none` is allowed only outside production and publishing stays off by default.
+
+The Docker health check calls `/health` because it is deliberately a process-liveness probe. Configure Railway deployment readiness verification to call `/ready`; it additionally checks the migrated database without exposing database errors or connection details.
 
 ## Host and connect ChatGPT
 
-Production needs an HTTPS hostname, a persistent volume mounted at `/app/data`, and a real OAuth provider. Build and run the container with a persistent data directory:
+Production needs an HTTPS hostname, a PostgreSQL/Supabase `DATABASE_URL`, and a real OAuth provider. The container is stateless and needs no persistent volume:
 
 ```bash
 docker build -t career-mcp:local .
-docker run --rm -p 3000:3000 --env-file .env -v "$(pwd)/data:/app/data" career-mcp:local
+docker run --rm -p 3000:3000 --env-file .env career-mcp:local
 ```
 
 For an initial local check, expose the server through a secure HTTPS tunnel that you control. Do not make a no-auth tunnel public. Before production, set `NODE_ENV=production`, use an HTTPS `BASE_URL`, set `AUTH_MODE=oauth`, and configure all of `OIDC_ISSUER`, `OIDC_AUDIENCE`, `ALLOWED_SUBJECT`, and `TOKEN_ENCRYPTION_KEY`.
