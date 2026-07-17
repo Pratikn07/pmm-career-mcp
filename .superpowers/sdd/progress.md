@@ -11,8 +11,8 @@ Worktree: `/Users/pratik.nandoskar/Documents/working/pmm-career-mcp/.worktrees/s
 | 3. Transaction/concurrency invariants | Complete | Complete | Approved | `16b6d97` |
 | 4. Supabase OAuth resource protection | Complete | Complete | Approved | `7470828`, `c149cc3`, `2aa950b` |
 | 5. Login and consent page | Complete | Complete | Approved | `4146c4e`, `6d3e77f` |
-| 6. Readiness/startup/Docker | In progress | — | — | — |
-| 7. Live smoke verification | Pending | — | — | — |
+| 6. Readiness/startup/Docker | Complete | Complete | Approved | `01e51f0`, `6e468a1` |
+| 7. Live smoke verification | In progress | — | — | — |
 | 8. Operator documentation | Pending | — | — | — |
 | 9. Final local release gate | Pending | — | — | — |
 | 10. Cloud deployment and ChatGPT | Pending | — | — | — |
@@ -26,3 +26,4 @@ Worktree: `/Users/pratik.nandoskar/Documents/working/pmm-career-mcp/.worktrees/s
 - Task 3 completed with 387/387 tests and independent approval of rollback, retry, locking, and exactly-once publish safeguards.
 - Task 4 completed with 403/403 tests, build/typecheck, and independent approval of OAuth configuration, public-metadata, and secret-boundary hardening.
 - Task 5 completed with 419 tests, a verified Docker image build, and independent approval of consent-page delivery/security controls.
+- Task 6 completed with 427 tests, verified Docker readiness health checks, safe startup/shutdown behavior, and corrected Supabase operator guidance.
