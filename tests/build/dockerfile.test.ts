@@ -41,7 +41,12 @@ it("provides a no-secret Supabase, Railway, and ChatGPT operator runbook", async
   expect(environmentExample).toContain("SUPABASE_URL=");
   expect(environmentExample).toContain("SUPABASE_PUBLISHABLE_KEY=");
   expect(environmentExample).toContain("BASE_URL=");
-  expect(environmentExample).toContain("AUTH_MODE=oauth");
+  expect(environmentExample).toContain("NODE_ENV=development");
+  expect(environmentExample).toContain("BASE_URL=http://127.0.0.1:3000");
+  expect(environmentExample).toContain("AUTH_MODE=none");
+  expect(environmentExample).toContain("postgresql://postgres:postgres@127.0.0.1:5432/postgres");
+  expect(environmentExample).toContain("local PostgreSQL");
+  expect(environmentExample).toContain("# AUTH_MODE=oauth");
   expect(environmentExample).toContain("LINKEDIN_PUBLISH_ENABLED=false");
   expect(environmentExample).toMatch(/OIDC_ISSUER=.*\/auth\/v1/);
   expect(environmentExample).toContain("OIDC_AUDIENCE=https://<railway-service-domain>");
@@ -60,6 +65,10 @@ it("provides a no-secret Supabase, Railway, and ChatGPT operator runbook", async
   expect(runbook).toContain("wrong `aud` claim");
   expect(runbook).toContain("GitHub App access to only this repository");
   expect(runbook).toContain("LINKEDIN_PUBLISH_ENABLED=false");
+  expect(runbook).toContain("`LINKEDIN_REDIRECT_URI`");
+  expect(runbook).toContain("Leave `LINKEDIN_REDIRECT_URI` unset");
+  expect(runbook).toContain("`BASE_URL` is public configuration");
+  expect(runbook).toContain("only `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY`");
   expect(readme).toContain("docs/deployment/supabase-railway-chatgpt.md");
   expect(`${environmentExample}\n${readme}\n${runbook}`).not.toMatch(/DATABASE_PATH|SQLite|persistent volume|Railway volume/i);
 });

@@ -17,6 +17,8 @@ curl --fail http://127.0.0.1:3000/health
 
 The server applies its committed PostgreSQL migrations and verifies database readiness before opening its HTTP listener. For local development, `AUTH_MODE=none` is allowed only outside production; publishing stays off by default.
 
+The copied example connects to `postgresql://postgres:postgres@127.0.0.1:5432/postgres`; start a local PostgreSQL server there, or change only `DATABASE_URL` in your uncommitted `.env` before running the server. The production values remain commented reference entries in the example and must be set in Railway instead.
+
 `/health` is a public, database-independent liveness endpoint. `/ready` is the database and migration readiness endpoint. The Docker health check calls `/ready`, and it returns only a generic unavailable response when the database is not ready.
 
 ## Deploy and connect ChatGPT
@@ -44,7 +46,7 @@ Use Supabase managed backups for the production database and treat them as priva
 
 `LINKEDIN_PUBLISH_ENABLED=false` is the default and must remain false during deployment and connector checks. While it is false, the server cannot publish. There is no automated posting, retry, scheduling, messaging, or connection-request capability.
 
-Only after the private deployment and read-only MCP flow are working should an operator create a LinkedIn app, set its redirect URI to `https://your-host.example/linkedin/callback`, and add the LinkedIn client values plus a 64-character hexadecimal `TOKEN_ENCRYPTION_KEY` to the host's secret store. Tokens are encrypted in managed PostgreSQL and are never returned by MCP tools.
+Only after the private deployment and read-only MCP flow are working should an operator create a LinkedIn app, set the host-only (non-secret) `LINKEDIN_REDIRECT_URI` to `https://your-host.example/linkedin/callback`, and add the LinkedIn client values plus a 64-character hexadecimal `TOKEN_ENCRYPTION_KEY` to the host's secret store. Leave the redirect URI unset before that later phase. Tokens are encrypted in managed PostgreSQL and are never returned by MCP tools.
 
 Every real post still requires the exact immutable draft version, checksum, visibility, and a fresh one-use preview token. If a publish result is unknown, do not retry: first check LinkedIn manually, then create a new draft version and preview before a new explicit request.
 

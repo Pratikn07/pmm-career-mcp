@@ -10,13 +10,13 @@ Choose the Railway HTTPS origin first, for example `https://<railway-service-dom
 
 | Classification | Values | Operator rule |
 | --- | --- | --- |
-| Public, browser-safe | `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY`, `BASE_URL` | The consent page may expose only the two Supabase public values. These are not database credentials. |
-| Host-only configuration | `NODE_ENV=production`, `PORT`, `AUTH_MODE=oauth`, `OIDC_ISSUER`, `OIDC_AUDIENCE`, `ALLOWED_SUBJECT`, `LINKEDIN_VERSION`, `LINKEDIN_PUBLISH_ENABLED=false` | Keep these in Railway environment configuration; do not place them in browser code. |
+| Public configuration | `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY`, `BASE_URL` | `BASE_URL` is public configuration, but the consent page intentionally exposes only `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY`. These are not database credentials. |
+| Host-only, non-secret configuration | `NODE_ENV=production`, `PORT`, `AUTH_MODE=oauth`, `OIDC_ISSUER`, `OIDC_AUDIENCE`, `ALLOWED_SUBJECT`, `LINKEDIN_VERSION`, `LINKEDIN_PUBLISH_ENABLED=false`, `LINKEDIN_REDIRECT_URI` | Keep these in Railway environment configuration; do not place them in browser code. |
 | Secret, host-only | `DATABASE_URL`, `TOKEN_ENCRYPTION_KEY`, `LINKEDIN_CLIENT_ID`, `LINKEDIN_CLIENT_SECRET` | Use Railway secret environment variables. Never commit, log, paste, or enter real values in the example file. |
 
 Set `DATABASE_URL` to the Supabase PostgreSQL shared session-pooler URL on port `5432` with TLS. Set `OIDC_ISSUER` to the exact derived value `SUPABASE_URL/auth/v1`. Set `OIDC_AUDIENCE` to exactly `BASE_URL`, including the same origin and no trailing slash. Set `ALLOWED_SUBJECT` to the UUID of the one permitted Supabase Auth user. Keep `LINKEDIN_PUBLISH_ENABLED=false`.
 
-Use [.env.example](../../.env.example) only as a placeholder map; it contains no usable credentials.
+The active lines in [.env.example](../../.env.example) are copyable local-development defaults and require a local PostgreSQL server. Its production reference entries are commented; set their real values only in Railway. Leave `LINKEDIN_REDIRECT_URI` unset until the later LinkedIn authorization phase, then set it as host-only configuration (not a secret) to `BASE_URL/linkedin/callback`.
 
 ## 2. Configure Supabase before connecting the service
 

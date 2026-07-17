@@ -23,3 +23,11 @@ Added a focused static documentation/configuration test alongside the existing D
 - `git diff --check` — passed.
 
 No Supabase, Railway, ChatGPT connector, LinkedIn, credential, DNS, database, or publishing action was performed.
+
+## Documentation review correction
+
+- Changed the active `.env.example` entries to copyable development defaults: `NODE_ENV=development`, local `BASE_URL`, `AUTH_MODE=none`, and the runtime's local PostgreSQL URL. The README and example now state that a local PostgreSQL server must be available there, or the uncommitted local database URL must be changed before starting the server. Production-only settings are commented Railway references, so copying the example does not activate invalid placeholders or weaken production validation.
+- Reclassified `LINKEDIN_REDIRECT_URI` as host-only, non-secret configuration. It is explicitly left unset until the later LinkedIn authorization phase, while client credentials and the encryption key remain Railway secrets.
+- Clarified that `BASE_URL` is public configuration but the consent page intentionally exposes only `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY`.
+
+Correction verification: the focused documentation suite passed after the change; the final full-suite, typecheck, build, and diff-check results are recorded with this correction commit. No external configuration or credential action was performed.
