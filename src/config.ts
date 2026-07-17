@@ -32,10 +32,20 @@ export type AppConfig = {
   tokenEncryptionKey?: string;
 };
 
-function canonicalUrl(value: string): string {
+function canonicalUrl(value: string, name: string): string {
   const url = new URL(value);
-  if (url.search !== "" || url.hash !== "") throw new Error("URL must not include a query or fragment");
+  if (url.username !== "" || url.password !== "") throw new Error(`${name} must not include credentials`);
+  if (url.search !== "" || url.hash !== "") throw new Error(`${name} must not include a query or fragment`);
   return url.toString().replace(/\/+$/, "");
+}
+
+function canonicalSupabaseUrl(value: string): string {
+  const canonical = canonicalUrl(value, "SUPABASE_URL");
+  const url = new URL(canonical);
+  if (url.protocol !== "https:" || url.port !== "" || url.pathname !== "/" || !/^[a-z0-9-]+\.supabase\.co$/i.test(url.hostname)) {
+    throw new Error("SUPABASE_URL must be a Supabase project HTTPS origin");
+  }
+  return canonical;
 }
 
 function required(value: string | undefined, name: string): string {
@@ -58,6 +68,9 @@ function requirePostgresUrl(value: string): void {
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
+  if (env.SUPABASE_SERVICE_ROLE_KEY !== undefined || env.SUPABASE_SECRET_KEY !== undefined) {
+    throw new Error("Supabase service-role keys must not be configured");
+  }
   const parsed = environmentSchema.parse(env);
 
   if (parsed.NODE_ENV === "production" && parsed.AUTH_MODE !== "oauth") {
@@ -66,22 +79,16 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
 
   if (parsed.NODE_ENV === "production") {
     if (env.DATABASE_PATH !== undefined) throw new Error("DATABASE_PATH is not supported; use DATABASE_URL");
-    if (env.SUPABASE_SERVICE_ROLE_KEY !== undefined || env.SUPABASE_SECRET_KEY !== undefined) {
-      throw new Error("Supabase service-role keys must not be configured");
-    }
 
     requirePostgresUrl(required(parsed.DATABASE_URL, "DATABASE_URL"));
-    const baseUrl = canonicalUrl(parsed.BASE_URL);
+    const baseUrl = canonicalUrl(parsed.BASE_URL, "BASE_URL");
     if (new URL(baseUrl).protocol !== "https:") {
       throw new Error("BASE_URL must use HTTPS in production");
     }
-    const supabaseUrl = canonicalUrl(required(parsed.SUPABASE_URL, "SUPABASE_URL"));
-    if (new URL(supabaseUrl).protocol !== "https:") {
-      throw new Error("SUPABASE_URL must use HTTPS in production");
-    }
+    const supabaseUrl = canonicalSupabaseUrl(required(parsed.SUPABASE_URL, "SUPABASE_URL"));
     required(parsed.SUPABASE_PUBLISHABLE_KEY, "SUPABASE_PUBLISHABLE_KEY");
 
-    const issuer = canonicalUrl(required(parsed.OIDC_ISSUER, "OIDC_ISSUER"));
+    const issuer = canonicalUrl(required(parsed.OIDC_ISSUER, "OIDC_ISSUER"), "OIDC_ISSUER");
     if (new URL(issuer).protocol !== "https:") {
       throw new Error("OIDC_ISSUER must use HTTPS in production");
     }
@@ -101,9 +108,9 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
     }
   }
 
-  const baseUrl = canonicalUrl(parsed.BASE_URL);
-  const supabaseUrl = parsed.SUPABASE_URL === undefined ? undefined : canonicalUrl(parsed.SUPABASE_URL);
-  const oidcIssuer = parsed.OIDC_ISSUER === undefined ? undefined : canonicalUrl(parsed.OIDC_ISSUER);
+  const baseUrl = canonicalUrl(parsed.BASE_URL, "BASE_URL");
+  const supabaseUrl = parsed.SUPABASE_URL === undefined ? undefined : canonicalSupabaseUrl(parsed.SUPABASE_URL);
+  const oidcIssuer = parsed.OIDC_ISSUER === undefined ? undefined : canonicalUrl(parsed.OIDC_ISSUER, "OIDC_ISSUER");
 
   return {
     nodeEnv: parsed.NODE_ENV,

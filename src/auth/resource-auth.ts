@@ -18,7 +18,14 @@ const oidcMetadataSchema = z.object({
 }).strict();
 
 function canonicalBaseUrl(baseUrl: string): string {
-  return baseUrl.replace(/\/+$/, "");
+  const url = new URL(baseUrl);
+  if (url.username !== "" || url.password !== "") {
+    throw new Error("OAuth resource URL must not include credentials");
+  }
+  if (url.search !== "" || url.hash !== "") {
+    throw new Error("OAuth resource URL must not include a query or fragment");
+  }
+  return url.toString().replace(/\/+$/, "");
 }
 
 function requireOAuthConfig(config: AppConfig): { issuer: string; audience: string; subject: string } {

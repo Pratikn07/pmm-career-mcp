@@ -51,6 +51,9 @@ describe("loadConfig", () => {
   it.each([
     ["DATABASE_URL", "mysql://db.example/career", /DATABASE_URL.*PostgreSQL/],
     ["SUPABASE_URL", "http://project.supabase.co", /SUPABASE_URL.*HTTPS/],
+    ["BASE_URL", "https://mcp-user:mcp-password@career.example", /BASE_URL.*credentials/],
+    ["SUPABASE_URL", "https://project-user:project-password@project.supabase.co", /SUPABASE_URL.*credentials/],
+    ["SUPABASE_URL", "https://project.supabase.co/not-a-project-origin", /SUPABASE_URL.*project HTTPS origin/],
     ["OIDC_ISSUER", "https://other.supabase.co/auth/v1", /OIDC_ISSUER.*SUPABASE_URL/],
     ["OIDC_AUDIENCE", "https://other.example", /OIDC_AUDIENCE.*BASE_URL/],
     ["ALLOWED_SUBJECT", "user-123", /ALLOWED_SUBJECT.*UUID/]
@@ -60,6 +63,13 @@ describe("loadConfig", () => {
 
   it("rejects removed DATABASE_PATH configuration in production", () => {
     expect(() => loadConfig({ ...productionConfig, DATABASE_PATH: "./career.db" })).toThrow(/DATABASE_PATH/);
+  });
+
+  it.each(["development", "test", "production"] as const)("rejects Supabase secret keys in %s", (nodeEnv) => {
+    const base = nodeEnv === "production" ? productionConfig : { NODE_ENV: nodeEnv };
+    for (const secretName of ["SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_SECRET_KEY"] as const) {
+      expect(() => loadConfig({ ...base, [secretName]: "secret-value" })).toThrow(/service-role keys/);
+    }
   });
 
   it("normalizes the canonical public URLs for OAuth configuration", () => {
