@@ -752,6 +752,54 @@ describe("public people discovery", () => {
     expect(persistedAda?.checkedAt).toBe(CHECKED_AT);
   });
 
+  it("preserves prior search-derived discovery state when the next optional-search page is invalid", async () => {
+    const company = database.companies.upsert({
+      ycId: "invalid-search-refresh-preservation",
+      name: "Invalid Search Refresh Preservation",
+      websiteUrl: TEAM_URL
+    });
+    const searchUrl = "https://press.example/ada-search";
+    let phase = 1;
+    const service = createPeopleDiscovery({
+      repositories: database,
+      searchProvider: {
+        coverage: "search-extended",
+        search: async () => [{
+          title: "Ada Search profile",
+          url: searchUrl,
+          snippet: "Public profile",
+          checkedAt: CHECKED_AT
+        }]
+      },
+      fetchPage: async (url) => {
+        if (url === TEAM_URL) {
+          return fetchedPage(url, `
+            <article class="team-member"><h2>Official Current</h2><p>Founder</p></article>
+          `, "Team");
+        }
+        return fetchedPage(url, phase === 1
+          ? '<article class="person-card"><h2>Ada Search</h2><p>Advisor</p></article>'
+          : `<article class="person-card"><h2>${"N".repeat(161)}</h2><p>Advisor</p></article>`,
+        "Public profile");
+      }
+    });
+    const first = await service.discoverPublicPeople(company.id);
+    const adaId = first.people.find(({ name }) => name === "Ada Search")!.id;
+    const priorAda = database.people.getWithEvidence(adaId)!;
+    phase = 2;
+
+    const second = await service.discoverPublicPeople(company.id);
+    const persistedAda = database.people.getWithEvidence(adaId);
+
+    expect(second.warnings).toContainEqual({
+      code: "invalid-data",
+      sourceUrl: searchUrl,
+      message: "Skipped public person record because name exceeds 160 characters or 320 UTF-8 bytes"
+    });
+    expect(persistedAda?.checkedAt).toBe(priorAda.checkedAt);
+    expect(persistedAda?.evidence).toEqual(priorAda.evidence);
+  });
+
   it("normalizes persistent identity across case and whitespace drift and clears a removed profile link", async () => {
     const company = database.companies.upsert({
       ycId: "normalized-refresh-people",

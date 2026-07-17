@@ -556,6 +556,9 @@ export function createPeopleDiscovery(
             checkedTimes.push(page.checkedAt);
             discovered.push(...parsedPage.people);
             warnings.push(...parsedPage.warnings);
+            if (parsedPage.warnings.some(({ code }) => code === "invalid-data")) {
+              refreshCoverageComplete = false;
+            }
             if (!parsedPage.recognized) {
               refreshCoverageComplete = false;
               warnings.push({
