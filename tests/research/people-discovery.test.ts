@@ -103,8 +103,8 @@ describe("public people discovery", () => {
     expect(requestedUrls.some((url) => new URL(url).hostname.endsWith("linkedin.com"))).toBe(false);
     expect((await database.people.listByCompany(company.id))).toHaveLength(4);
     expect(result.evidence).toHaveLength(4);
-    expect((await result.evidence.every(({ fact }) => fact.length < 100))).toBe(true);
-    expect((await result.evidence.map(({ fact }) => fact))).not.toContain(
+    expect(result.evidence.every(({ fact }) => fact.length < 100)).toBe(true);
+    expect(result.evidence.map(({ fact }) => fact)).not.toContain(
       expect.stringContaining("large suite of workflow products")
     );
     for (const person of result.people) {
@@ -746,7 +746,7 @@ describe("public people discovery", () => {
       sourceUrl: "https://acme.example/leadership",
       message: "leadership source failed"
     });
-    expect((await persistedAda?.evidence.map(({ fact }) => fact))).toEqual([
+    expect(persistedAda?.evidence.map(({ fact }) => fact)).toEqual([
       "Ada Preserved — Founder"
     ]);
     expect(persistedAda?.checkedAt).toBe(CHECKED_AT);
