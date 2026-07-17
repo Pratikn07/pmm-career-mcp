@@ -1,5 +1,6 @@
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import BetterSqlite3 from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import { migrate } from "drizzle-orm/better-sqlite3/migrator";
@@ -13,6 +14,26 @@ export type CareerDatabase = ReturnType<typeof createRepositories> & {
 export type TestCareerDatabase = CareerDatabase & {
   resetForTests(): void;
 };
+
+function findMigrationsFolder(): string {
+  let directory = dirname(fileURLToPath(import.meta.url));
+
+  while (true) {
+    const migrationsFolder = resolve(directory, "drizzle");
+    if (
+      existsSync(resolve(directory, "package.json"))
+      && existsSync(resolve(migrationsFolder, "meta", "_journal.json"))
+    ) {
+      return migrationsFolder;
+    }
+
+    const parent = dirname(directory);
+    if (parent === directory) {
+      throw new Error("Unable to locate the packaged Drizzle migrations directory");
+    }
+    directory = parent;
+  }
+}
 
 export function createDatabase(path: ":memory:"): TestCareerDatabase;
 export function createDatabase(path: string): CareerDatabase;
@@ -28,7 +49,7 @@ export function createDatabase(path: string): CareerDatabase | TestCareerDatabas
   }
 
   const database = drizzle(sqlite, { schema });
-  migrate(database, { migrationsFolder: resolve(process.cwd(), "drizzle") });
+  migrate(database, { migrationsFolder: findMigrationsFolder() });
   const repositories = createRepositories(database);
   const careerDatabase: CareerDatabase = {
     ...repositories,

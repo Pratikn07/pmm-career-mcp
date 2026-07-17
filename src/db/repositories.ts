@@ -103,6 +103,14 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
+function assertIsoTimestamp(field: string, value: string): string {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime()) || parsed.toISOString() !== value) {
+    throw new Error(`${field} must be an ISO timestamp in YYYY-MM-DDTHH:mm:ss.sssZ format`);
+  }
+  return value;
+}
+
 function decodeOutreachDraft(row: OutreachDraftRow): OutreachDraft {
   const { evidenceIdsJson, ...draft } = row;
   return { ...draft, evidenceIds: JSON.parse(evidenceIdsJson) as string[] };
@@ -131,6 +139,9 @@ export function createRepositories(database: Database) {
     companies: {
       upsert(input: CompanyUpsertInput): Company {
         const now = nowIso();
+        const checkedAt = input.checkedAt === undefined
+          ? undefined
+          : assertIsoTimestamp("company.checkedAt", input.checkedAt);
         database.insert(companies).values({
           id: randomUUID(),
           ycId: input.ycId,
@@ -142,7 +153,7 @@ export function createRepositories(database: Database) {
           ...(input.location === undefined ? {} : { location: input.location }),
           ...(input.industry === undefined ? {} : { industry: input.industry }),
           ...(input.isHiring === undefined ? {} : { isHiring: input.isHiring }),
-          ...(input.checkedAt === undefined ? {} : { checkedAt: input.checkedAt }),
+          ...(checkedAt === undefined ? {} : { checkedAt }),
           createdAt: now,
           updatedAt: now
         }).onConflictDoUpdate({
@@ -156,7 +167,7 @@ export function createRepositories(database: Database) {
             ...(input.location === undefined ? {} : { location: input.location }),
             ...(input.industry === undefined ? {} : { industry: input.industry }),
             ...(input.isHiring === undefined ? {} : { isHiring: input.isHiring }),
-            ...(input.checkedAt === undefined ? {} : { checkedAt: input.checkedAt }),
+            ...(checkedAt === undefined ? {} : { checkedAt }),
             updatedAt: now
           }
         }).run();
@@ -175,20 +186,23 @@ export function createRepositories(database: Database) {
     people: {
       upsert(input: PersonUpsertInput): Person {
         const now = nowIso();
+        const checkedAt = input.checkedAt === undefined
+          ? undefined
+          : assertIsoTimestamp("person.checkedAt", input.checkedAt);
         database.insert(people).values({
           id: randomUUID(),
           companyId: input.companyId,
           name: input.name,
           role: input.role,
           ...(input.publicProfileUrl === undefined ? {} : { publicProfileUrl: input.publicProfileUrl }),
-          ...(input.checkedAt === undefined ? {} : { checkedAt: input.checkedAt }),
+          ...(checkedAt === undefined ? {} : { checkedAt }),
           createdAt: now,
           updatedAt: now
         }).onConflictDoUpdate({
           target: [people.companyId, people.name, people.role],
           set: {
             ...(input.publicProfileUrl === undefined ? {} : { publicProfileUrl: input.publicProfileUrl }),
-            ...(input.checkedAt === undefined ? {} : { checkedAt: input.checkedAt }),
+            ...(checkedAt === undefined ? {} : { checkedAt }),
             updatedAt: now
           }
         }).run();
@@ -230,7 +244,7 @@ export function createRepositories(database: Database) {
           ...(input.title === undefined ? {} : { title: input.title }),
           ...(input.factType === undefined ? {} : { factType: input.factType }),
           fact: input.fact,
-          checkedAt: input.checkedAt,
+          checkedAt: assertIsoTimestamp("evidence.checkedAt", input.checkedAt),
           confidence: input.confidence,
           createdAt: nowIso()
         }).returning().get();
@@ -421,13 +435,15 @@ export function createRepositories(database: Database) {
       create(input: Omit<typeof postPreviews.$inferInsert, "id" | "consumedAt">): PostPreview {
         return database.insert(postPreviews).values({
           id: randomUUID(),
-          ...input
+          ...input,
+          expiresAt: assertIsoTimestamp("preview.expiresAt", input.expiresAt)
         }).returning().get();
       },
       getByTokenHash(tokenHash: string): PostPreview | undefined {
         return database.select().from(postPreviews).where(eq(postPreviews.tokenHash, tokenHash)).get();
       },
       consume(tokenHash: string, consumedAt: string): PostPreview | undefined {
+        assertIsoTimestamp("preview.consumedAt", consumedAt);
         return database.transaction((transaction) => transaction.update(postPreviews).set({
           consumedAt
         }).where(and(
@@ -438,6 +454,10 @@ export function createRepositories(database: Database) {
     },
     publishAttempts: {
       record(input: Omit<typeof publishAttempts.$inferInsert, "id">): PublishAttempt {
+        assertIsoTimestamp("publishAttempt.requestedAt", input.requestedAt);
+        if (input.completedAt !== undefined && input.completedAt !== null) {
+          assertIsoTimestamp("publishAttempt.completedAt", input.completedAt);
+        }
         return database.transaction((transaction) => transaction.insert(publishAttempts).values({
           id: randomUUID(),
           ...input
@@ -449,6 +469,7 @@ export function createRepositories(database: Database) {
         sanitizedError?: string;
         completedAt: string;
       }): PublishAttempt | undefined {
+        assertIsoTimestamp("publishAttempt.completedAt", input.completedAt);
         return database.update(publishAttempts).set({
           responseCategory: input.responseCategory,
           ...(input.postUrn === undefined ? {} : { postUrn: input.postUrn }),
@@ -470,6 +491,9 @@ export function createRepositories(database: Database) {
         expiresAt?: string;
       }): OAuthToken {
         const now = nowIso();
+        const expiresAt = input.expiresAt === undefined
+          ? undefined
+          : assertIsoTimestamp("oauthToken.expiresAt", input.expiresAt);
         database.insert(oauthTokens).values({
           id: randomUUID(),
           provider: input.provider,
@@ -477,7 +501,7 @@ export function createRepositories(database: Database) {
           ...(input.refreshMetadataCiphertext === undefined
             ? {}
             : { refreshMetadataCiphertext: input.refreshMetadataCiphertext }),
-          ...(input.expiresAt === undefined ? {} : { expiresAt: input.expiresAt }),
+          ...(expiresAt === undefined ? {} : { expiresAt }),
           createdAt: now,
           updatedAt: now
         }).onConflictDoUpdate({
@@ -485,7 +509,7 @@ export function createRepositories(database: Database) {
           set: {
             ciphertext: input.ciphertext,
             refreshMetadataCiphertext: input.refreshMetadataCiphertext ?? null,
-            expiresAt: input.expiresAt ?? null,
+            expiresAt: expiresAt ?? null,
             updatedAt: now
           }
         }).run();

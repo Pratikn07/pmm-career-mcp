@@ -78,6 +78,7 @@ CREATE TABLE `post_drafts` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `post_draft_version_unique` ON `post_drafts` (`draft_id`,`version`);--> statement-breakpoint
+CREATE UNIQUE INDEX `post_draft_row_version_unique` ON `post_drafts` (`id`,`version`);--> statement-breakpoint
 CREATE TABLE `post_previews` (
 	`id` text PRIMARY KEY NOT NULL,
 	`post_draft_id` text NOT NULL,
@@ -85,7 +86,8 @@ CREATE TABLE `post_previews` (
 	`token_hash` text NOT NULL,
 	`expires_at` text NOT NULL,
 	`consumed_at` text,
-	FOREIGN KEY (`post_draft_id`) REFERENCES `post_drafts`(`id`) ON UPDATE no action ON DELETE no action
+	FOREIGN KEY (`post_draft_id`) REFERENCES `post_drafts`(`id`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`post_draft_id`,`version`) REFERENCES `post_drafts`(`id`,`version`) ON UPDATE no action ON DELETE no action
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `post_previews_token_hash_unique` ON `post_previews` (`token_hash`);--> statement-breakpoint
@@ -98,7 +100,8 @@ CREATE TABLE `publish_attempts` (
 	`post_urn` text,
 	`sanitized_error` text,
 	`completed_at` text,
-	FOREIGN KEY (`post_draft_id`) REFERENCES `post_drafts`(`id`) ON UPDATE no action ON DELETE no action
+	FOREIGN KEY (`post_draft_id`) REFERENCES `post_drafts`(`id`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`post_draft_id`,`version`) REFERENCES `post_drafts`(`id`,`version`) ON UPDATE no action ON DELETE no action
 );
 --> statement-breakpoint
 CREATE TABLE `settings` (

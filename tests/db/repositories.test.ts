@@ -37,6 +37,15 @@ function addTarget(name = "Ada Example", status = "discovered") {
   return { company, person, target };
 }
 
+function addPost() {
+  return db.postDrafts.createVersion({
+    text: "Timestamp validation",
+    visibility: "PUBLIC",
+    checksum: "timestamp-checksum",
+    state: "draft"
+  });
+}
+
 it("persists a target with evidence provenance", () => {
   const company = db.companies.upsert({ ycId: "acme-w24", name: "Acme", batch: "W24" });
   const person = db.people.upsert({ companyId: company.id, name: "Ada Example", role: "Founder" });
@@ -51,6 +60,26 @@ it("persists a target with evidence provenance", () => {
 });
 
 describe("database lifecycle", () => {
+  it("discovers migrations independently of the current working directory", () => {
+    const originalDirectory = process.cwd();
+    const temporaryDirectory = mkdtempSync(join(tmpdir(), "career-mcp-cwd-"));
+    let independentDatabase: ReturnType<typeof createDatabase> | undefined;
+
+    try {
+      process.chdir(temporaryDirectory);
+      independentDatabase = createDatabase(":memory:");
+      const company = independentDatabase.companies.upsert({
+        ycId: "cwd-independent-w24",
+        name: "CWD Independent"
+      });
+      expect(independentDatabase.companies.get(company.id)?.name).toBe("CWD Independent");
+    } finally {
+      independentDatabase?.close();
+      process.chdir(originalDirectory);
+      rmSync(temporaryDirectory, { recursive: true, force: true });
+    }
+  });
+
   it("runs the complete migration and enables WAL for file databases", () => {
     const temporaryDirectory = mkdtempSync(join(tmpdir(), "career-mcp-db-"));
     const path = join(temporaryDirectory, "nested", "career.sqlite");
@@ -240,6 +269,22 @@ it("consumes a preview at most once", () => {
   expect(db.previews.consume("token-hash", "2026-07-16T00:06:00.000Z")).toBeUndefined();
 });
 
+it("rejects a preview version that does not match its post draft row", () => {
+  const post = db.postDrafts.createVersion({
+    text: "Preview exact version",
+    visibility: "PUBLIC",
+    checksum: "checksum",
+    state: "ready_for_preview"
+  });
+
+  expect(() => db.previews.create({
+    postDraftId: post.id,
+    version: post.version + 1,
+    tokenHash: "mismatched-preview-version",
+    expiresAt: "2026-07-16T00:15:00.000Z"
+  })).toThrow(/FOREIGN KEY/);
+});
+
 it("records publish attempts against an exact post version", () => {
   const post = db.postDrafts.createVersion({
     text: "Publish me",
@@ -262,6 +307,22 @@ it("records publish attempts against an exact post version", () => {
   expect(db.publishAttempts.listForPostDraft(post.id)).toEqual([completed]);
 });
 
+it("rejects a publish-attempt version that does not match its post draft row", () => {
+  const post = db.postDrafts.createVersion({
+    text: "Publish exact version",
+    visibility: "PUBLIC",
+    checksum: "checksum",
+    state: "draft"
+  });
+
+  expect(() => db.publishAttempts.record({
+    postDraftId: post.id,
+    version: post.version + 1,
+    requestedAt: "2026-07-16T00:00:00.000Z",
+    responseCategory: "pending"
+  })).toThrow(/FOREIGN KEY/);
+});
+
 it("stores OAuth secrets only in ciphertext fields", () => {
   db.oauthTokens.upsert({
     provider: "linkedin",
@@ -274,5 +335,118 @@ it("stores OAuth secrets only in ciphertext fields", () => {
     provider: "linkedin",
     ciphertext: "encrypted-token-envelope",
     refreshMetadataCiphertext: "encrypted-refresh-metadata"
+  });
+});
+
+describe("ISO timestamp invariants", () => {
+  const invalidTimestamp = "not-an-iso-timestamp";
+
+  it.each([
+    ["company checkedAt", () => {
+      db.companies.upsert({
+        ycId: "invalid-company-time",
+        name: "Invalid Company Time",
+        checkedAt: invalidTimestamp
+      });
+    }],
+    ["person checkedAt", () => {
+      const company = db.companies.upsert({
+        ycId: "invalid-person-time",
+        name: "Invalid Person Time"
+      });
+      db.people.upsert({
+        companyId: company.id,
+        name: "Invalid Person Time",
+        role: "Founder",
+        checkedAt: invalidTimestamp
+      });
+    }],
+    ["evidence checkedAt", () => {
+      const company = db.companies.upsert({
+        ycId: "invalid-evidence-time",
+        name: "Invalid Evidence Time"
+      });
+      const person = db.people.upsert({
+        companyId: company.id,
+        name: "Invalid Evidence Time",
+        role: "Founder"
+      });
+      db.evidence.add({
+        personId: person.id,
+        sourceUrl: "https://example.com/evidence",
+        fact: "Founder",
+        checkedAt: invalidTimestamp,
+        confidence: 0.8
+      });
+    }]
+  ])("rejects a non-ISO %s", (_label, action) => {
+    expect(action).toThrow(/ISO timestamp/);
+  });
+
+  it("rejects a non-ISO preview expiry", () => {
+    const post = addPost();
+    expect(() => db.previews.create({
+      postDraftId: post.id,
+      version: post.version,
+      tokenHash: "invalid-preview-expiry",
+      expiresAt: invalidTimestamp
+    })).toThrow(/ISO timestamp/);
+  });
+
+  it("rejects a non-ISO preview consumption time", () => {
+    const post = addPost();
+    db.previews.create({
+      postDraftId: post.id,
+      version: post.version,
+      tokenHash: "invalid-preview-consumption",
+      expiresAt: "2026-07-16T00:15:00.000Z"
+    });
+    expect(() => db.previews.consume(
+      "invalid-preview-consumption",
+      invalidTimestamp
+    )).toThrow(/ISO timestamp/);
+  });
+
+  it("rejects a non-ISO publish request time", () => {
+    const post = addPost();
+    expect(() => db.publishAttempts.record({
+      postDraftId: post.id,
+      version: post.version,
+      requestedAt: invalidTimestamp,
+      responseCategory: "pending"
+    })).toThrow(/ISO timestamp/);
+  });
+
+  it("rejects a non-ISO publish completion time when recording", () => {
+    const post = addPost();
+    expect(() => db.publishAttempts.record({
+      postDraftId: post.id,
+      version: post.version,
+      requestedAt: "2026-07-16T00:00:00.000Z",
+      responseCategory: "published",
+      completedAt: invalidTimestamp
+    })).toThrow(/ISO timestamp/);
+  });
+
+  it("rejects a non-ISO publish completion time when updating", () => {
+    const post = addPost();
+    const attempt = db.publishAttempts.record({
+      postDraftId: post.id,
+      version: post.version,
+      requestedAt: "2026-07-16T00:00:00.000Z",
+      responseCategory: "pending"
+    });
+    expect(() => db.publishAttempts.updateResult(attempt.id, {
+      responseCategory: "published",
+      completedAt: invalidTimestamp
+    })).toThrow(/ISO timestamp/);
+  });
+
+  it("rejects a non-ISO OAuth token expiry", () => {
+    expect(() => db.oauthTokens.upsert({
+      provider: "linkedin",
+      ciphertext: "ciphertext",
+      expiresAt: invalidTimestamp
+    })).toThrow(/ISO timestamp/);
   });
 });

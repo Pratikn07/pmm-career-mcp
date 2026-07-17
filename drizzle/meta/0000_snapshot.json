@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "46ad963a-39b3-4b48-b471-85247816b51f",
+  "id": "1171d0cc-6076-4fd9-a6e6-20464dc92422",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "companies": {
@@ -522,6 +522,14 @@
             "version"
           ],
           "isUnique": true
+        },
+        "post_draft_row_version_unique": {
+          "name": "post_draft_row_version_unique",
+          "columns": [
+            "id",
+            "version"
+          ],
+          "isUnique": true
         }
       },
       "foreignKeys": {},
@@ -594,6 +602,21 @@
           ],
           "columnsTo": [
             "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "post_previews_exact_version_fk": {
+          "name": "post_previews_exact_version_fk",
+          "tableFrom": "post_previews",
+          "tableTo": "post_drafts",
+          "columnsFrom": [
+            "post_draft_id",
+            "version"
+          ],
+          "columnsTo": [
+            "id",
+            "version"
           ],
           "onDelete": "no action",
           "onUpdate": "no action"
@@ -674,6 +697,21 @@
           ],
           "columnsTo": [
             "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "publish_attempts_exact_version_fk": {
+          "name": "publish_attempts_exact_version_fk",
+          "tableFrom": "publish_attempts",
+          "tableTo": "post_drafts",
+          "columnsFrom": [
+            "post_draft_id",
+            "version"
+          ],
+          "columnsTo": [
+            "id",
+            "version"
           ],
           "onDelete": "no action",
           "onUpdate": "no action"

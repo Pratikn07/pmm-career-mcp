@@ -1,4 +1,11 @@
-import { integer, real, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
+import {
+  foreignKey,
+  integer,
+  real,
+  sqliteTable,
+  text,
+  uniqueIndex
+} from "drizzle-orm/sqlite-core";
 
 export const settings = sqliteTable("settings", {
   id: text("id").primaryKey(),
@@ -115,7 +122,8 @@ export const postDrafts = sqliteTable("post_drafts", {
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull()
 }, (table) => [
-  uniqueIndex("post_draft_version_unique").on(table.draftId, table.version)
+  uniqueIndex("post_draft_version_unique").on(table.draftId, table.version),
+  uniqueIndex("post_draft_row_version_unique").on(table.id, table.version)
 ]);
 
 export const postPreviews = sqliteTable("post_previews", {
@@ -125,7 +133,13 @@ export const postPreviews = sqliteTable("post_previews", {
   tokenHash: text("token_hash").notNull().unique(),
   expiresAt: text("expires_at").notNull(),
   consumedAt: text("consumed_at")
-});
+}, (table) => [
+  foreignKey({
+    name: "post_previews_exact_version_fk",
+    columns: [table.postDraftId, table.version],
+    foreignColumns: [postDrafts.id, postDrafts.version]
+  })
+]);
 
 export const publishAttempts = sqliteTable("publish_attempts", {
   id: text("id").primaryKey(),
@@ -136,7 +150,13 @@ export const publishAttempts = sqliteTable("publish_attempts", {
   postUrn: text("post_urn"),
   sanitizedError: text("sanitized_error"),
   completedAt: text("completed_at")
-});
+}, (table) => [
+  foreignKey({
+    name: "publish_attempts_exact_version_fk",
+    columns: [table.postDraftId, table.version],
+    foreignColumns: [postDrafts.id, postDrafts.version]
+  })
+]);
 
 export const oauthTokens = sqliteTable("oauth_tokens", {
   id: text("id").primaryKey(),
