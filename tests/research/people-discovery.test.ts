@@ -1,7 +1,8 @@
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createDatabase, type TestCareerDatabase } from "../../src/db/client.js";
+import { afterAll, afterEach, describe, expect, it } from "vitest";
+import { createTestDatabase, type TestCareerDatabase } from "../support/database.js";
+import { postgresErrorKind } from "../../src/domain/errors.js";
 import type { FetchedPage } from "../../src/research/fetch-page.js";
 import * as peopleDiscoveryModule from "../../src/research/people-discovery.js";
 import { createPeopleDiscovery } from "../../src/research/people-discovery.js";
@@ -14,6 +15,10 @@ const fixturePath = fileURLToPath(new URL("../fixtures/company-team.html", impor
 const CHECKED_AT = "2026-07-16T13:00:00.000Z";
 const HOME_URL = "https://acme.example/";
 const TEAM_URL = "https://acme.example/team";
+const database: TestCareerDatabase = await createTestDatabase();
+
+afterEach(async () => (await database.resetForTests()));
+afterAll(async () => (await database.close()));
 
 function fetchedPage(url: string, html: string, title: string): FetchedPage {
   return {
@@ -28,14 +33,6 @@ function fetchedPage(url: string, html: string, title: string): FetchedPage {
 }
 
 describe("public people discovery", () => {
-  let database: TestCareerDatabase;
-
-  beforeEach(async () => {
-    database = (await createDatabase(":memory:"));
-  });
-
-  afterEach(async () => (await database.close()));
-
   it("exports an explicit injected service factory without a misleading dependency-taking free function", () => {
     expect(Object.keys(peopleDiscoveryModule).sort()).toEqual(["createPeopleDiscovery"]);
   });
@@ -860,7 +857,13 @@ describe("public people discovery", () => {
       `, "Team")
     });
 
-    await expect(service.discoverPublicPeople(company.id)).rejects.toThrow(/UNIQUE/i);
+    let persistenceError: unknown;
+    try {
+      await service.discoverPublicPeople(company.id);
+    } catch (error) {
+      persistenceError = error;
+    }
+    expect(postgresErrorKind(persistenceError)).toBe("unique");
 
     expect((await database.people.get(aaron.id))?.publicProfileUrl).toBe(
       "https://www.linkedin.com/in/aaron-old"

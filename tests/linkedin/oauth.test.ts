@@ -1,12 +1,12 @@
 import { createHash } from "node:crypto";
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
-import { createDatabase } from "../../src/db/client.js";
+import { createTestDatabase } from "../support/database.js";
 import { decryptJson } from "../../src/security/crypto.js";
 import { DomainError } from "../../src/domain/errors.js";
 import { createLinkedInOAuth } from "../../src/linkedin/oauth.js";
 
 const KEY = "a".repeat(64);
-const db = (await createDatabase(":memory:"));
+const db = await createTestDatabase();
 let now = Date.parse("2026-07-17T12:00:00.000Z");
 
 afterEach(async () => {

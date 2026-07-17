@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
-import { createDatabase } from "../../src/db/client.js";
+import { createTestDatabase } from "../support/database.js";
 import {
   POST_CHECKSUM_CONTRACT,
   POST_VISIBILITIES,
@@ -9,7 +9,7 @@ import {
 } from "../../src/drafts/service.js";
 import { DomainError } from "../../src/domain/errors.js";
 
-const db = (await createDatabase(":memory:"));
+const db = await createTestDatabase();
 const drafts = createDraftService(db);
 
 afterEach(async () => (await db.resetForTests()));

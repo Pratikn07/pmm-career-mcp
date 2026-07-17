@@ -1,5 +1,5 @@
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
-import { createDatabase } from "../../src/db/client.js";
+import { createTestDatabase } from "../support/database.js";
 import { createDraftService } from "../../src/drafts/service.js";
 import { DomainError } from "../../src/domain/errors.js";
 import {
@@ -11,7 +11,7 @@ import {
   type PreviewResult
 } from "../../src/posts/preview-service.js";
 
-const db = (await createDatabase(":memory:"));
+const db = await createTestDatabase();
 const drafts = createDraftService(db);
 let nowMs = Date.parse("2026-07-16T12:00:00.000Z");
 const clock = () => new Date(nowMs);

@@ -3,7 +3,7 @@ import { z } from "zod";
 const environmentSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   PORT: z.coerce.number().int().positive().default(3000),
-  DATABASE_PATH: z.string().default("./data/career-mcp.sqlite"),
+  DATABASE_URL: z.string().default("postgresql://postgres:postgres@127.0.0.1:5432/postgres"),
   BASE_URL: z.string().url().default("http://127.0.0.1:3000"),
   AUTH_MODE: z.enum(["none", "oauth"]).default("none"),
   OIDC_ISSUER: z.string().url().optional(),
@@ -17,7 +17,7 @@ const environmentSchema = z.object({
 export type AppConfig = {
   nodeEnv: "development" | "test" | "production";
   port: number;
-  databasePath: string;
+  databaseUrl: string;
   baseUrl: string;
   authMode: "none" | "oauth";
   oidcIssuer?: string;
@@ -55,7 +55,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
   return {
     nodeEnv: parsed.NODE_ENV,
     port: parsed.PORT,
-    databasePath: parsed.DATABASE_PATH,
+    databaseUrl: parsed.DATABASE_URL,
     baseUrl: parsed.BASE_URL,
     authMode: parsed.AUTH_MODE,
     ...(parsed.OIDC_ISSUER === undefined ? {} : { oidcIssuer: parsed.OIDC_ISSUER }),

@@ -1,6 +1,6 @@
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import { and, asc, desc, eq, isNull, max, sql } from "drizzle-orm";
-import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
+import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
 import {
   companies,
   evidence,
@@ -18,7 +18,7 @@ import {
   targets
 } from "./schema.js";
 
-type Database = BetterSQLite3Database<typeof schema>;
+type Database = PgDatabase<PgQueryResultHKT, typeof schema>;
 
 export type Setting = typeof settings.$inferSelect;
 export type Company = typeof companies.$inferSelect;
@@ -148,9 +148,37 @@ function assertIsoTimestamp(field: string, value: string): string {
   return value;
 }
 
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function isUuid(value: string): boolean {
+  return UUID_PATTERN.test(value);
+}
+
+function normalizeRowTimestamps<T extends Record<string, unknown>>(row: T): T {
+  const normalized: Record<string, unknown> = { ...row };
+  for (const [key, value] of Object.entries(normalized)) {
+    if (key.endsWith("At") && value !== null && value !== undefined) {
+      const parsed = value instanceof Date ? value : new Date(String(value));
+      normalized[key] = parsed.toISOString();
+    }
+  }
+  return normalized as T;
+}
+
+function normalizeRows<T extends Record<string, unknown>>(rows: T[]): T[] {
+  return rows.map(normalizeRowTimestamps);
+}
+
+function requiredRow<T extends Record<string, unknown>>(row: T | undefined, entity: string): T {
+  if (row === undefined) {
+    throw new Error(`${entity} write did not return a row`);
+  }
+  return normalizeRowTimestamps(row);
+}
+
 function decodeOutreachDraft(row: OutreachDraftRow): OutreachDraft {
-  const { evidenceIdsJson, ...draft } = row;
-  return { ...draft, evidenceIds: JSON.parse(evidenceIdsJson) as string[] };
+  const { evidenceIdsJson, ...draft } = normalizeRowTimestamps(row);
+  return { ...draft, evidenceIds: [...evidenceIdsJson] };
 }
 
 function normalizedPersonIdentity(name: string, role: string): string {
@@ -169,19 +197,20 @@ export function createRepositories(database: Database) {
     settings: {
       async set(key: string, value: unknown): Promise<Setting> {
         const updatedAt = nowIso();
-        return database.insert(settings).values({
+        const [setting] = await database.insert(settings).values({
           id: randomUUID(),
           key,
-          valueJson: JSON.stringify(value),
+          valueJson: value,
           updatedAt
         }).onConflictDoUpdate({
           target: settings.key,
-          set: { valueJson: JSON.stringify(value), updatedAt }
-        }).returning().get();
+          set: { valueJson: value, updatedAt }
+        }).returning();
+        return requiredRow(setting, "setting");
       },
       async get<T = unknown>(key: string): Promise<T | undefined> {
-        const setting = database.select().from(settings).where(eq(settings.key, key)).get();
-        return setting === undefined ? undefined : JSON.parse(setting.valueJson) as T;
+        const [setting] = await database.select().from(settings).where(eq(settings.key, key));
+        return setting === undefined ? undefined : setting.valueJson as T;
       }
     },
     companies: {
@@ -190,7 +219,7 @@ export function createRepositories(database: Database) {
         const checkedAt = input.checkedAt === undefined
           ? undefined
           : assertIsoTimestamp("company.checkedAt", input.checkedAt);
-        database.insert(companies).values({
+        await database.insert(companies).values({
           id: randomUUID(),
           ycId: input.ycId,
           name: input.name,
@@ -218,17 +247,30 @@ export function createRepositories(database: Database) {
             ...(checkedAt === undefined ? {} : { checkedAt }),
             updatedAt: now
           }
-        }).run();
-        return database.select().from(companies).where(eq(companies.ycId, input.ycId)).get()!;
+        });
+        const [company] = await database.select().from(companies).where(eq(
+          companies.ycId,
+          input.ycId
+        ));
+        return requiredRow(company, "company");
       },
       async get(id: string): Promise<Company | undefined> {
-        return database.select().from(companies).where(eq(companies.id, id)).get();
+        if (!isUuid(id)) {
+          return undefined;
+        }
+        const [company] = await database.select().from(companies).where(eq(companies.id, id));
+        return company === undefined ? undefined : normalizeRowTimestamps(company);
       },
       async getByYcId(ycId: string): Promise<Company | undefined> {
-        return database.select().from(companies).where(eq(companies.ycId, ycId)).get();
+        const [company] = await database.select().from(companies).where(eq(companies.ycId, ycId));
+        return company === undefined ? undefined : normalizeRowTimestamps(company);
       },
       async list(): Promise<Company[]> {
-        return database.select().from(companies).orderBy(asc(companies.name), asc(companies.id)).all();
+        const rows = await database.select().from(companies).orderBy(
+          asc(companies.name),
+          asc(companies.id)
+        );
+        return normalizeRows(rows);
       }
     },
     people: {
@@ -237,7 +279,7 @@ export function createRepositories(database: Database) {
         const checkedAt = input.checkedAt === undefined
           ? undefined
           : assertIsoTimestamp("person.checkedAt", input.checkedAt);
-        database.insert(people).values({
+        await database.insert(people).values({
           id: randomUUID(),
           companyId: input.companyId,
           name: input.name,
@@ -253,42 +295,54 @@ export function createRepositories(database: Database) {
             ...(checkedAt === undefined ? {} : { checkedAt }),
             updatedAt: now
           }
-        }).run();
-        return database.select().from(people).where(and(
+        });
+        const [person] = await database.select().from(people).where(and(
           eq(people.companyId, input.companyId),
           eq(people.name, input.name),
           eq(people.role, input.role)
-        )).get()!;
+        ));
+        return requiredRow(person, "person");
       },
       async get(id: string): Promise<Person | undefined> {
-        return database.select().from(people).where(eq(people.id, id)).get();
+        if (!isUuid(id)) {
+          return undefined;
+        }
+        const [person] = await database.select().from(people).where(eq(people.id, id));
+        return person === undefined ? undefined : normalizeRowTimestamps(person);
       },
       async listByCompany(companyId: string): Promise<Person[]> {
-        return database.select().from(people).where(eq(people.companyId, companyId)).orderBy(
+        if (!isUuid(companyId)) {
+          return [];
+        }
+        const rows = await database.select().from(people).where(eq(people.companyId, companyId)).orderBy(
           asc(people.name),
           asc(people.role)
-        ).all();
+        );
+        return normalizeRows(rows);
       },
       async getWithEvidence(id: string): Promise<PersonWithEvidence | undefined> {
-        const person = database.select().from(people).where(eq(people.id, id)).get();
+        if (!isUuid(id)) {
+          return undefined;
+        }
+        const [person] = await database.select().from(people).where(eq(people.id, id));
         if (person === undefined) {
           return undefined;
         }
+        const evidenceRows = await database.select().from(evidence).where(
+          eq(evidence.personId, id)
+        ).orderBy(asc(evidence.checkedAt), asc(evidence.id));
         return {
-          ...person,
-          evidence: database.select().from(evidence).where(eq(evidence.personId, id)).orderBy(
-            asc(evidence.checkedAt),
-            asc(evidence.id)
-          ).all()
+          ...normalizeRowTimestamps(person),
+          evidence: normalizeRows(evidenceRows)
         };
       },
       async refreshDiscovery(
         input: CompanyPersonDiscoveryRefreshInput
       ): Promise<PersonWithEvidence[]> {
-        return database.transaction((transaction) => {
-          const existingPeople = transaction.select().from(people).where(
+        return database.transaction(async (transaction) => {
+          const existingPeople = normalizeRows(await transaction.select().from(people).where(
             eq(people.companyId, input.companyId)
-          ).orderBy(asc(people.name), asc(people.role), asc(people.id)).all();
+          ).orderBy(asc(people.name), asc(people.role), asc(people.id)));
           const existingByIdentity = new Map<string, Person>();
           for (const person of existingPeople) {
             const key = normalizedPersonIdentity(person.name, person.role);
@@ -305,8 +359,8 @@ export function createRepositories(database: Database) {
             const identity = normalizedPersonIdentity(name, role);
             const existing = existingByIdentity.get(identity);
             const now = nowIso();
-            const person = existing === undefined
-              ? transaction.insert(people).values({
+            const [personRow] = existing === undefined
+              ? await transaction.insert(people).values({
                   id: randomUUID(),
                   companyId: input.companyId,
                   name,
@@ -315,21 +369,22 @@ export function createRepositories(database: Database) {
                   checkedAt,
                   createdAt: now,
                   updatedAt: now
-                }).returning().get()
-              : transaction.update(people).set({
+                }).returning()
+              : await transaction.update(people).set({
                   name,
                   role,
                   publicProfileUrl: personInput.publicProfileUrl ?? null,
                   checkedAt,
                   updatedAt: now
-                }).where(eq(people.id, existing.id)).returning().get()!;
+                }).where(eq(people.id, existing.id)).returning();
+            const person = requiredRow(personRow, "person");
             existingByIdentity.set(identity, person);
             refreshedPersonIds.add(person.id);
 
-            const priorDiscoveryEvidence = transaction.select().from(evidence).where(and(
+            const priorDiscoveryEvidence = normalizeRows(await transaction.select().from(evidence).where(and(
               eq(evidence.personId, person.id),
               eq(evidence.factType, "public_role")
-            )).orderBy(asc(evidence.sourceUrl), asc(evidence.id)).all();
+            )).orderBy(asc(evidence.sourceUrl), asc(evidence.id)));
             const unmatchedEvidence = new Set(priorDiscoveryEvidence.map((item) => item.id));
             const refreshedEvidence: Evidence[] = [];
             for (const evidenceInput of personInput.evidence) {
@@ -342,8 +397,8 @@ export function createRepositories(database: Database) {
                   && item.sourceUrl === evidenceInput.sourceUrl
                   && item.factType === (evidenceInput.factType ?? null);
               });
-              const row = prior === undefined
-                ? transaction.insert(evidence).values({
+              const [rowResult] = prior === undefined
+                ? await transaction.insert(evidence).values({
                     id: randomUUID(),
                     personId: person.id,
                     sourceUrl: evidenceInput.sourceUrl,
@@ -353,20 +408,21 @@ export function createRepositories(database: Database) {
                     checkedAt: evidenceCheckedAt,
                     confidence: evidenceInput.confidence,
                     createdAt: nowIso()
-                  }).returning().get()
-                : transaction.update(evidence).set({
+                  }).returning()
+                : await transaction.update(evidence).set({
                     title: evidenceInput.title ?? null,
                     fact: evidenceInput.fact,
                     checkedAt: evidenceCheckedAt,
                     confidence: evidenceInput.confidence
-                  }).where(eq(evidence.id, prior.id)).returning().get()!;
+                  }).where(eq(evidence.id, prior.id)).returning();
+              const row = requiredRow(rowResult, "evidence");
               if (prior !== undefined) {
                 unmatchedEvidence.delete(prior.id);
               }
               refreshedEvidence.push(row);
             }
             for (const staleEvidenceId of unmatchedEvidence) {
-              transaction.delete(evidence).where(eq(evidence.id, staleEvidenceId)).run();
+              await transaction.delete(evidence).where(eq(evidence.id, staleEvidenceId));
             }
             refreshed.push({ ...person, evidence: refreshedEvidence });
           }
@@ -375,15 +431,15 @@ export function createRepositories(database: Database) {
               if (refreshedPersonIds.has(existingPerson.id)) {
                 continue;
               }
-              transaction.delete(evidence).where(and(
+              await transaction.delete(evidence).where(and(
                 eq(evidence.personId, existingPerson.id),
                 eq(evidence.factType, "public_role")
-              )).run();
-              transaction.update(people).set({
+              ));
+              await transaction.update(people).set({
                 publicProfileUrl: null,
                 checkedAt: null,
                 updatedAt: nowIso()
-              }).where(eq(people.id, existingPerson.id)).run();
+              }).where(eq(people.id, existingPerson.id));
             }
           }
           return refreshed;
@@ -392,7 +448,7 @@ export function createRepositories(database: Database) {
     },
     evidence: {
       async add(input: EvidenceAddInput): Promise<Evidence> {
-        return database.insert(evidence).values({
+        const [row] = await database.insert(evidence).values({
           id: randomUUID(),
           personId: input.personId,
           sourceUrl: input.sourceUrl,
@@ -402,22 +458,31 @@ export function createRepositories(database: Database) {
           checkedAt: assertIsoTimestamp("evidence.checkedAt", input.checkedAt),
           confidence: input.confidence,
           createdAt: nowIso()
-        }).returning().get();
+        }).returning();
+        return requiredRow(row, "evidence");
       },
       async get(id: string): Promise<Evidence | undefined> {
-        return database.select().from(evidence).where(eq(evidence.id, id)).get();
+        if (!isUuid(id)) {
+          return undefined;
+        }
+        const [row] = await database.select().from(evidence).where(eq(evidence.id, id));
+        return row === undefined ? undefined : normalizeRowTimestamps(row);
       },
       async listForPerson(personId: string): Promise<Evidence[]> {
-        return database.select().from(evidence).where(eq(evidence.personId, personId)).orderBy(
+        if (!isUuid(personId)) {
+          return [];
+        }
+        const rows = await database.select().from(evidence).where(eq(evidence.personId, personId)).orderBy(
           asc(evidence.checkedAt),
           asc(evidence.id)
-        ).all();
+        );
+        return normalizeRows(rows);
       }
     },
     targets: {
       async upsert(input: TargetUpsertInput): Promise<Target> {
         const now = nowIso();
-        database.insert(targets).values({
+        await database.insert(targets).values({
           id: randomUUID(),
           ...input,
           createdAt: now,
@@ -434,26 +499,47 @@ export function createRepositories(database: Database) {
             rationale: input.rationale,
             updatedAt: now
           }
-        }).run();
-        return database.select().from(targets).where(eq(targets.personId, input.personId)).get()!;
+        });
+        const [target] = await database.select().from(targets).where(
+          eq(targets.personId, input.personId)
+        );
+        return requiredRow(target, "target");
       },
       async get(id: string): Promise<Target | undefined> {
-        return database.select().from(targets).where(eq(targets.id, id)).get();
+        if (!isUuid(id)) {
+          return undefined;
+        }
+        const [target] = await database.select().from(targets).where(eq(targets.id, id));
+        return target === undefined ? undefined : normalizeRowTimestamps(target);
       },
       async getByPerson(personId: string): Promise<Target | undefined> {
-        return database.select().from(targets).where(eq(targets.personId, personId)).get();
+        if (!isUuid(personId)) {
+          return undefined;
+        }
+        const [target] = await database.select().from(targets).where(eq(
+          targets.personId,
+          personId
+        ));
+        return target === undefined ? undefined : normalizeRowTimestamps(target);
       },
       async updateStatus(id: string, status: string): Promise<Target | undefined> {
-        return database.update(targets).set({ status, updatedAt: nowIso() }).where(
+        if (!isUuid(id)) {
+          return undefined;
+        }
+        const [target] = await database.update(targets).set({ status, updatedAt: nowIso() }).where(
           eq(targets.id, id)
-        ).returning().get();
+        ).returning();
+        return target === undefined ? undefined : normalizeRowTimestamps(target);
       },
       async list(filter: TargetListFilter = {}): Promise<Target[]> {
+        if (filter.companyId !== undefined && !isUuid(filter.companyId)) {
+          return [];
+        }
         const conditions = [
           ...(filter.companyId === undefined ? [] : [eq(people.companyId, filter.companyId)]),
           ...(filter.status === undefined ? [] : [eq(targets.status, filter.status)])
         ];
-        return database.select({ target: targets }).from(targets).innerJoin(
+        const rows = await database.select({ target: targets }).from(targets).innerJoin(
           people,
           eq(targets.personId, people.id)
         ).innerJoin(
@@ -464,47 +550,51 @@ export function createRepositories(database: Database) {
           asc(people.name),
           asc(people.role),
           asc(targets.id)
-        ).all().map(
-          (row) => row.target
         );
+        return rows.map((row) => normalizeRowTimestamps(row.target));
       }
     },
     notes: {
       async add(input: { targetId: string; text: string }): Promise<TargetNote> {
-        return database.insert(targetNotes).values({
+        const [note] = await database.insert(targetNotes).values({
           id: randomUUID(),
           targetId: input.targetId,
           text: input.text,
           createdAt: nowIso()
-        }).returning().get();
+        }).returning();
+        return requiredRow(note, "target note");
       },
       async listForTarget(targetId: string): Promise<TargetNote[]> {
-        return database.select().from(targetNotes).where(eq(targetNotes.targetId, targetId)).orderBy(
-          sql`${targetNotes}.rowid`
-        ).all();
+        if (!isUuid(targetId)) {
+          return [];
+        }
+        const rows = await database.select().from(targetNotes).where(
+          eq(targetNotes.targetId, targetId)
+        ).orderBy(asc(targetNotes.createdAt), sql`${targetNotes}.ctid`);
+        return normalizeRows(rows);
       }
     },
     outreachDrafts: {
       async createVersion(input: OutreachDraftVersionInput): Promise<OutreachDraft> {
-        return database.transaction((transaction) => {
-          const latest = transaction.select({ version: max(outreachDrafts.version) }).from(
+        return database.transaction(async (transaction) => {
+          const [latest] = await transaction.select({ version: max(outreachDrafts.version) }).from(
             outreachDrafts
           ).where(and(
             eq(outreachDrafts.targetId, input.targetId),
             eq(outreachDrafts.purpose, input.purpose)
-          )).get();
+          ));
           const now = nowIso();
-          const row = transaction.insert(outreachDrafts).values({
+          const [row] = await transaction.insert(outreachDrafts).values({
             id: randomUUID(),
             targetId: input.targetId,
             purpose: input.purpose,
             text: input.text,
             version: (latest?.version ?? 0) + 1,
-            evidenceIdsJson: JSON.stringify(input.evidenceIds),
+            evidenceIdsJson: input.evidenceIds,
             createdAt: now,
             updatedAt: now
-          }).returning().get();
-          return decodeOutreachDraft(row);
+          }).returning();
+          return decodeOutreachDraft(requiredRow(row, "outreach draft"));
         });
       },
       async getVersion(
@@ -512,72 +602,83 @@ export function createRepositories(database: Database) {
         purpose: string,
         version: number
       ): Promise<OutreachDraft | undefined> {
-        const row = database.select().from(outreachDrafts).where(and(
+        if (!isUuid(targetId)) {
+          return undefined;
+        }
+        const [row] = await database.select().from(outreachDrafts).where(and(
           eq(outreachDrafts.targetId, targetId),
           eq(outreachDrafts.purpose, purpose),
           eq(outreachDrafts.version, version)
-        )).get();
+        ));
         return row === undefined ? undefined : decodeOutreachDraft(row);
       },
       async listForTarget(targetId: string): Promise<OutreachDraft[]> {
-        return database.select().from(outreachDrafts).where(
+        if (!isUuid(targetId)) {
+          return [];
+        }
+        const rows = await database.select().from(outreachDrafts).where(
           eq(outreachDrafts.targetId, targetId)
-        ).orderBy(asc(outreachDrafts.purpose), asc(outreachDrafts.version)).all().map(
-          decodeOutreachDraft
-        );
+        ).orderBy(asc(outreachDrafts.purpose), asc(outreachDrafts.version));
+        return rows.map(decodeOutreachDraft);
       }
     },
     shortlists: {
       async create(input: { name: string; targetIds: string[] }): Promise<Shortlist> {
-        return database.transaction((transaction) => {
+        return database.transaction(async (transaction) => {
           const now = nowIso();
-          const shortlist = transaction.insert(shortlists).values({
+          const [shortlistRow] = await transaction.insert(shortlists).values({
             id: randomUUID(),
             name: input.name,
             createdAt: now,
             updatedAt: now
-          }).returning().get();
+          }).returning();
+          const shortlist = requiredRow(shortlistRow, "shortlist");
           if (input.targetIds.length > 0) {
-            transaction.insert(shortlistEntries).values(input.targetIds.map((targetId, position) => ({
+            await transaction.insert(shortlistEntries).values(input.targetIds.map((targetId, position) => ({
               id: randomUUID(),
               shortlistId: shortlist.id,
               targetId,
               position,
               createdAt: now
-            }))).run();
+            })));
           }
           return shortlist;
         });
       },
       async getWithEntries(id: string): Promise<ShortlistWithEntries | undefined> {
-        const shortlist = database.select().from(shortlists).where(eq(shortlists.id, id)).get();
+        if (!isUuid(id)) {
+          return undefined;
+        }
+        const [shortlist] = await database.select().from(shortlists).where(eq(shortlists.id, id));
         if (shortlist === undefined) {
           return undefined;
         }
+        const entries = await database.select().from(shortlistEntries).where(
+          eq(shortlistEntries.shortlistId, id)
+        ).orderBy(asc(shortlistEntries.position));
         return {
-          ...shortlist,
-          entries: database.select().from(shortlistEntries).where(
-            eq(shortlistEntries.shortlistId, id)
-          ).orderBy(asc(shortlistEntries.position)).all()
+          ...normalizeRowTimestamps(shortlist),
+          entries: normalizeRows(entries)
         };
       },
       async list(): Promise<Shortlist[]> {
-        return database.select().from(shortlists).orderBy(
+        const rows = await database.select().from(shortlists).orderBy(
           asc(shortlists.createdAt),
           asc(shortlists.id)
-        ).all();
+        );
+        return normalizeRows(rows);
       }
     },
     postDrafts: {
       async createVersion(input: PostDraftVersionInput): Promise<PostDraft> {
-        return database.transaction((transaction) => {
+        return database.transaction(async (transaction) => {
           const draftId = input.draftId ?? randomUUID();
-          const latest = transaction.select({ version: max(postDrafts.version) }).from(
+          const [latest] = await transaction.select({ version: max(postDrafts.version) }).from(
             postDrafts
-          ).where(eq(postDrafts.draftId, draftId)).get();
+          ).where(eq(postDrafts.draftId, draftId));
           const version = (latest?.version ?? 0) + 1;
           const now = nowIso();
-          return transaction.insert(postDrafts).values({
+          const [post] = await transaction.insert(postDrafts).values({
             id: randomUUID(),
             draftId,
             text: input.text,
@@ -589,19 +690,28 @@ export function createRepositories(database: Database) {
             state: input.state,
             createdAt: now,
             updatedAt: now
-          }).returning().get();
+          }).returning();
+          return requiredRow(post, "post draft");
         });
       },
       async getVersion(draftId: string, version: number): Promise<PostDraft | undefined> {
-        return database.select().from(postDrafts).where(and(
+        if (!isUuid(draftId)) {
+          return undefined;
+        }
+        const [post] = await database.select().from(postDrafts).where(and(
           eq(postDrafts.draftId, draftId),
           eq(postDrafts.version, version)
-        )).get();
+        ));
+        return post === undefined ? undefined : normalizeRowTimestamps(post);
       },
       async listVersions(draftId: string): Promise<PostDraft[]> {
-        return database.select().from(postDrafts).where(eq(postDrafts.draftId, draftId)).orderBy(
+        if (!isUuid(draftId)) {
+          return [];
+        }
+        const rows = await database.select().from(postDrafts).where(eq(postDrafts.draftId, draftId)).orderBy(
           asc(postDrafts.version)
-        ).all();
+        );
+        return normalizeRows(rows);
       },
       async transitionState(input: {
         versionId: string;
@@ -609,33 +719,45 @@ export function createRepositories(database: Database) {
         expectedState: string;
         nextState: string;
       }): Promise<PostDraft | undefined> {
-        return database.update(postDrafts).set({
+        if (!isUuid(input.versionId)) {
+          return undefined;
+        }
+        const [post] = await database.update(postDrafts).set({
           state: input.nextState,
           updatedAt: nowIso()
         }).where(and(
           eq(postDrafts.id, input.versionId),
           eq(postDrafts.version, input.version),
           eq(postDrafts.state, input.expectedState)
-        )).returning().get();
+        )).returning();
+        return post === undefined ? undefined : normalizeRowTimestamps(post);
       }
     },
     previews: {
       async create(
         input: Omit<typeof postPreviews.$inferInsert, "id" | "consumedAt">
       ): Promise<PostPreview> {
-        return database.insert(postPreviews).values({
+        const [preview] = await database.insert(postPreviews).values({
           id: randomUUID(),
           ...input,
           expiresAt: assertIsoTimestamp("preview.expiresAt", input.expiresAt)
-        }).returning().get();
+        }).returning();
+        return requiredRow(preview, "post preview");
       },
       async getByTokenHash(tokenHash: string): Promise<PostPreview | undefined> {
-        return database.select().from(postPreviews).where(eq(postPreviews.tokenHash, tokenHash)).get();
+        const [preview] = await database.select().from(postPreviews).where(
+          eq(postPreviews.tokenHash, tokenHash)
+        );
+        return preview === undefined ? undefined : normalizeRowTimestamps(preview);
       },
       async listForPostDraft(postDraftId: string): Promise<PostPreview[]> {
-        return database.select().from(postPreviews).where(
+        if (!isUuid(postDraftId)) {
+          return [];
+        }
+        const rows = await database.select().from(postPreviews).where(
           eq(postPreviews.postDraftId, postDraftId)
-        ).orderBy(sql`${postPreviews}.rowid`).all();
+        ).orderBy(asc(postPreviews.expiresAt), asc(postPreviews.id));
+        return normalizeRows(rows);
       },
       async createForLatest(input: {
         draftId: string;
@@ -645,30 +767,35 @@ export function createRepositories(database: Database) {
         allowedStates: readonly string[];
       }): Promise<PreviewCreationResult> {
         const expiresAt = assertIsoTimestamp("preview.expiresAt", input.expiresAt);
-        return database.transaction((transaction) => {
-          const post = transaction.select().from(postDrafts).where(and(
+        if (!isUuid(input.draftId)) {
+          return { outcome: "not_found" };
+        }
+        return database.transaction(async (transaction) => {
+          const [postRow] = await transaction.select().from(postDrafts).where(and(
             eq(postDrafts.draftId, input.draftId),
             eq(postDrafts.version, input.version)
-          )).get();
-          if (post === undefined) {
+          ));
+          if (postRow === undefined) {
             return { outcome: "not_found" };
           }
-          const latest = transaction.select().from(postDrafts).where(
+          const post = normalizeRowTimestamps(postRow);
+          const [latest] = await transaction.select().from(postDrafts).where(
             eq(postDrafts.draftId, input.draftId)
-          ).orderBy(desc(postDrafts.version)).get();
+          ).orderBy(desc(postDrafts.version));
           if (latest === undefined || latest.id !== post.id) {
             return { outcome: "not_latest" };
           }
           if (!input.allowedStates.includes(post.state)) {
             return { outcome: "invalid_state" };
           }
-          const preview = transaction.insert(postPreviews).values({
+          const [previewRow] = await transaction.insert(postPreviews).values({
             id: randomUUID(),
             postDraftId: post.id,
             version: post.version,
             tokenHash: input.tokenHash,
             expiresAt
-          }).returning().get();
+          }).returning();
+          const preview = requiredRow(previewRow, "post preview");
           return { outcome: "created", post, preview };
         });
       },
@@ -680,29 +807,31 @@ export function createRepositories(database: Database) {
         claimState?: string;
       }): Promise<PreviewConsumptionResult> {
         const consumedAt = assertIsoTimestamp("preview.consumedAt", input.consumedAt);
-        return database.transaction((transaction) => {
-          const preview = transaction.select().from(postPreviews).where(
+        return database.transaction(async (transaction) => {
+          const [previewRow] = await transaction.select().from(postPreviews).where(
             eq(postPreviews.tokenHash, input.tokenHash)
-          ).get();
+          );
           if (
-            preview === undefined
-            || !timingSafeTextEqual(preview.tokenHash, input.tokenHash)
+            previewRow === undefined
+            || !timingSafeTextEqual(previewRow.tokenHash, input.tokenHash)
           ) {
             return { outcome: "not_found" };
           }
+          const preview = normalizeRowTimestamps(previewRow);
           if (preview.consumedAt !== null) {
             return { outcome: "already_consumed" };
           }
           if (consumedAt >= preview.expiresAt) {
             return { outcome: "expired" };
           }
-          const post = transaction.select().from(postDrafts).where(and(
+          const [postRow] = await transaction.select().from(postDrafts).where(and(
             eq(postDrafts.id, preview.postDraftId),
             eq(postDrafts.version, preview.version)
-          )).get();
-          if (post === undefined) {
+          ));
+          if (postRow === undefined) {
             return { outcome: "stale" };
           }
+          const post = normalizeRowTimestamps(postRow);
           if (
             input.expected.postId !== post.draftId
             || input.expected.versionId !== post.id
@@ -712,31 +841,32 @@ export function createRepositories(database: Database) {
           ) {
             return { outcome: "mismatch" };
           }
-          const latest = transaction.select().from(postDrafts).where(
+          const [latest] = await transaction.select().from(postDrafts).where(
             eq(postDrafts.draftId, post.draftId)
-          ).orderBy(desc(postDrafts.version)).get();
+          ).orderBy(desc(postDrafts.version));
           if (latest === undefined || latest.id !== post.id) {
             return { outcome: "stale" };
           }
           if (!input.allowedStates.includes(post.state)) {
             return { outcome: "invalid_state" };
           }
-          const consumed = transaction.update(postPreviews).set({ consumedAt }).where(and(
+          const [consumedRow] = await transaction.update(postPreviews).set({ consumedAt }).where(and(
             eq(postPreviews.id, preview.id),
             isNull(postPreviews.consumedAt)
-          )).returning().get();
-          if (consumed === undefined) {
+          )).returning();
+          if (consumedRow === undefined) {
             return { outcome: "race" };
           }
+          const consumed = normalizeRowTimestamps(consumedRow);
           if (input.claimState !== undefined) {
-            const claimed = transaction.update(postDrafts).set({
+            const [claimed] = await transaction.update(postDrafts).set({
               state: input.claimState,
               updatedAt: nowIso()
             }).where(and(
               eq(postDrafts.id, post.id),
               eq(postDrafts.version, post.version),
               eq(postDrafts.state, post.state)
-            )).returning().get();
+            )).returning();
             if (claimed === undefined) {
               throw new Error("Publish claim state changed before preview consumption completed");
             }
@@ -746,12 +876,13 @@ export function createRepositories(database: Database) {
       },
       async consume(tokenHash: string, consumedAt: string): Promise<PostPreview | undefined> {
         assertIsoTimestamp("preview.consumedAt", consumedAt);
-        return database.transaction((transaction) => transaction.update(postPreviews).set({
-          consumedAt
-        }).where(and(
-          eq(postPreviews.tokenHash, tokenHash),
-          isNull(postPreviews.consumedAt)
-        )).returning().get());
+        return database.transaction(async (transaction) => {
+          const [preview] = await transaction.update(postPreviews).set({ consumedAt }).where(and(
+            eq(postPreviews.tokenHash, tokenHash),
+            isNull(postPreviews.consumedAt)
+          )).returning();
+          return preview === undefined ? undefined : normalizeRowTimestamps(preview);
+        });
       }
     },
     publishAttempts: {
@@ -762,10 +893,13 @@ export function createRepositories(database: Database) {
         if (input.completedAt !== undefined && input.completedAt !== null) {
           assertIsoTimestamp("publishAttempt.completedAt", input.completedAt);
         }
-        return database.transaction((transaction) => transaction.insert(publishAttempts).values({
-          id: randomUUID(),
-          ...input
-        }).returning().get());
+        return database.transaction(async (transaction) => {
+          const [attempt] = await transaction.insert(publishAttempts).values({
+            id: randomUUID(),
+            ...input
+          }).returning();
+          return requiredRow(attempt, "publish attempt");
+        });
       },
       async updateResult(id: string, input: {
         responseCategory: string;
@@ -774,17 +908,25 @@ export function createRepositories(database: Database) {
         completedAt: string;
       }): Promise<PublishAttempt | undefined> {
         assertIsoTimestamp("publishAttempt.completedAt", input.completedAt);
-        return database.update(publishAttempts).set({
+        if (!isUuid(id)) {
+          return undefined;
+        }
+        const [attempt] = await database.update(publishAttempts).set({
           responseCategory: input.responseCategory,
           ...(input.postUrn === undefined ? {} : { postUrn: input.postUrn }),
           ...(input.sanitizedError === undefined ? {} : { sanitizedError: input.sanitizedError }),
           completedAt: input.completedAt
-        }).where(eq(publishAttempts.id, id)).returning().get();
+        }).where(eq(publishAttempts.id, id)).returning();
+        return attempt === undefined ? undefined : normalizeRowTimestamps(attempt);
       },
       async listForPostDraft(postDraftId: string): Promise<PublishAttempt[]> {
-        return database.select().from(publishAttempts).where(
+        if (!isUuid(postDraftId)) {
+          return [];
+        }
+        const rows = await database.select().from(publishAttempts).where(
           eq(publishAttempts.postDraftId, postDraftId)
-        ).orderBy(asc(publishAttempts.requestedAt), asc(publishAttempts.id)).all();
+        ).orderBy(asc(publishAttempts.requestedAt), asc(publishAttempts.id));
+        return normalizeRows(rows);
       }
     },
     oauthTokens: {
@@ -798,7 +940,7 @@ export function createRepositories(database: Database) {
         const expiresAt = input.expiresAt === undefined
           ? undefined
           : assertIsoTimestamp("oauthToken.expiresAt", input.expiresAt);
-        database.insert(oauthTokens).values({
+        await database.insert(oauthTokens).values({
           id: randomUUID(),
           provider: input.provider,
           ciphertext: input.ciphertext,
@@ -816,13 +958,17 @@ export function createRepositories(database: Database) {
             expiresAt: expiresAt ?? null,
             updatedAt: now
           }
-        }).run();
-        return database.select().from(oauthTokens).where(
+        });
+        const [token] = await database.select().from(oauthTokens).where(
           eq(oauthTokens.provider, input.provider)
-        ).get()!;
+        );
+        return requiredRow(token, "OAuth token");
       },
       async getByProvider(provider: string): Promise<OAuthToken | undefined> {
-        return database.select().from(oauthTokens).where(eq(oauthTokens.provider, provider)).get();
+        const [token] = await database.select().from(oauthTokens).where(
+          eq(oauthTokens.provider, provider)
+        );
+        return token === undefined ? undefined : normalizeRowTimestamps(token);
       }
     }
   };

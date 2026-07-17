@@ -1,5 +1,5 @@
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
-import { createDatabase } from "../../src/db/client.js";
+import { createTestDatabase } from "../support/database.js";
 import { DomainError } from "../../src/domain/errors.js";
 import {
   PIPELINE_STATUSES,
@@ -8,7 +8,7 @@ import {
 } from "../../src/pipeline/service.js";
 import type { TargetScore } from "../../src/ranking/score-target.js";
 
-const db = (await createDatabase(":memory:"));
+const db = await createTestDatabase();
 const pipeline = createPipelineService(db);
 
 afterEach(async () => (await db.resetForTests()));
@@ -61,22 +61,22 @@ async function expectDomainError(
   throw new Error("Expected a DomainError");
 }
 
-type PersistenceFailureKind = "busy" | "unknown";
+type PersistenceFailureKind = "retryable" | "unknown";
 
 const PRIVATE_PERSISTENCE_TEXT = "private-user-persistence-text";
-const PRIVATE_DATABASE_PATH = "/private/path/career.sqlite";
+const PRIVATE_DATABASE_URL = "postgresql://private-user:private-password@private.example/career";
 
 function repositoryFailure(kind: PersistenceFailureKind): Error {
   const error = new Error(
-    `${kind === "busy" ? "database is locked" : "database I/O failed"} at `
-      + `${PRIVATE_DATABASE_PATH}: ${PRIVATE_PERSISTENCE_TEXT}`
+    `${kind === "retryable" ? "serialization failed" : "database I/O failed"} at `
+      + `${PRIVATE_DATABASE_URL}: ${PRIVATE_PERSISTENCE_TEXT}`
   );
   Object.assign(error, {
-    code: kind === "busy" ? "SQLITE_BUSY" : "SQLITE_IOERR",
+    code: kind === "retryable" ? "40001" : "XX000",
     sql: `INSERT INTO private_table VALUES ('${PRIVATE_PERSISTENCE_TEXT}')`,
     userText: PRIVATE_PERSISTENCE_TEXT
   });
-  error.stack = `${error.message}\nSQL INSERT at ${PRIVATE_DATABASE_PATH}`;
+  error.stack = `${error.message}\nSQL INSERT at ${PRIVATE_DATABASE_URL}`;
   return error;
 }
 
@@ -86,11 +86,11 @@ function expectSanitizedPersistenceError(
   entity: "target" | "note" | "shortlist"
 ): void {
   expect(error).toMatchObject({
-    code: kind === "busy" ? "CONFLICT" : "DATA_INTEGRITY",
-    message: kind === "busy"
+    code: kind === "retryable" ? "CONFLICT" : "DATA_INTEGRITY",
+    message: kind === "retryable"
       ? "Pipeline write could not be completed"
       : "Pipeline storage operation failed",
-    details: { entity, retryable: kind === "busy" }
+    details: { entity, retryable: kind === "retryable" }
   });
   expect("cause" in error).toBe(false);
   const exposed = [
@@ -100,10 +100,10 @@ function expectSanitizedPersistenceError(
     error.stack ?? ""
   ].join("\n");
   expect(exposed).not.toContain(PRIVATE_PERSISTENCE_TEXT);
-  expect(exposed).not.toContain(PRIVATE_DATABASE_PATH);
+  expect(exposed).not.toContain(PRIVATE_DATABASE_URL);
   expect(exposed).not.toContain("SQL INSERT");
-  expect(exposed).not.toContain("SQLITE_BUSY");
-  expect(exposed).not.toContain("SQLITE_IOERR");
+  expect(exposed).not.toContain("40001");
+  expect(exposed).not.toContain("XX000");
 }
 
 describe("pipeline statuses", () => {
@@ -454,14 +454,14 @@ describe("shortlists", () => {
 });
 
 describe("pipeline persistence error boundaries", () => {
-  it.each(["busy", "unknown"] as const)("sanitizes %s target-save failures", async (kind) => {
+  it.each(["retryable", "unknown"] as const)("sanitizes %s target-save failures", async (kind) => {
     const score = (await scoreFor(`save-failure-${kind}`));
     const spy = vi.spyOn(db.targets, "upsert").mockRejectedValue(repositoryFailure(kind));
     let error: DomainError;
     try {
       error = (await expectDomainError(
         async () => (await pipeline.saveTarget(score)),
-        kind === "busy" ? "CONFLICT" : "DATA_INTEGRITY"
+        kind === "retryable" ? "CONFLICT" : "DATA_INTEGRITY"
       ));
     } finally {
       spy.mockRestore();
@@ -470,14 +470,14 @@ describe("pipeline persistence error boundaries", () => {
     expectSanitizedPersistenceError(error!, kind, "target");
   });
 
-  it.each(["busy", "unknown"] as const)("sanitizes %s status-update failures", async (kind) => {
+  it.each(["retryable", "unknown"] as const)("sanitizes %s status-update failures", async (kind) => {
     const target = (await pipeline.saveTarget((await scoreFor(`status-failure-${kind}`))));
     const spy = vi.spyOn(db.targets, "updateStatus").mockRejectedValue(repositoryFailure(kind));
     let error: DomainError;
     try {
       error = (await expectDomainError(
         async () => (await pipeline.updateStatus(target.id, "shortlisted")),
-        kind === "busy" ? "CONFLICT" : "DATA_INTEGRITY"
+        kind === "retryable" ? "CONFLICT" : "DATA_INTEGRITY"
       ));
     } finally {
       spy.mockRestore();
@@ -486,14 +486,14 @@ describe("pipeline persistence error boundaries", () => {
     expectSanitizedPersistenceError(error!, kind, "target");
   });
 
-  it.each(["busy", "unknown"] as const)("sanitizes %s note-save failures", async (kind) => {
+  it.each(["retryable", "unknown"] as const)("sanitizes %s note-save failures", async (kind) => {
     const target = (await pipeline.saveTarget((await scoreFor(`note-failure-${kind}`))));
     const spy = vi.spyOn(db.notes, "add").mockRejectedValue(repositoryFailure(kind));
     let error: DomainError;
     try {
       error = (await expectDomainError(
         async () => (await pipeline.recordNote(target.id, "Private note")),
-        kind === "busy" ? "CONFLICT" : "DATA_INTEGRITY"
+        kind === "retryable" ? "CONFLICT" : "DATA_INTEGRITY"
       ));
     } finally {
       spy.mockRestore();
@@ -502,14 +502,14 @@ describe("pipeline persistence error boundaries", () => {
     expectSanitizedPersistenceError(error!, kind, "note");
   });
 
-  it.each(["busy", "unknown"] as const)("sanitizes %s shortlist-save failures", async (kind) => {
+  it.each(["retryable", "unknown"] as const)("sanitizes %s shortlist-save failures", async (kind) => {
     const target = (await pipeline.saveTarget((await scoreFor(`shortlist-failure-${kind}`))));
     const spy = vi.spyOn(db.shortlists, "create").mockRejectedValue(repositoryFailure(kind));
     let error: DomainError;
     try {
       error = (await expectDomainError(
         async () => (await pipeline.createShortlist({ name: "Private shortlist", targetIds: [target.id] })),
-        kind === "busy" ? "CONFLICT" : "DATA_INTEGRITY"
+        kind === "retryable" ? "CONFLICT" : "DATA_INTEGRITY"
       ));
     } finally {
       spy.mockRestore();

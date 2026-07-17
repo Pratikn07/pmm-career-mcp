@@ -4,6 +4,7 @@ export default defineConfig({
   test: {
     environment: "node",
     clearMocks: true,
+    maxWorkers: 4,
     include: ["tests/**/*.test.ts"],
     coverage: {
       provider: "v8",

@@ -5,7 +5,7 @@ import type {
   Target,
   TargetNote
 } from "../db/repositories.js";
-import { DomainError, sqliteConstraintKind } from "../domain/errors.js";
+import { DomainError, postgresErrorKind } from "../domain/errors.js";
 import type { TargetScore } from "../ranking/score-target.js";
 
 const PIPELINE_STATUS_VALUES = [
@@ -227,7 +227,7 @@ function normalizeScore(score: TargetScore): TargetScore {
 }
 
 function mapPipelinePersistenceError(error: unknown, operation: "target" | "note" | "shortlist"): never {
-  const constraint = sqliteConstraintKind(error);
+  const constraint = postgresErrorKind(error);
   if (constraint === "foreign_key") {
     throw new DomainError("NOT_FOUND", "Referenced pipeline record was not found", {
       entity: operation
@@ -238,18 +238,7 @@ function mapPipelinePersistenceError(error: unknown, operation: "target" | "note
       entity: operation
     });
   }
-  const sqliteCode = typeof error === "object"
-    && error !== null
-    && "code" in error
-    && typeof (error as { code?: unknown }).code === "string"
-    ? (error as { code: string }).code
-    : undefined;
-  if (
-    sqliteCode === "SQLITE_BUSY"
-    || sqliteCode?.startsWith("SQLITE_BUSY_") === true
-    || sqliteCode === "SQLITE_LOCKED"
-    || sqliteCode?.startsWith("SQLITE_LOCKED_") === true
-  ) {
+  if (constraint === "retryable") {
     throw new DomainError("CONFLICT", "Pipeline write could not be completed", {
       entity: operation,
       retryable: true

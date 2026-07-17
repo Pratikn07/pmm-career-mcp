@@ -2,7 +2,7 @@ import { createHash, randomBytes as secureRandomBytes } from "node:crypto";
 import type { CareerDatabase } from "../db/client.js";
 import type { PostDraft, PreviewConsumptionResult } from "../db/repositories.js";
 import type { PostVisibility } from "../drafts/service.js";
-import { DomainError, sqliteConstraintKind } from "../domain/errors.js";
+import { DomainError, postgresErrorKind } from "../domain/errors.js";
 
 export const PREVIEW_TOKEN_HASH_CONTEXT = "pmm-career-mcp.preview-token.sha256.v1";
 const TOKEN_BYTES = 32;
@@ -122,7 +122,7 @@ function mapPreviewPersistenceError(error: unknown): never {
   if (error instanceof DomainError) {
     throw error;
   }
-  const constraint = sqliteConstraintKind(error);
+  const constraint = postgresErrorKind(error);
   if (constraint === "unique") {
     throw new DomainError("CONFLICT", "Preview token could not be created", {
       entity: "preview"
@@ -133,13 +133,7 @@ function mapPreviewPersistenceError(error: unknown): never {
       entity: "post_draft"
     });
   }
-  if (
-    typeof error === "object"
-    && error !== null
-    && "code" in error
-    && typeof (error as { code?: unknown }).code === "string"
-    && /^SQLITE_(?:BUSY|LOCKED)/.test((error as { code: string }).code)
-  ) {
+  if (constraint === "retryable") {
     throw new DomainError("CONFLICT", "Preview operation could not be completed", {
       entity: "preview",
       retryable: true

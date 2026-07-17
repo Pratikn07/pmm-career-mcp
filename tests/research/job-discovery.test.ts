@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createDatabase, type TestCareerDatabase } from "../../src/db/client.js";
+import { afterAll, afterEach, describe, expect, it } from "vitest";
+import { createTestDatabase, type TestCareerDatabase } from "../support/database.js";
 import type { FetchedPage } from "../../src/research/fetch-page.js";
 import * as jobDiscoveryModule from "../../src/research/job-discovery.js";
 import { createJobDiscovery } from "../../src/research/job-discovery.js";
@@ -11,6 +11,10 @@ const CHECKED_AT = "2026-07-16T14:00:00.000Z";
 const HOME_URL = "https://acme.example/";
 const CAREERS_URL = "https://acme.example/careers";
 const publicDns = async () => ["93.184.216.34"];
+const database: TestCareerDatabase = await createTestDatabase();
+
+afterEach(async () => (await database.resetForTests()));
+afterAll(async () => (await database.close()));
 
 function fetchedPage(url: string, html: string, title: string): FetchedPage {
   return {
@@ -25,14 +29,6 @@ function fetchedPage(url: string, html: string, title: string): FetchedPage {
 }
 
 describe("PMM opportunity discovery", () => {
-  let database: TestCareerDatabase;
-
-  beforeEach(async () => {
-    database = (await createDatabase(":memory:"));
-  });
-
-  afterEach(async () => (await database.close()));
-
   it("exports an explicit injected service factory without a misleading dependency-taking free function", () => {
     expect(Object.keys(jobDiscoveryModule).sort()).toEqual(["createJobDiscovery"]);
   });

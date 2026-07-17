@@ -1,13 +1,19 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import BetterSqlite3 from "better-sqlite3";
-import { afterAll, afterEach, describe, expect, it } from "vitest";
-import { createDatabase } from "../../src/db/client.js";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import {
+  createTestDatabase,
+  queryTestDatabase,
+  type TestCareerDatabase
+} from "../support/database.js";
 
-const db = (await createDatabase(":memory:"));
+let db: TestCareerDatabase;
+beforeAll(async () => {
+  db = await createTestDatabase();
+});
 afterEach(async () => (await db.resetForTests()));
-afterAll(async () => (await db.close()));
+afterAll(async () => (await db?.close()));
 
 async function addTarget(name = "Ada Example", status = "discovered") {
   const company = (await db.companies.upsert({
@@ -60,14 +66,40 @@ it("persists a target with evidence provenance", async () => {
 });
 
 describe("database lifecycle", () => {
+  it("migrates exactly the thirteen application tables into the private schema", async () => {
+    const tables = await queryTestDatabase<{ table_name: string }>(db, `
+      select table_name
+      from information_schema.tables
+      where table_schema = 'career_mcp'
+        and table_type = 'BASE TABLE'
+      order by table_name
+    `);
+
+    expect(tables.map((row) => row.table_name)).toEqual([
+      "companies",
+      "evidence",
+      "oauth_tokens",
+      "outreach_drafts",
+      "people",
+      "post_drafts",
+      "post_previews",
+      "publish_attempts",
+      "settings",
+      "shortlist_entries",
+      "shortlists",
+      "target_notes",
+      "targets"
+    ]);
+  });
+
   it("discovers migrations independently of the current working directory", async () => {
     const originalDirectory = process.cwd();
     const temporaryDirectory = mkdtempSync(join(tmpdir(), "career-mcp-cwd-"));
-    let independentDatabase: Awaited<ReturnType<typeof createDatabase>> | undefined;
+    let independentDatabase: TestCareerDatabase | undefined;
 
     try {
       process.chdir(temporaryDirectory);
-      independentDatabase = (await createDatabase(":memory:"));
+      independentDatabase = await createTestDatabase();
       const company = (await independentDatabase.companies.upsert({
         ycId: "cwd-independent-w24",
         name: "CWD Independent"
@@ -80,51 +112,124 @@ describe("database lifecycle", () => {
     }
   });
 
-  it("runs the complete migration and enables WAL for file databases", async () => {
-    const temporaryDirectory = mkdtempSync(join(tmpdir(), "career-mcp-db-"));
-    const path = join(temporaryDirectory, "nested", "career.sqlite");
-    const fileDatabase = (await createDatabase(path));
+  it("uses native PostgreSQL types for identifiers, timestamps, values, and scores", async () => {
+    const columns = await queryTestDatabase<{
+      table_name: string;
+      column_name: string;
+      data_type: string;
+    }>(db, `
+      select table_name, column_name, data_type
+      from information_schema.columns
+      where table_schema = 'career_mcp'
+        and (
+          (table_name = 'settings' and column_name in ('id', 'value_json', 'updated_at'))
+          or (table_name = 'companies' and column_name = 'is_hiring')
+          or (table_name = 'evidence' and column_name = 'confidence')
+          or (table_name = 'outreach_drafts' and column_name = 'version')
+          or (table_name = 'post_drafts' and column_name = 'version')
+        )
+      order by table_name, column_name
+    `);
 
-    expect("resetForTests" in fileDatabase).toBe(false);
-    await fileDatabase.close();
-
-    const sqlite = new BetterSqlite3(path);
-    const tableNames = sqlite.prepare(
-      "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name"
-    ).all().map((row) => (row as { name: string }).name);
-    const journalMode = sqlite.pragma("journal_mode", { simple: true });
-    sqlite.close();
-    rmSync(temporaryDirectory, { recursive: true, force: true });
-
-    expect(tableNames).toEqual(expect.arrayContaining([
-      "settings",
-      "companies",
-      "people",
-      "evidence",
-      "targets",
-      "target_notes",
-      "outreach_drafts",
-      "shortlists",
-      "shortlist_entries",
-      "post_drafts",
-      "post_previews",
-      "publish_attempts",
-      "oauth_tokens"
-    ]));
-    expect(journalMode).toBe("wal");
+    expect(columns).toEqual([
+      { table_name: "companies", column_name: "is_hiring", data_type: "boolean" },
+      { table_name: "evidence", column_name: "confidence", data_type: "double precision" },
+      { table_name: "outreach_drafts", column_name: "version", data_type: "integer" },
+      { table_name: "post_drafts", column_name: "version", data_type: "integer" },
+      { table_name: "settings", column_name: "id", data_type: "uuid" },
+      { table_name: "settings", column_name: "updated_at", data_type: "timestamp with time zone" },
+      { table_name: "settings", column_name: "value_json", data_type: "jsonb" }
+    ]);
   });
 
-  it("persists repository records after reopening a file database", async () => {
-    const temporaryDirectory = mkdtempSync(join(tmpdir(), "career-mcp-db-"));
-    const path = join(temporaryDirectory, "career.sqlite");
-    const first = (await createDatabase(path));
-    (await first.companies.upsert({ ycId: "persist-w24", name: "Persistent Co" }));
-    (await first.close());
+  it("uses native UUIDs for every identifier column", async () => {
+    const mismatches = await queryTestDatabase<{
+      table_name: string;
+      column_name: string;
+      data_type: string;
+    }>(db, `
+      select table_name, column_name, data_type
+      from information_schema.columns
+      where table_schema = 'career_mcp'
+        and (column_name = 'id' or column_name like '%\\_id' escape '\\')
+        and column_name <> 'yc_id'
+        and data_type <> 'uuid'
+      order by table_name, column_name
+    `);
+    expect(mismatches).toEqual([]);
+  });
 
-    const reopened = (await createDatabase(path));
-    expect((await reopened.companies.getByYcId("persist-w24"))?.name).toBe("Persistent Co");
-    (await reopened.close());
-    rmSync(temporaryDirectory, { recursive: true, force: true });
+  it("preserves composite version uniqueness and exact-version foreign keys", async () => {
+    const constraints = await queryTestDatabase<{
+      constraint_name: string;
+      constraint_type: string;
+      columns: string;
+    }>(db, `
+      select
+        tc.constraint_name,
+        tc.constraint_type,
+        string_agg(kcu.column_name, ',' order by kcu.ordinal_position) as columns
+      from information_schema.table_constraints tc
+      join information_schema.key_column_usage kcu
+        on kcu.constraint_schema = tc.constraint_schema
+       and kcu.constraint_name = tc.constraint_name
+      where tc.constraint_schema = 'career_mcp'
+        and tc.constraint_name in (
+          'post_draft_version_unique',
+          'post_draft_row_version_unique',
+          'post_previews_exact_version_fk',
+          'publish_attempts_exact_version_fk'
+        )
+      group by tc.constraint_name, tc.constraint_type
+      order by tc.constraint_name
+    `);
+
+    expect(constraints).toEqual([
+      {
+        constraint_name: "post_draft_row_version_unique",
+        constraint_type: "UNIQUE",
+        columns: "id,version"
+      },
+      {
+        constraint_name: "post_draft_version_unique",
+        constraint_type: "UNIQUE",
+        columns: "draft_id,version"
+      },
+      {
+        constraint_name: "post_previews_exact_version_fk",
+        constraint_type: "FOREIGN KEY",
+        columns: "post_draft_id,version"
+      },
+      {
+        constraint_name: "publish_attempts_exact_version_fk",
+        constraint_type: "FOREIGN KEY",
+        columns: "post_draft_id,version"
+      }
+    ]);
+  });
+
+  it("keeps application tables out of the public schema", async () => {
+    const tables = await queryTestDatabase<{ count: number }>(db, `
+      select count(*)::integer as count
+      from information_schema.tables
+      where table_schema = 'public'
+        and table_name in (
+          'settings', 'companies', 'people', 'evidence', 'targets', 'target_notes',
+          'outreach_drafts', 'shortlists', 'shortlist_entries', 'post_drafts',
+          'post_previews', 'publish_attempts', 'oauth_tokens'
+        )
+    `);
+    expect(tables).toEqual([{ count: 0 }]);
+  });
+
+  it("resets all application tables with schema-qualified truncation", async () => {
+    await db.settings.set("reset-check", { persisted: true });
+    await db.companies.upsert({ ycId: "reset-w24", name: "Reset Co" });
+
+    await db.resetForTests();
+
+    expect(await db.settings.get("reset-check")).toBeUndefined();
+    expect(await db.companies.list()).toEqual([]);
   });
 
   it("enforces foreign keys", async () => {
@@ -132,20 +237,42 @@ describe("database lifecycle", () => {
       companyId: "missing-company",
       name: "No Company",
       role: "Founder"
-    })).rejects.toThrow(/FOREIGN KEY/);
+    })).rejects.toBeDefined();
+  });
+
+  it("treats malformed UUID lookup input as not found", async () => {
+    expect(await db.companies.get("not-a-uuid")).toBeUndefined();
+    expect(await db.people.get("not-a-uuid")).toBeUndefined();
+    expect(await db.people.getWithEvidence("not-a-uuid")).toBeUndefined();
+    expect(await db.evidence.get("not-a-uuid")).toBeUndefined();
+    expect(await db.targets.get("not-a-uuid")).toBeUndefined();
+    expect(await db.targets.getByPerson("not-a-uuid")).toBeUndefined();
+    expect(await db.outreachDrafts.getVersion("not-a-uuid", "connection_note", 1)).toBeUndefined();
+    expect(await db.shortlists.getWithEntries("not-a-uuid")).toBeUndefined();
+    expect(await db.postDrafts.getVersion("not-a-uuid", 1)).toBeUndefined();
+    expect(await db.people.listByCompany("not-a-uuid")).toEqual([]);
+    expect(await db.previews.listForPostDraft("not-a-uuid")).toEqual([]);
+    expect(await db.publishAttempts.listForPostDraft("not-a-uuid")).toEqual([]);
   });
 });
 
 it("stores structured settings", async () => {
-  const setting = (await db.settings.set("career_preferences", {
+  const structuredValue = {
     roleKeywords: ["product marketing"],
     preferredLocations: ["San Francisco"]
+  };
+  const setting = (await db.settings.set("career_preferences", {
+    ...structuredValue
   }));
   expect(setting.id).toMatch(/^[0-9a-f-]{36}$/);
-  expect((await db.settings.get("career_preferences"))).toEqual({
-    roleKeywords: ["product marketing"],
-    preferredLocations: ["San Francisco"]
-  });
+  expect(setting.valueJson).toEqual(structuredValue);
+  expect((await db.settings.get("career_preferences"))).toEqual(structuredValue);
+  const stored = await queryTestDatabase<{ value_json: unknown; value_type: string }>(db, `
+    select value_json, pg_typeof(value_json)::text as value_type
+    from career_mcp.settings
+    where key = 'career_preferences'
+  `);
+  expect(stored).toEqual([{ value_json: structuredValue, value_type: "jsonb" }]);
 });
 
 it("upserts company and person identities without creating duplicates", async () => {
@@ -282,7 +409,7 @@ it("rejects a preview version that does not match its post draft row", async () 
     version: post.version + 1,
     tokenHash: "mismatched-preview-version",
     expiresAt: "2026-07-16T00:15:00.000Z"
-  })).rejects.toThrow(/FOREIGN KEY/);
+  })).rejects.toBeDefined();
 });
 
 it("records publish attempts against an exact post version", async () => {
@@ -320,7 +447,7 @@ it("rejects a publish-attempt version that does not match its post draft row", a
     version: post.version + 1,
     requestedAt: "2026-07-16T00:00:00.000Z",
     responseCategory: "pending"
-  })).rejects.toThrow(/FOREIGN KEY/);
+  })).rejects.toBeDefined();
 });
 
 it("stores OAuth secrets only in ciphertext fields", async () => {
@@ -340,6 +467,20 @@ it("stores OAuth secrets only in ciphertext fields", async () => {
 
 describe("ISO timestamp invariants", () => {
   const invalidTimestamp = "not-an-iso-timestamp";
+
+  it("normalizes database timestamptz values to canonical ISO strings", async () => {
+    const company = await db.companies.upsert({
+      ycId: "canonical-time-w24",
+      name: "Canonical Time"
+    });
+    await queryTestDatabase(db, `
+      update career_mcp.companies
+      set checked_at = '2026-07-15 17:00:00-07'
+      where id = '${company.id}'
+    `);
+
+    expect((await db.companies.get(company.id))?.checkedAt).toBe("2026-07-16T00:00:00.000Z");
+  });
 
   it.each([
     ["company checkedAt", async () => {

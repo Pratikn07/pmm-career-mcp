@@ -1,9 +1,9 @@
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import BetterSqlite3 from "better-sqlite3";
-import { drizzle } from "drizzle-orm/better-sqlite3";
-import { migrate } from "drizzle-orm/better-sqlite3/migrator";
+import { drizzle } from "drizzle-orm/postgres-js";
+import { migrate } from "drizzle-orm/postgres-js/migrator";
+import postgres from "postgres";
 import { createRepositories } from "./repositories.js";
 import { schema } from "./schema.js";
 
@@ -12,9 +12,17 @@ export type CareerDatabase = ReturnType<typeof createRepositories> & {
   close(): Promise<void>;
 };
 
-export type TestCareerDatabase = CareerDatabase & {
-  resetForTests(): Promise<void>;
-};
+function validateDatabaseUrl(databaseUrl: string): void {
+  let parsed: URL;
+  try {
+    parsed = new URL(databaseUrl);
+  } catch {
+    throw new Error("DATABASE_URL must be a valid PostgreSQL URL");
+  }
+  if (parsed.protocol !== "postgres:" && parsed.protocol !== "postgresql:") {
+    throw new Error("DATABASE_URL must use the postgres or postgresql scheme");
+  }
+}
 
 function findMigrationsFolder(): string {
   let directory = dirname(fileURLToPath(import.meta.url));
@@ -36,56 +44,29 @@ function findMigrationsFolder(): string {
   }
 }
 
-export function createDatabase(path: ":memory:"): Promise<TestCareerDatabase>;
-export function createDatabase(path: string): Promise<CareerDatabase>;
-export async function createDatabase(
-  path: string
-): Promise<CareerDatabase | TestCareerDatabase> {
-  if (path !== ":memory:") {
-    mkdirSync(dirname(resolve(path)), { recursive: true });
+export async function createDatabase(databaseUrl: string): Promise<CareerDatabase> {
+  validateDatabaseUrl(databaseUrl);
+  const client = postgres(databaseUrl, {
+    max: 5,
+    ...(process.env.NODE_ENV === "production" ? { ssl: "require" } : {})
+  });
+  const database = drizzle(client, { schema });
+
+  try {
+    await migrate(database, { migrationsFolder: findMigrationsFolder() });
+  } catch (error) {
+    await client.end({ timeout: 5 }).catch(() => undefined);
+    throw error;
   }
 
-  const sqlite = new BetterSqlite3(path);
-  sqlite.pragma("foreign_keys = ON");
-  if (path !== ":memory:") {
-    sqlite.pragma("journal_mode = WAL");
-  }
-
-  const database = drizzle(sqlite, { schema });
-  migrate(database, { migrationsFolder: findMigrationsFolder() });
   const repositories = createRepositories(database);
-  const careerDatabase: CareerDatabase = {
+  return {
     ...repositories,
     checkReady: async () => {
-      sqlite.prepare("SELECT 1").get();
+      await client`select 1`;
     },
     close: async () => {
-      sqlite.close();
-    }
-  };
-
-  if (path !== ":memory:") {
-    return careerDatabase;
-  }
-
-  return {
-    ...careerDatabase,
-    resetForTests: async () => {
-      sqlite.exec(`
-        DELETE FROM publish_attempts;
-        DELETE FROM post_previews;
-        DELETE FROM post_drafts;
-        DELETE FROM shortlist_entries;
-        DELETE FROM shortlists;
-        DELETE FROM outreach_drafts;
-        DELETE FROM target_notes;
-        DELETE FROM targets;
-        DELETE FROM evidence;
-        DELETE FROM people;
-        DELETE FROM companies;
-        DELETE FROM oauth_tokens;
-        DELETE FROM settings;
-      `);
+      await client.end({ timeout: 5 });
     }
   };
 }

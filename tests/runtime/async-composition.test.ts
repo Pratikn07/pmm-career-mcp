@@ -21,7 +21,7 @@ function testEnvironment(): NodeJS.ProcessEnv {
   return {
     NODE_ENV: "test",
     PORT: "46873",
-    DATABASE_PATH: ":memory:",
+    DATABASE_URL: "postgresql://postgres:postgres@127.0.0.1:5432/postgres",
     BASE_URL: "http://127.0.0.1:46873",
     AUTH_MODE: "none",
     LINKEDIN_PUBLISH_ENABLED: "false",
@@ -33,7 +33,7 @@ function testConfig() {
   return {
     nodeEnv: "test" as const,
     port: 0,
-    databasePath: ":memory:",
+    databaseUrl: "postgresql://postgres:postgres@127.0.0.1:5432/postgres",
     baseUrl: "http://127.0.0.1:3000",
     authMode: "none" as const,
     linkedinPublishEnabled: false,
@@ -95,7 +95,9 @@ it("waits for database creation before opening the HTTP listener", async () => {
   let runtime: Awaited<typeof startup> | undefined;
   try {
     await Promise.resolve();
-    expect(createDatabase).toHaveBeenCalledWith(":memory:");
+    expect(createDatabase).toHaveBeenCalledWith(
+      "postgresql://postgres:postgres@127.0.0.1:5432/postgres"
+    );
     expect(listen).not.toHaveBeenCalled();
 
     databaseCreation.resolve(database);

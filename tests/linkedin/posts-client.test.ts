@@ -1,11 +1,11 @@
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import nock from "nock";
-import { createDatabase } from "../../src/db/client.js";
+import { createTestDatabase } from "../support/database.js";
 import { encryptJson } from "../../src/security/crypto.js";
 import { createLinkedInPostsClient } from "../../src/linkedin/posts-client.js";
 
 const KEY = "b".repeat(64);
-const db = (await createDatabase(":memory:"));
+const db = await createTestDatabase();
 
 afterEach(async () => {
   (await db.resetForTests());

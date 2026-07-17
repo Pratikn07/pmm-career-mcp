@@ -3,7 +3,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { Server } from "node:http";
 import { afterEach, expect, it } from "vitest";
 import nock from "nock";
-import { createDatabase, type TestCareerDatabase } from "../../src/db/client.js";
+import { createTestDatabase, type TestCareerDatabase } from "../support/database.js";
 import { createCareerApplication } from "../../src/index.js";
 import { encryptJson } from "../../src/security/crypto.js";
 import {
@@ -67,7 +67,7 @@ function publishInput(preview: Record<string, unknown>) {
 }
 
 async function startStack(publishEnabled: boolean): Promise<TestStack> {
-  const database = (await createDatabase(":memory:"));
+  const database = await createTestDatabase();
   if (publishEnabled) {
     (await database.oauthTokens.upsert({
       provider: "linkedin",
@@ -83,7 +83,7 @@ async function startStack(publishEnabled: boolean): Promise<TestStack> {
     config: {
       nodeEnv: "test",
       port: 0,
-      databasePath: ":memory:",
+      databaseUrl: "postgresql://postgres:postgres@127.0.0.1:5432/postgres",
       baseUrl: "http://127.0.0.1:3000",
       authMode: "none",
       linkedinPublishEnabled: publishEnabled,
@@ -108,7 +108,10 @@ async function startStack(publishEnabled: boolean): Promise<TestStack> {
     client,
     async close() {
       await client.close();
-      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => error ? reject(error) : resolve());
+        server.closeAllConnections();
+      });
       (await database.close());
     }
   };

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { CareerDatabase } from "../db/client.js";
 import type { OutreachDraft, PostDraft } from "../db/repositories.js";
-import { DomainError, sqliteConstraintKind } from "../domain/errors.js";
+import { DomainError, postgresErrorKind } from "../domain/errors.js";
 
 export const POST_CHECKSUM_CONTRACT = "pmm-career-mcp.post-draft.sha256.v1";
 const POST_VISIBILITY_VALUES = ["PUBLIC", "CONNECTIONS"] as const;
@@ -84,19 +84,14 @@ function publicPostDraft(row: PostDraft): PostDraftVersion {
 }
 
 function mapDraftPersistenceError(error: unknown, entity: "outreach_draft" | "post_draft"): never {
-  const constraint = sqliteConstraintKind(error);
+  const constraint = postgresErrorKind(error);
   if (constraint === "foreign_key") {
     throw new DomainError("NOT_FOUND", "Referenced draft record was not found", { entity });
   }
   if (constraint === "unique") {
     throw new DomainError("CONFLICT", "Draft version conflicts with existing data", { entity });
   }
-  if (
-    typeof error === "object"
-    && error !== null
-    && "code" in error
-    && (error as { code?: unknown }).code === "SQLITE_BUSY"
-  ) {
+  if (constraint === "retryable") {
     throw new DomainError("CONFLICT", "Draft write could not be completed", { entity });
   }
   throw new DomainError("DATA_INTEGRITY", "Draft could not be saved", { entity });

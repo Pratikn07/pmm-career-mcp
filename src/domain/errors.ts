@@ -32,19 +32,38 @@ export class DomainError extends Error {
   }
 }
 
-export function sqliteConstraintKind(error: unknown): "foreign_key" | "unique" | undefined {
-  if (typeof error !== "object" || error === null || !("code" in error)) {
-    return undefined;
-  }
-  const code = (error as { code?: unknown }).code;
-  if (typeof code !== "string") {
-    return undefined;
-  }
-  if (code === "SQLITE_CONSTRAINT_FOREIGNKEY") {
-    return "foreign_key";
-  }
-  if (code === "SQLITE_CONSTRAINT_UNIQUE" || code === "SQLITE_CONSTRAINT_PRIMARYKEY") {
-    return "unique";
+export type PostgresErrorKind =
+  | "foreign_key"
+  | "unique"
+  | "retryable"
+  | "invalid_text_representation";
+
+function safeSqlState(error: unknown): string | undefined {
+  let current = error;
+  for (let depth = 0; depth < 4; depth += 1) {
+    if (typeof current !== "object" || current === null) {
+      return undefined;
+    }
+    if ("code" in current && typeof (current as { code?: unknown }).code === "string") {
+      return (current as { code: string }).code;
+    }
+    current = "cause" in current ? (current as { cause?: unknown }).cause : undefined;
   }
   return undefined;
+}
+
+export function postgresErrorKind(error: unknown): PostgresErrorKind | undefined {
+  switch (safeSqlState(error)) {
+    case "23503":
+      return "foreign_key";
+    case "23505":
+      return "unique";
+    case "40001":
+    case "40P01":
+      return "retryable";
+    case "22P02":
+      return "invalid_text_representation";
+    default:
+      return undefined;
+  }
 }

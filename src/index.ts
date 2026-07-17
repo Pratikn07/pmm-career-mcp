@@ -113,7 +113,7 @@ function oauthFromEnvironment(
 export async function createCareerApplication(
   options: ApplicationOptions
 ): Promise<CareerApplication> {
-  const database = options.database ?? await createDatabase(options.config.databasePath);
+  const database = options.database ?? await createDatabase(options.config.databaseUrl);
   const now = options.now ?? (() => new Date());
   const ycProvider = persistedYcProvider(database, options.ycSource ?? createPublicYcSource(), now);
   const peopleDiscovery = createPeopleDiscovery({
@@ -182,7 +182,7 @@ export async function createCareerApplication(
 }
 
 export type StartServerDependencies = {
-  createDatabase?: (databasePath: string) => Promise<CareerDatabase>;
+  createDatabase?: (databaseUrl: string) => Promise<CareerDatabase>;
 };
 
 export type RunningCareerApplication = CareerApplication & {
@@ -195,7 +195,7 @@ export async function startServer(
   dependencies: StartServerDependencies = {}
 ): Promise<RunningCareerApplication> {
   const config = loadConfig(env);
-  const database = await (dependencies.createDatabase ?? createDatabase)(config.databasePath);
+  const database = await (dependencies.createDatabase ?? createDatabase)(config.databaseUrl);
   const linkedin = oauthFromEnvironment(database, config, env);
   const runtime = await createCareerApplication({ config, database, linkedinOAuth: linkedin });
   const server = runtime.app.listen(config.port);
