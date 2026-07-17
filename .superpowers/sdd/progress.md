@@ -14,8 +14,8 @@ Worktree: `/Users/pratik.nandoskar/Documents/working/pmm-career-mcp/.worktrees/s
 | 6. Readiness/startup/Docker | Complete | Complete | Approved | `01e51f0`, `6e468a1` |
 | 7. Live smoke verification | Complete | Complete | Approved | `5b529b9`, `bfd0007`, `33b66f7` |
 | 8. Operator documentation | Complete | Complete | Approved | `1dc8c02`, `d1ab36c` |
-| 9. Final local release gate | In progress | — | — | — |
-| 10. Cloud deployment and ChatGPT | Pending | — | — | — |
+| 9. Final local release gate | Complete | Complete | Approved | No fixes required |
+| 10. Cloud deployment and ChatGPT | In progress | — | — | — |
 
 ## Notes
 
@@ -29,3 +29,4 @@ Worktree: `/Users/pratik.nandoskar/Documents/working/pmm-career-mcp/.worktrees/s
 - Task 6 completed with 427 tests, verified Docker readiness health checks, safe startup/shutdown behavior, and corrected Supabase operator guidance.
 - Task 7 completed with 465 tests and independent approval of guarded Supabase smoke, token verification, and optional audience-hook tooling; no live database action occurred.
 - Task 8 completed with 466 tests and independent approval of the local setup, environment split, and Supabase/Railway/ChatGPT operator runbook.
+- Task 9 release gate passed: clean install, 466 tests, coverage, typecheck, build, Docker build, production audit (0 vulnerabilities), and fail-closed image check.
