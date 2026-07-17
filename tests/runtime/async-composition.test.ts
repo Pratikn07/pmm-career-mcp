@@ -86,6 +86,7 @@ afterEach(() => {
 
 it("waits for database creation before opening the HTTP listener", async () => {
   const databaseCreation = deferred<CareerDatabase>();
+  const database = fakeDatabase();
   const createDatabase = vi.fn(() => databaseCreation.promise);
   const listener = fakeServer();
   const listen = vi.spyOn(express.application, "listen").mockReturnValue(listener.server);
@@ -97,10 +98,11 @@ it("waits for database creation before opening the HTTP listener", async () => {
     expect(createDatabase).toHaveBeenCalledWith(":memory:");
     expect(listen).not.toHaveBeenCalled();
 
-    databaseCreation.resolve(fakeDatabase());
+    databaseCreation.resolve(database);
     runtime = await startup;
     expect(listen).toHaveBeenCalledOnce();
   } finally {
+    databaseCreation.resolve(database);
     runtime ??= await startup.catch(() => undefined);
     await closeUnexpectedRuntime(runtime);
   }

@@ -72,7 +72,7 @@ describe("public people discovery", () => {
     expect(result.coverage).toBe("authoritative-pages-only");
     expect(result.checkedAt).toBe(CHECKED_AT);
     expect(result.warnings).toEqual([]);
-    expect((await result.people.map(({ name, role }) => `${name} — ${role}`))).toEqual([
+    expect(result.people.map(({ name, role }) => `${name} — ${role}`)).toEqual([
       "Ada Example — Co-founder & CEO",
       "Kai Brooks — Staff Software Engineer",
       "Maya Chen — VP, Product Marketing",
@@ -95,10 +95,10 @@ describe("public people discovery", () => {
         confidence: 0.95
       });
     }
-    expect((await result.people.find(({ name }) => name === "Ada Example"))?.publicProfileUrl).toBe(
+    expect(result.people.find(({ name }) => name === "Ada Example")?.publicProfileUrl).toBe(
       "https://www.linkedin.com/in/ada-example"
     );
-    expect((await result.people.find(({ name }) => name === "Priya Rao"))?.publicProfileUrl).toBeUndefined();
+    expect(result.people.find(({ name }) => name === "Priya Rao")?.publicProfileUrl).toBeUndefined();
     expect(requestedUrls).toEqual([HOME_URL, TEAM_URL]);
     expect(requestedUrls.some((url) => new URL(url).hostname.endsWith("linkedin.com"))).toBe(false);
     expect((await database.people.listByCompany(company.id))).toHaveLength(4);
@@ -176,7 +176,7 @@ describe("public people discovery", () => {
       fetchPage
     }).discoverPublicPeople(company.id);
 
-    expect((await result.people.map(({ name, role }) => `${name} — ${role}`))).toEqual([
+    expect(result.people.map(({ name, role }) => `${name} — ${role}`)).toEqual([
       "Ada Semantic — Chief Executive Officer",
       "Maya Semantic — VP Product Marketing"
     ]);
@@ -568,7 +568,7 @@ describe("public people discovery", () => {
 
     const result = await service.discoverPublicPeople(company.id);
 
-    expect((await result.people.map(({ name }) => name))).toEqual(["Stale Example"]);
+    expect(result.people.map(({ name }) => name)).toEqual(["Stale Example"]);
     expect(result.warnings).toContainEqual({
       code: "stale-source",
       sourceUrl: TEAM_URL,
@@ -702,7 +702,7 @@ describe("public people discovery", () => {
     const second = await service.discoverPublicPeople(company.id);
     const persistedAda = (await database.people.getWithEvidence(adaId));
 
-    expect((await second.people.map(({ name }) => name))).toEqual(["Bob Current"]);
+    expect(second.people.map(({ name }) => name)).toEqual(["Bob Current"]);
     expect(persistedAda).toMatchObject({
       id: adaId,
       publicProfileUrl: null,
@@ -741,7 +741,7 @@ describe("public people discovery", () => {
     const second = await service.discoverPublicPeople(company.id);
     const persistedAda = (await database.people.getWithEvidence(adaId));
 
-    expect((await second.people.map(({ name }) => name))).toEqual(["Bob Partial"]);
+    expect(second.people.map(({ name }) => name)).toEqual(["Bob Partial"]);
     expect(second.warnings).toContainEqual({
       sourceUrl: "https://acme.example/leadership",
       message: "leadership source failed"
@@ -784,7 +784,7 @@ describe("public people discovery", () => {
       }
     });
     const first = await service.discoverPublicPeople(company.id);
-    const adaId = (await first.people.find(({ name }) => name === "Ada Search"))!.id;
+    const adaId = first.people.find(({ name }) => name === "Ada Search")!.id;
     const priorAda = (await database.people.getWithEvidence(adaId))!;
     phase = 2;
 
