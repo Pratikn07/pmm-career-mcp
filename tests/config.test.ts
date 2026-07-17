@@ -29,4 +29,12 @@ describe("loadConfig", () => {
     expect(loadConfig({ NODE_ENV: "test", AUTH_MODE: "none" }).authMode).toBe("none");
     expect(() => loadConfig({ NODE_ENV: "production", AUTH_MODE: "none" })).toThrow(/AUTH_MODE/);
   });
+
+  it("rejects an insecure OIDC issuer in production", () => {
+    expect(() => loadConfig({
+      NODE_ENV: "production", AUTH_MODE: "oauth", BASE_URL: "https://career.example",
+      OIDC_ISSUER: "http://issuer.example", OIDC_AUDIENCE: "career-mcp", ALLOWED_SUBJECT: "user-123",
+      TOKEN_ENCRYPTION_KEY: "a".repeat(64)
+    })).toThrow(/OIDC_ISSUER.*HTTPS/);
+  });
 });

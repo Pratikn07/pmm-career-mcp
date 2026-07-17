@@ -2,7 +2,7 @@ import { createServer, type Server } from "node:http";
 import express from "express";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import request from "supertest";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { loadConfig, type AppConfig } from "../../src/config.js";
 import { createResourceAuth, protectedResourceMetadata } from "../../src/auth/resource-auth.js";
 
@@ -12,6 +12,7 @@ type IssuerFixture = {
   server: Server;
   key: Awaited<ReturnType<typeof generateKeyPair>>["privateKey"];
   token(overrides?: { audience?: string; subject?: string; expiresIn?: string }): Promise<string>;
+  tokenWithoutExpiry(): Promise<string>;
 };
 
 async function startIssuer(): Promise<IssuerFixture> {
@@ -52,6 +53,13 @@ async function startIssuer(): Promise<IssuerFixture> {
       .setSubject(overrides.subject ?? "user-123")
       .setIssuedAt()
       .setExpirationTime(overrides.expiresIn ?? "5m")
+      .sign(privateKey),
+    tokenWithoutExpiry: async () => new SignJWT({})
+      .setProtectedHeader({ alg: "RS256", kid: "test-key" })
+      .setIssuer(issuer)
+      .setAudience("career-mcp")
+      .setSubject("user-123")
+      .setIssuedAt()
       .sign(privateKey)
   };
 }
@@ -90,6 +98,7 @@ describe("protected resource authentication", () => {
       { label: "missing", token: undefined, status: 401 },
       { label: "wrong audience", token: await fixture.token({ audience: "other" }), status: 401 },
       { label: "expired", token: await fixture.token({ expiresIn: "-1s" }), status: 401 },
+      { label: "missing expiry", token: await fixture.tokenWithoutExpiry(), status: 401 },
       { label: "wrong subject", token: await fixture.token({ subject: "someone-else" }), status: 403 }
     ] as const;
 
@@ -100,6 +109,32 @@ describe("protected resource authentication", () => {
       expect(response.status, candidate.label).toBe(candidate.status);
       expect(response.body, candidate.label).toEqual({ error: "Access to this MCP resource is denied" });
       expect(response.text, candidate.label).not.toMatch(/user-123|someone-else|aud|claim|jwt|expired/i);
+    }
+  });
+
+  it("rejects an insecure JWKS location for production without leaking the discovery failure", async () => {
+    const productionConfig: AppConfig = {
+      ...fixture.config,
+      nodeEnv: "production",
+      baseUrl: "https://career.example",
+      oidcIssuer: "https://issuer.example"
+    };
+    const fetchSpy = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      issuer: "https://issuer.example",
+      jwks_uri: "http://127.0.0.1:9999/jwks"
+    }), { status: 200, headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchSpy);
+    const app = express();
+    app.use(createResourceAuth(productionConfig));
+    app.get("/protected", (_request, response) => response.json({ ok: true }));
+
+    try {
+      const response = await request(app).get("/protected").set("authorization", `Bearer ${await fixture.token()}`);
+      expect(response.status).toBe(401);
+      expect(response.body).toEqual({ error: "Access to this MCP resource is denied" });
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.unstubAllGlobals();
     }
   });
 });

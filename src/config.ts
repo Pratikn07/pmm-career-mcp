@@ -37,6 +37,9 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
 
   if (parsed.NODE_ENV === "production") {
     if (parsed.OIDC_ISSUER === undefined) throw new Error("OIDC_ISSUER is required in production");
+    if (new URL(parsed.OIDC_ISSUER).protocol !== "https:") {
+      throw new Error("OIDC_ISSUER must use HTTPS in production");
+    }
     if (parsed.OIDC_AUDIENCE === undefined) throw new Error("OIDC_AUDIENCE is required in production");
     if (parsed.ALLOWED_SUBJECT === undefined || parsed.ALLOWED_SUBJECT.length === 0) {
       throw new Error("ALLOWED_SUBJECT is required in production");

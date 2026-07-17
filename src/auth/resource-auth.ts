@@ -1,4 +1,4 @@
-import { createRemoteJWKSet, jwtVerify, type JWTVerifyGetKey } from "jose";
+import { createRemoteJWKSet, customFetch, jwtVerify, type FetchImplementation, type JWTVerifyGetKey } from "jose";
 import type { RequestHandler } from "express";
 import { z } from "zod";
 import type { AppConfig } from "../config.js";
@@ -47,14 +47,19 @@ function bearerToken(authorization: string | undefined): string | undefined {
   return match?.[1];
 }
 
-async function jwksFromIssuer(issuer: string): Promise<JWTVerifyGetKey> {
+const noRedirectFetch: FetchImplementation = (url, options) => fetch(url, { ...options, redirect: "error" });
+
+async function jwksFromIssuer(issuer: string, requireHttps: boolean): Promise<JWTVerifyGetKey> {
   const issuerUrl = new URL(issuer);
+  if (requireHttps && issuerUrl.protocol !== "https:") throw new Error("OIDC issuer must use HTTPS");
   const discoveryUrl = new URL(".well-known/openid-configuration", `${issuerUrl.toString().replace(/\/+$/, "")}/`);
-  const response = await fetch(discoveryUrl, { headers: { accept: "application/json" } });
+  const response = await fetch(discoveryUrl, { headers: { accept: "application/json" }, redirect: "error" });
   if (!response.ok) throw new Error("OIDC discovery unavailable");
   const metadata = oidcMetadataSchema.parse(await response.json());
   if (metadata.issuer !== issuer) throw new Error("OIDC issuer mismatch");
-  return createRemoteJWKSet(new URL(metadata.jwks_uri));
+  const jwksUrl = new URL(metadata.jwks_uri);
+  if (requireHttps && jwksUrl.protocol !== "https:") throw new Error("OIDC JWKS must use HTTPS");
+  return createRemoteJWKSet(jwksUrl, { [customFetch]: noRedirectFetch });
 }
 
 /**
@@ -68,7 +73,7 @@ export function createResourceAuth(config: AppConfig): RequestHandler {
   const { issuer, audience, subject } = requireOAuthConfig(config);
   let jwksPromise: Promise<JWTVerifyGetKey> | undefined;
   const keyFor = (): Promise<JWTVerifyGetKey> => {
-    jwksPromise ??= jwksFromIssuer(issuer);
+    jwksPromise ??= jwksFromIssuer(issuer, config.nodeEnv === "production");
     return jwksPromise;
   };
 
@@ -81,7 +86,7 @@ export function createResourceAuth(config: AppConfig): RequestHandler {
     }
 
     try {
-      const { payload } = await jwtVerify(token, await keyFor(), { issuer, audience });
+      const { payload } = await jwtVerify(token, await keyFor(), { issuer, audience, requiredClaims: ["exp"] });
       if (payload.sub !== subject) {
         response.status(403).json({ error: "Access to this MCP resource is denied" });
         return;
