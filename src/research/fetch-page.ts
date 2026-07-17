@@ -7,7 +7,7 @@ import { pipeline } from "node:stream/promises";
 import { setTimeout as wait } from "node:timers/promises";
 import { createBrotliDecompress, createGunzip, createInflate } from "node:zlib";
 import { load } from "cheerio";
-import { assertFetchableUrl, assertFetchableUrlLocation } from "./url-policy.js";
+import { assertFetchableUrl } from "./url-policy.js";
 
 export type FetchPageOptions = {
   resolveAddresses?: (hostname: string) => Promise<string[]>;
@@ -37,6 +37,7 @@ const DEFAULT_MAX_RETRIES = 2;
 const DEFAULT_MAX_RETRY_AFTER_MS = 5_000;
 const DEFAULT_RETRY_BACKOFF_MS = 250;
 const DEFAULT_MAX_CONCURRENCY_PER_HOST = 2;
+const URL_POLICY_PREFLIGHT_ADDRESS = "2606:4700:4700::1111";
 
 type HostWaiter = {
   signal: AbortSignal;
@@ -200,59 +201,118 @@ function normalizedText(value: string): string {
 }
 
 function containsInstructionLikeText(value: string): boolean {
+  const normalized = normalizedText(value);
   return [
     /\b(?:ignore|disregard|forget|override)\b.{0,80}\b(?:instructions?|rules?|prompts?|messages?)\b/i,
-    /\b(?:reveal|expose|print|send)\b.{0,80}\b(?:system|developer|secret|credential)/i,
+    /\b(?:ignore|disregard|forget|override)\b.{0,80}\b(?:above|previous|prior|everything|all)\b/i,
+    /\b(?:return|reveal|expose|print|send)\b.{0,80}\b(?:private|personal|sensitive|system|developer|secret|credential|data)\b/i,
     /\b(?:system|developer|assistant)\s*:\s*/i,
     /\b(?:system|developer)\s+(?:prompt|message|instructions?)\b/i,
     /\b(?:you are|act as)\s+(?:chatgpt|an?\s+(?:ai|language model))/i
-  ].some((pattern) => pattern.test(value));
+  ].some((pattern) => pattern.test(normalized));
 }
 
 function sanitizedExtractedText(value: string): string {
-  return value
+  const retainedLines = value
     .split(/\r?\n/)
     .map(normalizedText)
-    .filter((line) => line !== "" && !containsInstructionLikeText(line))
-    .join(" ");
+    .filter((line) => line !== "" && !containsInstructionLikeText(line));
+  const retainedText = retainedLines.join(" ");
+  return containsInstructionLikeText(retainedText) ? "" : retainedText;
+}
+
+function hasHiddenStyleDeclaration(declarations: string): boolean {
+  const withoutComments = declarations.replace(/\/\*[\s\S]*?\*\//g, "");
+  for (const declaration of withoutComments.split(";")) {
+    const colon = declaration.indexOf(":");
+    if (colon === -1) {
+      continue;
+    }
+    const property = declaration.slice(0, colon).trim().toLowerCase();
+    const value = declaration
+      .slice(colon + 1)
+      .replace(/\s*!important\s*$/i, "")
+      .trim()
+      .toLowerCase();
+    if (property === "display" && value === "none") {
+      return true;
+    }
+    if (property === "visibility" && (value === "hidden" || value === "collapse")) {
+      return true;
+    }
+    if (
+      property === "opacity"
+      && /^[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?$/i.test(value)
+      && Number(value) === 0
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function supportedHiddenStylesheetSelectors(css: string): string[] {
+  const selectors: string[] = [];
+  const withoutComments = css.replace(/\/\*[\s\S]*?\*\//g, "");
+  const rules = withoutComments.matchAll(/([^{}]+)\{([^{}]*)\}/g);
+  // Deliberately not a browser CSS engine: honor comma-separated single compound selectors made
+  // from a tag, classes, IDs, and hidden/aria-hidden attributes when their rule explicitly hides.
+  const supportedSelector = /^(?:[a-z][a-z0-9-]*|\*)?(?:(?:[.#][-_a-z0-9]+)|(?:\[(?:hidden|aria-hidden)(?:\s*=\s*(?:"[^"]*"|'[^']*'|[-_a-z0-9]+))?\]))*$/i;
+  for (const rule of rules) {
+    const selectorList = rule[1] ?? "";
+    const declarations = rule[2] ?? "";
+    if (!hasHiddenStyleDeclaration(declarations)) {
+      continue;
+    }
+    for (const selector of selectorList.split(",").map((value) => value.trim())) {
+      if (selector !== "" && supportedSelector.test(selector)) {
+        selectors.push(selector);
+      }
+    }
+  }
+  return selectors;
 }
 
 function extractHtml(html: string): { title: string; text: string } {
   const $ = load(html);
   const title = sanitizedExtractedText($("title").first().text());
 
+  const stylesheetSelectors = $("style")
+    .toArray()
+    .flatMap((element) => supportedHiddenStylesheetSelectors($(element).text()));
+  for (const selector of stylesheetSelectors) {
+    $(selector).remove();
+  }
+
   $(
-    "script, style, noscript, form, template, iframe, object, embed, canvas, svg, link, meta, [hidden], [aria-hidden='true']"
+    "script, style, noscript, form, template, iframe, object, embed, canvas, svg, link, meta, [hidden]"
   ).remove();
+  $("[aria-hidden]").filter((_index, element) => {
+    return ($(element).attr("aria-hidden") ?? "").trim().toLowerCase() === "true";
+  }).remove();
   $("[style]").filter((_index, element) => {
     const style = $(element).attr("style") ?? "";
-    return /(?:display\s*:\s*none|visibility\s*:\s*hidden|opacity\s*:\s*0(?:\D|$))/i.test(style);
+    return hasHiddenStyleDeclaration(style);
   }).remove();
+  $("br").replaceWith("\n");
+  const instructionBlocks = $(
+    "p, li, blockquote, pre, td, th, div, section, article, header, footer, main, nav, aside"
+  ).toArray().reverse();
+  for (const element of instructionBlocks) {
+    if (containsInstructionLikeText($(element).text())) {
+      $(element).remove();
+    }
+  }
   $("body *").filter((_index, element) => {
     return $(element).children().length === 0 && containsInstructionLikeText($(element).text());
   }).remove();
-  $("br").replaceWith("\n");
   $("p, div, section, article, header, footer, main, nav, aside, h1, h2, h3, h4, h5, h6, li, tr")
     .append("\n");
 
   return { title, text: sanitizedExtractedText($("body").text()) };
 }
 
-async function requestPage(
-  url: URL,
-  address: string,
-  signal: AbortSignal
-): Promise<http.IncomingMessage> {
-  const transport = url.protocol === "https:" ? https : http;
-  return await new Promise((resolve, reject) => {
-    const request = transport.request(url, createPinnedRequestOptions(address, signal), resolve);
-    request.once("error", reject);
-    request.end();
-  });
-}
-
-/** @internal Exported for direct verification of Node's socket lookup contract. */
-export function createPinnedLookup(address: string): LookupFunction {
+function createPinnedLookup(address: string): LookupFunction {
   const family = isIP(address);
   if (family !== 4 && family !== 6) {
     throw new Error("Resolved address is not a valid IP");
@@ -266,21 +326,30 @@ export function createPinnedLookup(address: string): LookupFunction {
   };
 }
 
-/** @internal Exported for socket-level verification of request isolation. */
-export function createPinnedRequestOptions(
-  address: string,
-  signal?: AbortSignal
-): http.RequestOptions {
+function createPinnedRequestOptions(address: string, signal: AbortSignal): http.RequestOptions {
   return {
     method: "GET",
     agent: false,
-    ...(signal === undefined ? {} : { signal }),
+    signal,
     headers: {
       Accept: "text/html, application/xhtml+xml, text/plain;q=0.9",
       "User-Agent": "pmm-career-mcp/1.0 public-research-fetcher"
     },
     lookup: createPinnedLookup(address)
   };
+}
+
+async function requestPage(
+  url: URL,
+  address: string,
+  signal: AbortSignal
+): Promise<http.IncomingMessage> {
+  const transport = url.protocol === "https:" ? https : http;
+  return await new Promise((resolve, reject) => {
+    const request = transport.request(url, createPinnedRequestOptions(address, signal), resolve);
+    request.once("error", reject);
+    request.end();
+  });
 }
 
 function contentDecoder(encoding: string): Transform | undefined {
@@ -401,7 +470,9 @@ export async function fetchPublicPage(
   let retryCount = 0;
   try {
     while (true) {
-      assertFetchableUrlLocation(currentUrl);
+      // Reuse the public policy to reject static URL hazards before DNS; this validated address is
+      // a preflight sentinel only and is never used for transport.
+      assertFetchableUrl(currentUrl, [URL_POLICY_PREFLIGHT_ADDRESS]);
       const hostname = hostnameWithoutBrackets(currentUrl).toLowerCase().replace(/\.+$/, "");
       const releaseHost = await acquireHostPermit(hostname, maxConcurrencyPerHost, signal);
       try {
@@ -450,8 +521,10 @@ export async function fetchPublicPage(
           response.destroy();
           throw new Error(`Unsupported public page content type: ${contentType || "missing"}`);
         }
-        const html = await readResponse(response, maxBytes, signal);
-        const extracted = extractHtml(html);
+        const body = await readResponse(response, maxBytes, signal);
+        const extracted = contentType === "text/plain"
+          ? { title: "", text: sanitizedExtractedText(body) }
+          : extractHtml(body);
 
         return {
           url: currentUrl.href,

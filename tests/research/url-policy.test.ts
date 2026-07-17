@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
+import * as urlPolicyModule from "../../src/research/url-policy.js";
 import { assertFetchableUrl } from "../../src/research/url-policy.js";
 
 describe("assertFetchableUrl", () => {
+  it("exposes only the resolved-address policy function", () => {
+    expect(Object.keys(urlPolicyModule)).toEqual(["assertFetchableUrl"]);
+  });
+
   it.each([
     ["ftp://acme.example/team", ["93.184.216.34"]],
     ["https://user:secret@acme.example/team", ["93.184.216.34"]],
@@ -35,6 +40,14 @@ describe("assertFetchableUrl", () => {
     "::1",
     "::ffff:127.0.0.1",
     "::ffff:169.254.169.254",
+    "::ffff:93.184.216.34",
+    "2001:1::4",
+    "2001:10::1",
+    "2001:100::1",
+    "2001:db8::1",
+    "2002::1",
+    "3fff::1",
+    "5f00::1",
     "fc00::1",
     "fd12:3456:789a::1",
     "fe80::1",
@@ -50,6 +63,23 @@ describe("assertFetchableUrl", () => {
       .toThrow(/public/i);
   });
 
+  it.each([
+    "::1",
+    "::ffff:93.184.216.34",
+    "2001:1::4",
+    "2001:10::1",
+    "2001:100::1",
+    "2001:db8::1",
+    "2002::1",
+    "3fff::1",
+    "5f00::1",
+    "fc00::1",
+    "fe80::1"
+  ])("rejects a non-global IPv6 literal %s", (address) => {
+    expect(() => assertFetchableUrl(new URL(`https://[${address}]/`), ["93.184.216.34"]))
+      .toThrow(/public/i);
+  });
+
   it.for<string[]>([
     [],
     ["not-an-ip"],
@@ -61,7 +91,13 @@ describe("assertFetchableUrl", () => {
   it.each([
     ["https://acme.example/team", ["93.184.216.34"]],
     ["http://acme.example/team", ["2606:2800:220:1:248:1893:25c8:1946"]],
-    ["https://acme.example/team", ["::ffff:93.184.216.34"]]
+    ["https://acme.example/team", ["2001:1::1"]],
+    ["https://acme.example/team", ["2001:1::2"]],
+    ["https://acme.example/team", ["2001:1::3"]],
+    ["https://acme.example/team", ["2001:3::1"]],
+    ["https://acme.example/team", ["2001:4:112::1"]],
+    ["https://acme.example/team", ["2001:20::1"]],
+    ["https://acme.example/team", ["2001:30::1"]]
   ])("allows a public HTTP(S) target %s", (raw, addresses) => {
     expect(() => assertFetchableUrl(new URL(raw), addresses)).not.toThrow();
   });

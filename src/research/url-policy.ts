@@ -65,24 +65,60 @@ function parseIpv6(address: string): number[] {
   ];
 }
 
+function hasIpv6Prefix(parts: number[], prefixAddress: string, prefixLength: number): boolean {
+  const prefix = parseIpv6(prefixAddress);
+  const completeParts = Math.floor(prefixLength / 16);
+  for (let index = 0; index < completeParts; index += 1) {
+    if (parts[index] !== prefix[index]) {
+      return false;
+    }
+  }
+  const remainingBits = prefixLength % 16;
+  if (remainingBits === 0) {
+    return true;
+  }
+  const mask = (0xffff << (16 - remainingBits)) & 0xffff;
+  return (parts[completeParts]! & mask) === (prefix[completeParts]! & mask);
+}
+
+function isExactIpv6(parts: number[], address: string): boolean {
+  const expected = parseIpv6(address);
+  return parts.every((part, index) => part === expected[index]);
+}
+
+// Offline policy reviewed against the IANA IPv6 Special-Purpose Address Registry updated
+// 2025-10-09. Fail closed to 2000::/3 and preserve only the registry's explicitly global
+// exceptions inside the otherwise non-global 2001::/23 protocol-assignment block.
 function isPublicIpv6(address: string): boolean {
   const parts = parseIpv6(address);
   const isMappedIpv4 = parts.slice(0, 5).every((part) => part === 0) && parts[5] === 0xffff;
   if (isMappedIpv4) {
-    const mapped = `${parts[6]! >>> 8}.${parts[6]! & 0xff}.${parts[7]! >>> 8}.${parts[7]! & 0xff}`;
-    return isPublicIpv4(mapped);
-  }
-
-  const [first, second] = parts;
-  if (first === undefined || second === undefined || (first & 0xe000) !== 0x2000) {
     return false;
   }
 
-  const isTeredo = first === 0x2001 && second === 0;
-  const isDocumentation = first === 0x2001 && second === 0x0db8;
-  const isBenchmark = first === 0x2001 && second === 0x0002;
-  const isSixToFour = first === 0x2002;
-  return !isTeredo && !isDocumentation && !isBenchmark && !isSixToFour;
+  if (!hasIpv6Prefix(parts, "2000::", 3)) {
+    return false;
+  }
+
+  if (hasIpv6Prefix(parts, "2001::", 23)) {
+    const globallyReachableExceptions: ReadonlyArray<readonly [string, number]> = [
+      ["2001:3::", 32],
+      ["2001:4:112::", 48],
+      ["2001:20::", 28],
+      ["2001:30::", 28]
+    ];
+    return ["2001:1::1", "2001:1::2", "2001:1::3"].some((value) => isExactIpv6(parts, value))
+      || globallyReachableExceptions.some(
+        ([prefix, length]) => hasIpv6Prefix(parts, prefix, length)
+      );
+  }
+
+  const nonGlobalRanges: ReadonlyArray<readonly [string, number]> = [
+    ["2001:db8::", 32],
+    ["2002::", 16],
+    ["3fff::", 20]
+  ];
+  return !nonGlobalRanges.some(([prefix, length]) => hasIpv6Prefix(parts, prefix, length));
 }
 
 function assertPublicIp(address: string): void {
@@ -100,7 +136,7 @@ function assertPublicIp(address: string): void {
   throw new Error(`URL must resolve only to public network addresses; rejected ${address}`);
 }
 
-export function assertFetchableUrlLocation(url: URL): void {
+function assertFetchableUrlLocation(url: URL): void {
   if (url.protocol !== "http:" && url.protocol !== "https:") {
     throw new Error("URL scheme must be HTTP or HTTPS");
   }
