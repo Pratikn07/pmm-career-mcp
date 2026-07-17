@@ -33,3 +33,9 @@ Also ran the MCP Inspector against a local fake dependency harness at `http://12
 
 - `src/index.ts` remains the Task 1 placeholder. Task 11 should compose the real database/services and pass `mcpServerFactory` into `createHttpApp`.
 - `HttpDependencies` retains the legacy `mcpHandler` alternative so prior health tests continue to work. Production OAuth middleware is intentionally deferred to Task 10.
+
+## Review follow-up
+
+- Added `X-Request-Id` propagation for valid bounded inbound IDs and UUID generation otherwise, before the MCP JSON parser so it is present on every `/mcp` response path.
+- Added a four-argument parser error middleware that maps malformed JSON to a sanitized 400 response and body-limit failures to a sanitized 413 response. It deliberately returns no stack, parser message, request body, or filesystem path.
+- Added regression tests for malformed and oversized `/mcp` JSON inputs. Final follow-up verification: MCP tests 7/7; full suite 327/327; typecheck, build, and production audit all passed.
