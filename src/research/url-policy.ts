@@ -86,17 +86,14 @@ function isExactIpv6(parts: number[], address: string): boolean {
   return parts.every((part, index) => part === expected[index]);
 }
 
-// Offline policy reviewed against the IANA IPv6 Special-Purpose Address Registry updated
-// 2025-10-09. Fail closed to 2000::/3 and preserve only the registry's explicitly global
-// exceptions inside the otherwise non-global 2001::/23 protocol-assignment block.
+// Offline policy reviewed against the IANA IPv6 Global Unicast Address Space registry updated
+// 2025-10-10 and the Special-Purpose Address Registry updated 2025-10-09. Unlisted 2000::/3
+// space is reserved, so allow only allocated prefixes and the explicitly global exceptions
+// inside the otherwise non-global 2001::/23 protocol-assignment block.
 function isPublicIpv6(address: string): boolean {
   const parts = parseIpv6(address);
   const isMappedIpv4 = parts.slice(0, 5).every((part) => part === 0) && parts[5] === 0xffff;
   if (isMappedIpv4) {
-    return false;
-  }
-
-  if (!hasIpv6Prefix(parts, "2000::", 3)) {
     return false;
   }
 
@@ -118,7 +115,49 @@ function isPublicIpv6(address: string): boolean {
     ["2002::", 16],
     ["3fff::", 20]
   ];
-  return !nonGlobalRanges.some(([prefix, length]) => hasIpv6Prefix(parts, prefix, length));
+  if (nonGlobalRanges.some(([prefix, length]) => hasIpv6Prefix(parts, prefix, length))) {
+    return false;
+  }
+
+  const allocatedGlobalUnicastRanges: ReadonlyArray<readonly [string, number]> = [
+    ["2001:200::", 23],
+    ["2001:400::", 23],
+    ["2001:600::", 23],
+    ["2001:800::", 22],
+    ["2001:c00::", 23],
+    ["2001:e00::", 23],
+    ["2001:1200::", 23],
+    ["2001:1400::", 22],
+    ["2001:1800::", 23],
+    ["2001:1a00::", 23],
+    ["2001:1c00::", 22],
+    ["2001:2000::", 19],
+    ["2001:4000::", 23],
+    ["2001:4200::", 23],
+    ["2001:4400::", 23],
+    ["2001:4600::", 23],
+    ["2001:4800::", 23],
+    ["2001:4a00::", 23],
+    ["2001:4c00::", 23],
+    ["2001:5000::", 20],
+    ["2001:8000::", 19],
+    ["2001:a000::", 20],
+    ["2001:b000::", 20],
+    ["2003::", 18],
+    ["2400::", 12],
+    ["2410::", 12],
+    ["2600::", 12],
+    ["2610::", 23],
+    ["2620::", 23],
+    ["2630::", 12],
+    ["2800::", 12],
+    ["2a00::", 12],
+    ["2a10::", 12],
+    ["2c00::", 12]
+  ];
+  return allocatedGlobalUnicastRanges.some(
+    ([prefix, length]) => hasIpv6Prefix(parts, prefix, length)
+  );
 }
 
 function assertPublicIp(address: string): void {

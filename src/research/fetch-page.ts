@@ -38,6 +38,14 @@ const DEFAULT_MAX_RETRY_AFTER_MS = 5_000;
 const DEFAULT_RETRY_BACKOFF_MS = 250;
 const DEFAULT_MAX_CONCURRENCY_PER_HOST = 2;
 const URL_POLICY_PREFLIGHT_ADDRESS = "2606:4700:4700::1111";
+const MAX_STYLESHEET_BYTES = 128 * 1024;
+const MAX_STYLESHEET_RULES = 512;
+const MAX_STYLESHEET_SELECTORS = 1_024;
+const MAX_STYLESHEET_SELECTOR_LENGTH = 256;
+const MAX_STYLESHEET_SELECTOR_PARTS = 8;
+const MAX_STYLESHEET_CUSTOM_PROPERTIES = 64;
+const MAX_STYLESHEET_MATCH_WORK = 50_000;
+const MAX_INSTRUCTION_BLOCK_SCAN_WORK = 50_000;
 
 type HostWaiter = {
   signal: AbortSignal;
@@ -200,12 +208,22 @@ function normalizedText(value: string): string {
   return value.replace(/\s+/g, " ").trim();
 }
 
+const META_INSTRUCTION_PATTERNS = [
+  /\b(?:ignore|disregard|forget|override)\b.{0,80}\b(?:instructions?|rules?|prompts?|messages?)\b/i,
+  /\b(?:ignore|disregard|forget|override)\b.{0,80}\b(?:above|previous|prior|everything|all)\b/i
+];
+const SENSITIVE_ACTION_PATTERN = /\b(?:return|reveal|expose|print|send)\b.{0,80}\b(?:private|personal|sensitive|system|developer|secret|credentials?|data)\b/i;
+
+function hasMetaInstructionContext(value: string): boolean {
+  const normalized = normalizedText(value);
+  return META_INSTRUCTION_PATTERNS.some((pattern) => pattern.test(normalized));
+}
+
 function containsInstructionLikeText(value: string): boolean {
   const normalized = normalizedText(value);
   return [
-    /\b(?:ignore|disregard|forget|override)\b.{0,80}\b(?:instructions?|rules?|prompts?|messages?)\b/i,
-    /\b(?:ignore|disregard|forget|override)\b.{0,80}\b(?:above|previous|prior|everything|all)\b/i,
-    /\b(?:return|reveal|expose|print|send)\b.{0,80}\b(?:private|personal|sensitive|system|developer|secret|credential|data)\b/i,
+    ...META_INSTRUCTION_PATTERNS,
+    /\b(?:reveal|expose|print|send)\b.{0,80}\b(?:private|personal|sensitive|system|developer|secret|credentials?|data)\b/i,
     /\b(?:system|developer|assistant)\s*:\s*/i,
     /\b(?:system|developer)\s+(?:prompt|message|instructions?)\b/i,
     /\b(?:you are|act as)\s+(?:chatgpt|an?\s+(?:ai|language model))/i
@@ -213,16 +231,40 @@ function containsInstructionLikeText(value: string): boolean {
 }
 
 function sanitizedExtractedText(value: string): string {
-  const retainedLines = value
+  const lines = value
     .split(/\r?\n/)
     .map(normalizedText)
-    .filter((line) => line !== "" && !containsInstructionLikeText(line));
-  const retainedText = retainedLines.join(" ");
-  return containsInstructionLikeText(retainedText) ? "" : retainedText;
+    .filter((line) => line !== "");
+  const retainedLines: string[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index]!;
+    if (/^(?:ignore|disregard|forget|override)\b/i.test(line)) {
+      let sequence = line;
+      let sequenceEnd = index;
+      while (sequenceEnd + 1 < lines.length && sequenceEnd - index < 2) {
+        const nextLine = lines[sequenceEnd + 1]!;
+        const currentLineEndsSentence = /[.!?]["')\]]*$/.test(lines[sequenceEnd]!);
+        if (currentLineEndsSentence && !SENSITIVE_ACTION_PATTERN.test(nextLine)) {
+          break;
+        }
+        sequence = `${sequence} ${nextLine}`;
+        sequenceEnd += 1;
+      }
+      if (hasMetaInstructionContext(sequence)) {
+        index = sequenceEnd;
+        continue;
+      }
+    }
+    if (!containsInstructionLikeText(line)) {
+      retainedLines.push(line);
+    }
+  }
+  return retainedLines.join(" ");
 }
 
-function hasHiddenStyleDeclaration(declarations: string): boolean {
+function cssDeclarations(declarations: string): Array<readonly [string, string]> {
   const withoutComments = declarations.replace(/\/\*[\s\S]*?\*\//g, "");
+  const parsed: Array<readonly [string, string]> = [];
   for (const declaration of withoutComments.split(";")) {
     const colon = declaration.indexOf(":");
     if (colon === -1) {
@@ -232,8 +274,36 @@ function hasHiddenStyleDeclaration(declarations: string): boolean {
     const value = declaration
       .slice(colon + 1)
       .replace(/\s*!important\s*$/i, "")
-      .trim()
-      .toLowerCase();
+      .trim();
+    if (property !== "") {
+      parsed.push([property, value]);
+    }
+  }
+  return parsed;
+}
+
+function resolvedCssValue(value: string, variables: ReadonlyMap<string, string>): string {
+  let resolved = value.trim().toLowerCase();
+  for (let depth = 0; depth < 4; depth += 1) {
+    const variable = resolved.match(/^var\(\s*(--[-_a-z0-9]+)\s*(?:,\s*([^)]*))?\)$/i);
+    if (variable === null) {
+      return resolved;
+    }
+    const replacement = variables.get(variable[1]!.toLowerCase()) ?? variable[2];
+    if (replacement === undefined) {
+      return "";
+    }
+    resolved = replacement.trim().toLowerCase();
+  }
+  return "";
+}
+
+function hasHiddenStyleDeclaration(
+  declarations: string,
+  variables: ReadonlyMap<string, string> = new Map()
+): boolean {
+  for (const [property, rawValue] of cssDeclarations(declarations)) {
+    const value = resolvedCssValue(rawValue, variables);
     if (property === "display" && value === "none") {
       return true;
     }
@@ -251,38 +321,406 @@ function hasHiddenStyleDeclaration(declarations: string): boolean {
   return false;
 }
 
-function supportedHiddenStylesheetSelectors(css: string): string[] {
-  const selectors: string[] = [];
-  const withoutComments = css.replace(/\/\*[\s\S]*?\*\//g, "");
-  const rules = withoutComments.matchAll(/([^{}]+)\{([^{}]*)\}/g);
-  // Deliberately not a browser CSS engine: honor comma-separated single compound selectors made
-  // from a tag, classes, IDs, and hidden/aria-hidden attributes when their rule explicitly hides.
-  const supportedSelector = /^(?:[a-z][a-z0-9-]*|\*)?(?:(?:[.#][-_a-z0-9]+)|(?:\[(?:hidden|aria-hidden)(?:\s*=\s*(?:"[^"]*"|'[^']*'|[-_a-z0-9]+))?\]))*$/i;
-  for (const rule of rules) {
-    const selectorList = rule[1] ?? "";
-    const declarations = rule[2] ?? "";
-    if (!hasHiddenStyleDeclaration(declarations)) {
+type CssRule = {
+  selectors: string[];
+  declarations: string;
+};
+
+type CompoundSelector = {
+  tag?: string;
+  ids: string[];
+  classes: string[];
+  attributes: Array<{ name: string; value?: string }>;
+};
+
+type CompiledSelector = {
+  parts: CompoundSelector[];
+  combinators: Array<"child" | "descendant">;
+};
+
+function stylesheetLimitError(detail: string): Error {
+  return new Error(`Public page stylesheet ${detail} limit exceeded`);
+}
+
+function parseStylesheetRules(stylesheets: string[]): CssRule[] {
+  let totalBytes = 0;
+  let totalRules = 0;
+  let totalSelectors = 0;
+  const parsedRules: CssRule[] = [];
+  for (const stylesheet of stylesheets) {
+    totalBytes += Buffer.byteLength(stylesheet, "utf8");
+    if (totalBytes > MAX_STYLESHEET_BYTES) {
+      throw stylesheetLimitError(`${MAX_STYLESHEET_BYTES}-byte`);
+    }
+    const withoutComments = stylesheet.replace(/\/\*[\s\S]*?\*\//g, "");
+    for (const rule of withoutComments.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+      totalRules += 1;
+      if (totalRules > MAX_STYLESHEET_RULES) {
+        throw stylesheetLimitError(`${MAX_STYLESHEET_RULES}-rule`);
+      }
+      const selectors = (rule[1] ?? "")
+        .split(",")
+        .map((value) => value.trim())
+        .filter((value) => value !== "");
+      totalSelectors += selectors.length;
+      if (totalSelectors > MAX_STYLESHEET_SELECTORS) {
+        throw stylesheetLimitError(`${MAX_STYLESHEET_SELECTORS}-selector`);
+      }
+      for (const selector of selectors) {
+        if (selector.length > MAX_STYLESHEET_SELECTOR_LENGTH) {
+          throw stylesheetLimitError(`${MAX_STYLESHEET_SELECTOR_LENGTH}-character selector`);
+        }
+      }
+      parsedRules.push({ selectors, declarations: rule[2] ?? "" });
+    }
+  }
+  return parsedRules;
+}
+
+function splitSelector(selector: string): {
+  compounds: string[];
+  combinators: Array<"child" | "descendant">;
+} | undefined {
+  const compounds: string[] = [];
+  const combinators: Array<"child" | "descendant"> = [];
+  let current = "";
+  let bracketDepth = 0;
+  let quote = "";
+  let pendingDescendant = false;
+  const pushCompound = () => {
+    const compound = current.trim();
+    if (compound !== "") {
+      compounds.push(compound);
+      if (compounds.length > MAX_STYLESHEET_SELECTOR_PARTS) {
+        throw stylesheetLimitError(`${MAX_STYLESHEET_SELECTOR_PARTS}-part selector complexity`);
+      }
+      current = "";
+    }
+  };
+
+  for (const character of selector) {
+    if (quote !== "") {
+      current += character;
+      if (character === quote) {
+        quote = "";
+      }
       continue;
     }
-    for (const selector of selectorList.split(",").map((value) => value.trim())) {
-      if (selector !== "" && supportedSelector.test(selector)) {
-        selectors.push(selector);
+    if ((character === "\"" || character === "'") && bracketDepth > 0) {
+      quote = character;
+      current += character;
+      continue;
+    }
+    if (character === "[") {
+      bracketDepth += 1;
+      current += character;
+      continue;
+    }
+    if (character === "]") {
+      bracketDepth -= 1;
+      if (bracketDepth < 0) {
+        return undefined;
+      }
+      current += character;
+      continue;
+    }
+    if (bracketDepth === 0 && /\s/.test(character)) {
+      if (current.trim() !== "") {
+        pushCompound();
+        pendingDescendant = true;
+      }
+      continue;
+    }
+    if (bracketDepth === 0 && character === ">") {
+      pushCompound();
+      if (compounds.length === 0 || combinators.length >= compounds.length) {
+        return undefined;
+      }
+      combinators.push("child");
+      pendingDescendant = false;
+      continue;
+    }
+    if (pendingDescendant) {
+      if (combinators.length < compounds.length) {
+        combinators.push("descendant");
+      }
+      pendingDescendant = false;
+    }
+    current += character;
+  }
+  if (quote !== "" || bracketDepth !== 0) {
+    return undefined;
+  }
+  pushCompound();
+  if (compounds.length === 0 || combinators.length !== compounds.length - 1) {
+    return undefined;
+  }
+  return { compounds, combinators };
+}
+
+function parseCompoundSelector(selector: string): CompoundSelector | undefined {
+  let remaining = selector;
+  let tag: string | undefined;
+  const tagMatch = remaining.match(/^(?:[a-z][a-z0-9-]*|\*)/i);
+  if (tagMatch !== null) {
+    tag = tagMatch[0]!.toLowerCase();
+    remaining = remaining.slice(tagMatch[0]!.length);
+  }
+  const ids: string[] = [];
+  const classes: string[] = [];
+  const attributes: Array<{ name: string; value?: string }> = [];
+  while (remaining !== "") {
+    const simple = remaining.match(/^([.#])([-_a-z0-9]+)/i);
+    if (simple !== null) {
+      (simple[1] === "." ? classes : ids).push(simple[2]!);
+      remaining = remaining.slice(simple[0].length);
+      continue;
+    }
+    const attribute = remaining.match(
+      /^\[(hidden|aria-hidden)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([-_a-z0-9]+)))?\]/i
+    );
+    if (attribute === null) {
+      return undefined;
+    }
+    const value = attribute[2] ?? attribute[3] ?? attribute[4];
+    attributes.push({
+      name: attribute[1]!.toLowerCase(),
+      ...(value === undefined ? {} : { value })
+    });
+    remaining = remaining.slice(attribute[0].length);
+  }
+  if (tag === undefined && ids.length === 0 && classes.length === 0 && attributes.length === 0) {
+    return undefined;
+  }
+  return { ...(tag === undefined ? {} : { tag }), ids, classes, attributes };
+}
+
+function compileSupportedSelector(selector: string): CompiledSelector | undefined {
+  const split = splitSelector(selector);
+  if (split === undefined) {
+    return undefined;
+  }
+  const parts = split.compounds.map(parseCompoundSelector);
+  if (parts.some((part) => part === undefined)) {
+    return undefined;
+  }
+  return { parts: parts as CompoundSelector[], combinators: split.combinators };
+}
+
+function compileHiddenStylesheetSelectors(stylesheets: string[]): CompiledSelector[] {
+  const rules = parseStylesheetRules(stylesheets);
+  const variables = new Map<string, string>();
+  let customPropertyCount = 0;
+  for (const rule of rules) {
+    if (!rule.selectors.some((selector) => selector.toLowerCase() === ":root")) {
+      continue;
+    }
+    for (const [property, value] of cssDeclarations(rule.declarations)) {
+      if (!property.startsWith("--")) {
+        continue;
+      }
+      customPropertyCount += 1;
+      if (customPropertyCount > MAX_STYLESHEET_CUSTOM_PROPERTIES) {
+        throw stylesheetLimitError(`${MAX_STYLESHEET_CUSTOM_PROPERTIES}-custom-property`);
+      }
+      variables.set(property, value);
+    }
+  }
+
+  const compiled: CompiledSelector[] = [];
+  for (const rule of rules) {
+    if (!hasHiddenStyleDeclaration(rule.declarations, variables)) {
+      continue;
+    }
+    for (const selector of rule.selectors) {
+      const supported = compileSupportedSelector(selector);
+      if (supported !== undefined) {
+        compiled.push(supported);
       }
     }
   }
-  return selectors;
+  return compiled;
+}
+
+function applyHiddenStylesheetSelectors(
+  $: ReturnType<typeof load>,
+  selectors: CompiledSelector[]
+): void {
+  if (selectors.length === 0) {
+    return;
+  }
+  const elements = $("body *").toArray();
+  type HtmlElement = (typeof elements)[number];
+  let matchWork = 0;
+  const chargeMatchWork = (units: number) => {
+    matchWork += units;
+    if (matchWork > MAX_STYLESHEET_MATCH_WORK) {
+      throw stylesheetLimitError(`${MAX_STYLESHEET_MATCH_WORK}-unit matching work`);
+    }
+  };
+  type ElementMetadata = {
+    tag: string;
+    id: string | undefined;
+    classes: ReadonlySet<string>;
+    hidden: string | undefined;
+    ariaHidden: string | undefined;
+  };
+  const metadataCache = new WeakMap<HtmlElement, ElementMetadata>();
+  const elementMetadata = (element: HtmlElement): ElementMetadata => {
+    const cached = metadataCache.get(element);
+    if (cached !== undefined) {
+      return cached;
+    }
+    const wrapped = $(element);
+    const id = wrapped.attr("id");
+    const classValue = wrapped.attr("class") ?? "";
+    const hidden = wrapped.attr("hidden");
+    const ariaHidden = wrapped.attr("aria-hidden");
+    chargeMatchWork(
+      1
+      + (id?.length ?? 0)
+      + classValue.length
+      + (hidden?.length ?? 0)
+      + (ariaHidden?.length ?? 0)
+    );
+    const metadata = {
+      tag: wrapped.prop("tagName")?.toLowerCase() ?? "",
+      id,
+      classes: new Set(classValue.split(/\s+/).filter(Boolean)),
+      hidden,
+      ariaHidden
+    };
+    metadataCache.set(element, metadata);
+    return metadata;
+  };
+  const matchesCompound = (element: HtmlElement, selector: CompoundSelector): boolean => {
+    chargeMatchWork(
+      1
+      + (selector.tag?.length ?? 0)
+      + selector.ids.reduce((total, id) => total + id.length, 0)
+      + selector.classes.reduce((total, className) => total + className.length, 0)
+      + selector.attributes.reduce(
+        (total, attribute) => total + attribute.name.length + (attribute.value?.length ?? 0),
+        0
+      )
+    );
+    const metadata = elementMetadata(element);
+    if (
+      selector.tag !== undefined
+      && selector.tag !== "*"
+      && metadata.tag !== selector.tag
+    ) {
+      return false;
+    }
+    if (selector.ids.some((id) => metadata.id !== id)) {
+      return false;
+    }
+    if (selector.classes.some((className) => !metadata.classes.has(className))) {
+      return false;
+    }
+    return selector.attributes.every(({ name, value }) => {
+      const actual = name === "hidden" ? metadata.hidden : metadata.ariaHidden;
+      return actual !== undefined && (value === undefined || actual === value);
+    });
+  };
+  const matchesSelector = (element: HtmlElement, selector: CompiledSelector): boolean => {
+    let current = element;
+    const lastPart = selector.parts.length - 1;
+    if (!matchesCompound(current, selector.parts[lastPart]!)) {
+      return false;
+    }
+    for (let partIndex = lastPart - 1; partIndex >= 0; partIndex -= 1) {
+      const combinator = selector.combinators[partIndex]!;
+      if (combinator === "child") {
+        const parent = $(current).parent().get(0);
+        if (parent === undefined || !matchesCompound(parent, selector.parts[partIndex]!)) {
+          return false;
+        }
+        current = parent;
+        continue;
+      }
+      let ancestor = $(current).parent().get(0);
+      while (ancestor !== undefined && !matchesCompound(ancestor, selector.parts[partIndex]!)) {
+        ancestor = $(ancestor).parent().get(0);
+      }
+      if (ancestor === undefined) {
+        return false;
+      }
+      current = ancestor;
+    }
+    return true;
+  };
+
+  const hiddenElements: HtmlElement[] = [];
+  for (const element of elements) {
+    for (const selector of selectors) {
+      if (matchesSelector(element, selector)) {
+        hiddenElements.push(element);
+        break;
+      }
+    }
+  }
+  $(hiddenElements).remove();
+}
+
+const INSTRUCTION_BLOCK_SELECTOR = [
+  "p",
+  "li",
+  "blockquote",
+  "pre",
+  "td",
+  "th",
+  "div",
+  "section",
+  "article",
+  "header",
+  "footer",
+  "main",
+  "nav",
+  "aside",
+  "h1",
+  "h2",
+  "h3",
+  "h4",
+  "h5",
+  "h6"
+].join(", ");
+
+function removeAdjacentInstructionBlocks($: ReturnType<typeof load>): void {
+  const blocks = $(INSTRUCTION_BLOCK_SELECTOR).toArray();
+  type InstructionBlock = (typeof blocks)[number];
+  const blocksToRemove = new Set<InstructionBlock>();
+  let scanWork = 0;
+  for (const block of blocks) {
+    if (!hasMetaInstructionContext($(block).text())) {
+      continue;
+    }
+    let nextBlock = $(block).next().get(0);
+    while (nextBlock !== undefined && normalizedText($(nextBlock).text()) === "") {
+      scanWork += 1;
+      if (scanWork > MAX_INSTRUCTION_BLOCK_SCAN_WORK) {
+        throw new Error("Public page instruction-block scan work limit exceeded");
+      }
+      nextBlock = $(nextBlock).next().get(0);
+    }
+    if (
+      nextBlock !== undefined
+      && SENSITIVE_ACTION_PATTERN.test(normalizedText($(nextBlock).text()))
+    ) {
+      blocksToRemove.add(block);
+      blocksToRemove.add(nextBlock);
+    }
+  }
+  $(Array.from(blocksToRemove)).remove();
 }
 
 function extractHtml(html: string): { title: string; text: string } {
   const $ = load(html);
   const title = sanitizedExtractedText($("title").first().text());
 
-  const stylesheetSelectors = $("style")
-    .toArray()
-    .flatMap((element) => supportedHiddenStylesheetSelectors($(element).text()));
-  for (const selector of stylesheetSelectors) {
-    $(selector).remove();
-  }
+  const stylesheets = $("style").toArray().map((element) => $(element).text());
+  const stylesheetSelectors = compileHiddenStylesheetSelectors(stylesheets);
+  applyHiddenStylesheetSelectors($, stylesheetSelectors);
 
   $(
     "script, style, noscript, form, template, iframe, object, embed, canvas, svg, link, meta, [hidden]"
@@ -295,9 +733,8 @@ function extractHtml(html: string): { title: string; text: string } {
     return hasHiddenStyleDeclaration(style);
   }).remove();
   $("br").replaceWith("\n");
-  const instructionBlocks = $(
-    "p, li, blockquote, pre, td, th, div, section, article, header, footer, main, nav, aside"
-  ).toArray().reverse();
+  removeAdjacentInstructionBlocks($);
+  const instructionBlocks = $(INSTRUCTION_BLOCK_SELECTOR).toArray().reverse();
   for (const element of instructionBlocks) {
     if (containsInstructionLikeText($(element).text())) {
       $(element).remove();
