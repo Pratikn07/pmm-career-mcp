@@ -4,7 +4,7 @@ A private, single-user MCP server for YC-company career research, a networking p
 
 ## Start locally
 
-Use Node.js 22 or later. Keep secrets in a local `.env` file or your hosting provider's secret store—never paste them into a ChatGPT conversation.
+Use Node.js 22 or later. Keep secrets in a local `.env` file or your hosting provider's secret store—never paste them into a ChatGPT conversation. Both `npm run dev` and `npm start` load `.env` automatically when it exists; process or host environment variables can still provide the same values.
 
 ```bash
 cp .env.example .env
