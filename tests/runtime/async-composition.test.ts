@@ -82,6 +82,7 @@ async function closeUnexpectedRuntime(value: unknown): Promise<void> {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
 });
 
 it("waits for database creation before opening the HTTP listener", async () => {
@@ -96,7 +97,8 @@ it("waits for database creation before opening the HTTP listener", async () => {
   try {
     await Promise.resolve();
     expect(createDatabase).toHaveBeenCalledWith(
-      "postgresql://postgres:postgres@127.0.0.1:5432/postgres"
+      "postgresql://postgres:postgres@127.0.0.1:5432/postgres",
+      { requireTls: false }
     );
     expect(listen).not.toHaveBeenCalled();
 
@@ -108,6 +110,35 @@ it("waits for database creation before opening the HTTP listener", async () => {
     runtime ??= await startup.catch(() => undefined);
     await closeUnexpectedRuntime(runtime);
   }
+});
+
+it("passes production TLS intent from injected config instead of global process state", async () => {
+  vi.stubEnv("NODE_ENV", "test");
+  const createDatabase = vi.fn(async () => {
+    throw new Error("stop after configuration capture");
+  });
+  const productionEnvironment: NodeJS.ProcessEnv = {
+    NODE_ENV: "production",
+    PORT: "46873",
+    DATABASE_URL: "postgresql://app@database.example/postgres",
+    BASE_URL: "https://career.example",
+    AUTH_MODE: "oauth",
+    OIDC_ISSUER: "https://issuer.example",
+    OIDC_AUDIENCE: "https://career.example",
+    ALLOWED_SUBJECT: "test-subject",
+    LINKEDIN_PUBLISH_ENABLED: "false",
+    LINKEDIN_VERSION: "202606",
+    TOKEN_ENCRYPTION_KEY: "a".repeat(64)
+  };
+
+  await expect(startServer(productionEnvironment, { createDatabase })).rejects.toThrow(
+    "stop after configuration capture"
+  );
+
+  expect(createDatabase).toHaveBeenCalledWith(
+    "postgresql://app@database.example/postgres",
+    { requireTls: true }
+  );
 });
 
 it("does not open an HTTP listener when database creation fails", async () => {

@@ -39,15 +39,17 @@ describe("production PostgreSQL client", () => {
   it.each(["file:///tmp/database", "https://database.example", "not a URL"])(
     "rejects non-PostgreSQL database URL %s before opening a pool",
     async (databaseUrl) => {
-      await expect(createDatabase(databaseUrl)).rejects.toThrow(/PostgreSQL|postgres/i);
+      await expect(createDatabase(databaseUrl, { requireTls: false })).rejects.toThrow(
+        /PostgreSQL|postgres/i
+      );
       expect(mocks.postgres).not.toHaveBeenCalled();
     }
   );
 
-  it("uses a small pool and requires TLS in production", async () => {
-    process.env.NODE_ENV = "production";
+  it("uses a small pool and requires TLS from explicit production configuration", async () => {
+    process.env.NODE_ENV = "development";
 
-    const database = await createDatabase(DATABASE_URL);
+    const database = await createDatabase(DATABASE_URL, { requireTls: true });
 
     expect(mocks.postgres).toHaveBeenCalledWith(DATABASE_URL, {
       max: 5,
@@ -63,7 +65,7 @@ describe("production PostgreSQL client", () => {
     }));
     let settled = false;
 
-    const creation = createDatabase(DATABASE_URL).then((database) => {
+    const creation = createDatabase(DATABASE_URL, { requireTls: false }).then((database) => {
       settled = true;
       return database;
     });
@@ -79,13 +81,15 @@ describe("production PostgreSQL client", () => {
   it("closes the pool when migration fails", async () => {
     mocks.migrate.mockRejectedValueOnce(new Error("migration failed"));
 
-    await expect(createDatabase(DATABASE_URL)).rejects.toThrow("migration failed");
+    await expect(createDatabase(DATABASE_URL, { requireTls: false })).rejects.toThrow(
+      "migration failed"
+    );
 
     expect(mocks.end).toHaveBeenCalledWith({ timeout: 5 });
   });
 
   it("uses an awaited harmless readiness query and async shutdown", async () => {
-    const database = await createDatabase(DATABASE_URL);
+    const database = await createDatabase(DATABASE_URL, { requireTls: false });
 
     await database.checkReady();
     expect(mocks.sql).toHaveBeenCalledOnce();
@@ -100,7 +104,7 @@ describe("production PostgreSQL client", () => {
 
     try {
       process.chdir(temporaryDirectory);
-      const database = await createDatabase(DATABASE_URL);
+      const database = await createDatabase(DATABASE_URL, { requireTls: false });
       expect(mocks.migrate).toHaveBeenCalledWith(
         expect.anything(),
         { migrationsFolder: expect.stringMatching(/\/drizzle$/) }

@@ -12,6 +12,10 @@ export type CareerDatabase = ReturnType<typeof createRepositories> & {
   close(): Promise<void>;
 };
 
+export type DatabaseConnectionOptions = {
+  requireTls: boolean;
+};
+
 function validateDatabaseUrl(databaseUrl: string): void {
   let parsed: URL;
   try {
@@ -44,11 +48,14 @@ function findMigrationsFolder(): string {
   }
 }
 
-export async function createDatabase(databaseUrl: string): Promise<CareerDatabase> {
+export async function createDatabase(
+  databaseUrl: string,
+  options: DatabaseConnectionOptions
+): Promise<CareerDatabase> {
   validateDatabaseUrl(databaseUrl);
   const client = postgres(databaseUrl, {
     max: 5,
-    ...(process.env.NODE_ENV === "production" ? { ssl: "require" } : {})
+    ...(options.requireTls ? { ssl: "require" } : {})
   });
   const database = drizzle(client, { schema });
 

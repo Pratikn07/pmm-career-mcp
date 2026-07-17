@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { postgresErrorKind } from "../../src/domain/errors.js";
 import {
   createTestDatabase,
   queryTestDatabase,
@@ -233,11 +234,13 @@ describe("database lifecycle", () => {
   });
 
   it("enforces foreign keys", async () => {
-    await expect(db.people.upsert({
-      companyId: "missing-company",
+    const error = await db.people.upsert({
+      companyId: "00000000-0000-4000-8000-000000000001",
       name: "No Company",
       role: "Founder"
-    })).rejects.toBeDefined();
+    }).then(() => undefined, (reason: unknown) => reason);
+
+    expect(postgresErrorKind(error)).toBe("foreign_key");
   });
 
   it("treats malformed UUID lookup input as not found", async () => {

@@ -2,7 +2,11 @@ import { fileURLToPath } from "node:url";
 import type { Express } from "express";
 import type { Server } from "node:http";
 import { loadConfig, type AppConfig } from "./config.js";
-import { createDatabase, type CareerDatabase } from "./db/client.js";
+import {
+  createDatabase,
+  type CareerDatabase,
+  type DatabaseConnectionOptions
+} from "./db/client.js";
 import { DomainError } from "./domain/errors.js";
 import { createDraftService } from "./drafts/service.js";
 import { createHttpApp } from "./http/app.js";
@@ -113,7 +117,9 @@ function oauthFromEnvironment(
 export async function createCareerApplication(
   options: ApplicationOptions
 ): Promise<CareerApplication> {
-  const database = options.database ?? await createDatabase(options.config.databaseUrl);
+  const database = options.database ?? await createDatabase(options.config.databaseUrl, {
+    requireTls: options.config.nodeEnv === "production"
+  });
   const now = options.now ?? (() => new Date());
   const ycProvider = persistedYcProvider(database, options.ycSource ?? createPublicYcSource(), now);
   const peopleDiscovery = createPeopleDiscovery({
@@ -182,7 +188,10 @@ export async function createCareerApplication(
 }
 
 export type StartServerDependencies = {
-  createDatabase?: (databaseUrl: string) => Promise<CareerDatabase>;
+  createDatabase?: (
+    databaseUrl: string,
+    options: DatabaseConnectionOptions
+  ) => Promise<CareerDatabase>;
 };
 
 export type RunningCareerApplication = CareerApplication & {
@@ -195,7 +204,9 @@ export async function startServer(
   dependencies: StartServerDependencies = {}
 ): Promise<RunningCareerApplication> {
   const config = loadConfig(env);
-  const database = await (dependencies.createDatabase ?? createDatabase)(config.databaseUrl);
+  const database = await (dependencies.createDatabase ?? createDatabase)(config.databaseUrl, {
+    requireTls: config.nodeEnv === "production"
+  });
   const linkedin = oauthFromEnvironment(database, config, env);
   const runtime = await createCareerApplication({ config, database, linkedinOAuth: linkedin });
   const server = runtime.app.listen(config.port);
