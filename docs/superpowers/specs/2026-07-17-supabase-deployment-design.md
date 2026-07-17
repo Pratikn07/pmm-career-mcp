@@ -95,9 +95,9 @@ Supabase Auth OAuth 2.1 server capabilities are enabled with PKCE, dynamic clien
 
 `https://<project-ref>.supabase.co/auth/v1`
 
-The MCP protected-resource metadata advertises Supabase-supported scopes `openid` and `email`. It does not request the custom `mcp` scope because Supabase Auth does not currently support custom OAuth scopes.
+The MCP protected-resource metadata advertises Supabase-supported scopes `openid` and `email`. It does not request the custom `mcp` scope because Supabase Auth does not currently support custom OAuth scopes. Every MCP tool declares an OAuth 2.0 security scheme with those same scopes so ChatGPT can explain the linking requirement accurately.
 
-The MCP server validates the JWT signature, issuer, audience, expiry, and subject. Production uses the normal Supabase access-token audience `authenticated`, and `ALLOWED_SUBJECT` contains the UUID of the one permitted Supabase Auth user.
+The MCP server validates the JWT signature, issuer, resource audience, expiry, and subject. `OIDC_AUDIENCE` equals the canonical Railway `BASE_URL`, which is also the protected resource identifier. ChatGPT sends that value as the OAuth `resource` parameter. The live Supabase OAuth smoke test must prove that Supabase echoes it into the access-token `aud` claim. If the native beta flow does not do so, a Supabase Custom Access Token Hook sets `aud` to the administrator-controlled `mcp_audience` value in the permitted user's `app_metadata`. `ALLOWED_SUBJECT` contains the UUID of that one permitted Supabase Auth user.
 
 ### 5.2 Login and consent page
 
@@ -119,7 +119,7 @@ The production deployment uses these database and Supabase values:
 - `SUPABASE_URL`
 - `SUPABASE_PUBLISHABLE_KEY`
 - `OIDC_ISSUER`
-- `OIDC_AUDIENCE=authenticated`
+- `OIDC_AUDIENCE` equal to `BASE_URL`
 - `ALLOWED_SUBJECT`
 
 It also retains:
@@ -183,7 +183,7 @@ The migration is complete only when all of the following are true:
 - A live Supabase read/write/delete smoke test succeeds without leaving test data behind.
 - Supabase database advisors report no unresolved security findings relevant to the application schema.
 - OAuth protected-resource metadata advertises only supported Supabase scopes.
-- A browser login and explicit consent return a token accepted only for the configured subject.
+- A browser login and explicit consent return a token whose `aud` equals `BASE_URL` and which is accepted only for the configured subject.
 - ChatGPT can initialize the Railway MCP endpoint and list the expected tools.
 - A live YC read-only query works.
 - Draft and preview tools work while `LINKEDIN_PUBLISH_ENABLED=false`.
