@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { and, asc, eq, isNull, max } from "drizzle-orm";
+import { and, asc, eq, isNull, max, sql } from "drizzle-orm";
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import {
   companies,
@@ -107,7 +107,7 @@ export type PostDraftVersionInput = {
   draftId?: string;
   text: string;
   visibility: string;
-  checksum: string;
+  checksum: string | ((version: number) => string);
   state: string;
 };
 
@@ -371,6 +371,9 @@ export function createRepositories(database: Database) {
           createdAt: nowIso()
         }).returning().get();
       },
+      get(id: string): Evidence | undefined {
+        return database.select().from(evidence).where(eq(evidence.id, id)).get();
+      },
       listForPerson(personId: string): Evidence[] {
         return database.select().from(evidence).where(eq(evidence.personId, personId)).orderBy(
           asc(evidence.checkedAt),
@@ -420,7 +423,15 @@ export function createRepositories(database: Database) {
         return database.select({ target: targets }).from(targets).innerJoin(
           people,
           eq(targets.personId, people.id)
-        ).where(and(...conditions)).orderBy(asc(targets.createdAt), asc(targets.id)).all().map(
+        ).innerJoin(
+          companies,
+          eq(people.companyId, companies.id)
+        ).where(and(...conditions)).orderBy(
+          asc(companies.name),
+          asc(people.name),
+          asc(people.role),
+          asc(targets.id)
+        ).all().map(
           (row) => row.target
         );
       }
@@ -436,7 +447,7 @@ export function createRepositories(database: Database) {
       },
       listForTarget(targetId: string): TargetNote[] {
         return database.select().from(targetNotes).where(eq(targetNotes.targetId, targetId)).orderBy(
-          asc(targetNotes.createdAt)
+          sql`${targetNotes}.rowid`
         ).all();
       }
     },
@@ -527,14 +538,17 @@ export function createRepositories(database: Database) {
           const latest = transaction.select({ version: max(postDrafts.version) }).from(
             postDrafts
           ).where(eq(postDrafts.draftId, draftId)).get();
+          const version = (latest?.version ?? 0) + 1;
           const now = nowIso();
           return transaction.insert(postDrafts).values({
             id: randomUUID(),
             draftId,
             text: input.text,
             visibility: input.visibility,
-            version: (latest?.version ?? 0) + 1,
-            checksum: input.checksum,
+            version,
+            checksum: typeof input.checksum === "function"
+              ? input.checksum(version)
+              : input.checksum,
             state: input.state,
             createdAt: now,
             updatedAt: now
