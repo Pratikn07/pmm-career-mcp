@@ -103,6 +103,22 @@ describe("scoreTarget", () => {
     expect(score.total).toBe(100);
   });
 
+  it("keeps unequal large finite weight contributions within 100 despite rounding", () => {
+    const input = fixture("2026-07-15T00:00:00.000Z");
+    input.weights = {
+      pmmOpportunity: 4.261680484e101,
+      referralPotential: 3.6545810950000005e101,
+      networkValue: 3.9443342e99
+    };
+
+    const score = scoreTarget(input, NOW);
+
+    expect(score.total).toBe(
+      score.pmmOpportunity + score.referralPotential + score.networkValue
+    );
+    expect(score.total).toBeLessThanOrEqual(100);
+  });
+
   it("explains only positive typed evidence and names absent or false evidence", () => {
     const input = fixture("2026-07-15T00:00:00.000Z");
     input.evidence = {

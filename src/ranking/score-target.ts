@@ -220,9 +220,20 @@ export function scoreTarget(input: ScoreTargetInput, now: Date): TargetScore {
       + (input.evidence.roleSeniority === true ? 30 : 0)
       + (input.evidence.recentFundingSignal === true ? 30 : 0)
   );
-  const pmmOpportunity = pmmRaw * weights.pmmOpportunity;
-  const referralPotential = referralRaw * weights.referralPotential;
-  const networkValue = networkRaw * weights.networkValue;
+  let pmmOpportunity = pmmRaw * weights.pmmOpportunity;
+  let referralPotential = referralRaw * weights.referralPotential;
+  let networkValue = networkRaw * weights.networkValue;
+  const preliminaryTotal = pmmOpportunity + referralPotential + networkValue;
+  if (preliminaryTotal > 100) {
+    const correction = preliminaryTotal - 100 + Number.EPSILON * preliminaryTotal;
+    if (pmmOpportunity >= referralPotential && pmmOpportunity >= networkValue) {
+      pmmOpportunity = Math.max(0, pmmOpportunity - correction);
+    } else if (referralPotential >= networkValue) {
+      referralPotential = Math.max(0, referralPotential - correction);
+    } else {
+      networkValue = Math.max(0, networkValue - correction);
+    }
+  }
   const explanation = explainEvidence(input.evidence);
   const assessedEvidence = evidenceConfidence(input, now);
   for (const missing of assessedEvidence.missingEvidence) {
