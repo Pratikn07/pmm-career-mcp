@@ -6,6 +6,9 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { AppConfig } from "../config.js";
 import { createResourceAuth, protectedResourceMetadata } from "../auth/resource-auth.js";
+import { AUTHORIZATION_ID_PATTERN, applyConsentSecurityHeaders, hasConsentPageConfiguration, invalidConsentPage, renderConsentPage } from "../oauth/consent-page.js";
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
 
 type CommonHttpDependencies = {
   /** Required by hosted OAuth deployments; omitted only for existing local test handlers. */
@@ -95,6 +98,32 @@ export function createHttpApp(deps: HttpDependencies): Express {
   app.get("/health", (_request, response) => {
     response.json({ status: "ok" });
   });
+  const consentConfig = deps.config;
+  if (consentConfig !== undefined && hasConsentPageConfiguration(consentConfig)) {
+    app.get("/oauth/consent", (request, response) => {
+      const authorizationId = typeof request.query.authorization_id === "string" ? request.query.authorization_id : undefined;
+      if (authorizationId === undefined || !AUTHORIZATION_ID_PATTERN.test(authorizationId)) {
+        applyConsentSecurityHeaders(response);
+        response.status(400).type("html").send(invalidConsentPage());
+        return;
+      }
+      applyConsentSecurityHeaders(response, consentConfig.supabaseUrl);
+      response.type("html").send(renderConsentPage(consentConfig, authorizationId));
+    });
+    app.get("/oauth/consent-client.js", (_request, response) => {
+      const publicDirectory = resolve(process.cwd(), "dist/public");
+      if (!existsSync(resolve(publicDirectory, "consent-client.js"))) {
+        response.status(404).end();
+        return;
+      }
+      response.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+      response.setHeader("X-Content-Type-Options", "nosniff");
+      response.type("application/javascript").sendFile("consent-client.js", {
+        root: publicDirectory,
+        dotfiles: "allow"
+      });
+    });
+  }
   if (deps.config !== undefined && deps.config.authMode === "oauth") {
     app.get("/.well-known/oauth-protected-resource", (_request, response) => {
       response.json(protectedResourceMetadata(deps.config!));
