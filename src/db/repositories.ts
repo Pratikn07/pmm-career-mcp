@@ -1,5 +1,5 @@
-import { randomUUID } from "node:crypto";
-import { and, asc, eq, isNull, max, sql } from "drizzle-orm";
+import { randomUUID, timingSafeEqual } from "node:crypto";
+import { and, asc, desc, eq, isNull, max, sql } from "drizzle-orm";
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import {
   companies,
@@ -111,6 +111,31 @@ export type PostDraftVersionInput = {
   state: string;
 };
 
+export type PreviewExpectedRow = {
+  postId: string;
+  versionId: string;
+  version: number;
+  checksum: string;
+  visibility: string;
+};
+
+export type PreviewCreationResult =
+  | { outcome: "created"; post: PostDraft; preview: PostPreview }
+  | { outcome: "not_found" | "not_latest" | "invalid_state" };
+
+export type PreviewConsumptionResult =
+  | { outcome: "consumed"; post: PostDraft; preview: PostPreview }
+  | {
+      outcome:
+        | "not_found"
+        | "already_consumed"
+        | "expired"
+        | "mismatch"
+        | "stale"
+        | "invalid_state"
+        | "race";
+    };
+
 function nowIso(): string {
   return new Date().toISOString();
 }
@@ -131,6 +156,12 @@ function decodeOutreachDraft(row: OutreachDraftRow): OutreachDraft {
 function normalizedPersonIdentity(name: string, role: string): string {
   const normalize = (value: string) => value.replace(/\s+/g, " ").trim().toLocaleLowerCase("en");
   return `${normalize(name)}\u0000${normalize(role)}`;
+}
+
+function timingSafeTextEqual(left: string, right: string): boolean {
+  const leftBytes = Buffer.from(left, "utf8");
+  const rightBytes = Buffer.from(right, "utf8");
+  return leftBytes.length === rightBytes.length && timingSafeEqual(leftBytes, rightBytes);
 }
 
 export function createRepositories(database: Database) {
@@ -565,6 +596,21 @@ export function createRepositories(database: Database) {
         return database.select().from(postDrafts).where(eq(postDrafts.draftId, draftId)).orderBy(
           asc(postDrafts.version)
         ).all();
+      },
+      transitionState(input: {
+        versionId: string;
+        version: number;
+        expectedState: string;
+        nextState: string;
+      }): PostDraft | undefined {
+        return database.update(postDrafts).set({
+          state: input.nextState,
+          updatedAt: nowIso()
+        }).where(and(
+          eq(postDrafts.id, input.versionId),
+          eq(postDrafts.version, input.version),
+          eq(postDrafts.state, input.expectedState)
+        )).returning().get();
       }
     },
     previews: {
@@ -577,6 +623,118 @@ export function createRepositories(database: Database) {
       },
       getByTokenHash(tokenHash: string): PostPreview | undefined {
         return database.select().from(postPreviews).where(eq(postPreviews.tokenHash, tokenHash)).get();
+      },
+      listForPostDraft(postDraftId: string): PostPreview[] {
+        return database.select().from(postPreviews).where(
+          eq(postPreviews.postDraftId, postDraftId)
+        ).orderBy(sql`${postPreviews}.rowid`).all();
+      },
+      createForLatest(input: {
+        draftId: string;
+        version: number;
+        tokenHash: string;
+        expiresAt: string;
+        allowedStates: readonly string[];
+      }): PreviewCreationResult {
+        const expiresAt = assertIsoTimestamp("preview.expiresAt", input.expiresAt);
+        return database.transaction((transaction) => {
+          const post = transaction.select().from(postDrafts).where(and(
+            eq(postDrafts.draftId, input.draftId),
+            eq(postDrafts.version, input.version)
+          )).get();
+          if (post === undefined) {
+            return { outcome: "not_found" };
+          }
+          const latest = transaction.select().from(postDrafts).where(
+            eq(postDrafts.draftId, input.draftId)
+          ).orderBy(desc(postDrafts.version)).get();
+          if (latest === undefined || latest.id !== post.id) {
+            return { outcome: "not_latest" };
+          }
+          if (!input.allowedStates.includes(post.state)) {
+            return { outcome: "invalid_state" };
+          }
+          const preview = transaction.insert(postPreviews).values({
+            id: randomUUID(),
+            postDraftId: post.id,
+            version: post.version,
+            tokenHash: input.tokenHash,
+            expiresAt
+          }).returning().get();
+          return { outcome: "created", post, preview };
+        });
+      },
+      consumeExact(input: {
+        tokenHash: string;
+        consumedAt: string;
+        expected: PreviewExpectedRow;
+        allowedStates: readonly string[];
+        claimState?: string;
+      }): PreviewConsumptionResult {
+        const consumedAt = assertIsoTimestamp("preview.consumedAt", input.consumedAt);
+        return database.transaction((transaction) => {
+          const preview = transaction.select().from(postPreviews).where(
+            eq(postPreviews.tokenHash, input.tokenHash)
+          ).get();
+          if (
+            preview === undefined
+            || !timingSafeTextEqual(preview.tokenHash, input.tokenHash)
+          ) {
+            return { outcome: "not_found" };
+          }
+          if (preview.consumedAt !== null) {
+            return { outcome: "already_consumed" };
+          }
+          if (consumedAt >= preview.expiresAt) {
+            return { outcome: "expired" };
+          }
+          const post = transaction.select().from(postDrafts).where(and(
+            eq(postDrafts.id, preview.postDraftId),
+            eq(postDrafts.version, preview.version)
+          )).get();
+          if (post === undefined) {
+            return { outcome: "stale" };
+          }
+          if (
+            input.expected.postId !== post.draftId
+            || input.expected.versionId !== post.id
+            || input.expected.version !== post.version
+            || input.expected.checksum !== post.checksum
+            || input.expected.visibility !== post.visibility
+          ) {
+            return { outcome: "mismatch" };
+          }
+          const latest = transaction.select().from(postDrafts).where(
+            eq(postDrafts.draftId, post.draftId)
+          ).orderBy(desc(postDrafts.version)).get();
+          if (latest === undefined || latest.id !== post.id) {
+            return { outcome: "stale" };
+          }
+          if (!input.allowedStates.includes(post.state)) {
+            return { outcome: "invalid_state" };
+          }
+          const consumed = transaction.update(postPreviews).set({ consumedAt }).where(and(
+            eq(postPreviews.id, preview.id),
+            isNull(postPreviews.consumedAt)
+          )).returning().get();
+          if (consumed === undefined) {
+            return { outcome: "race" };
+          }
+          if (input.claimState !== undefined) {
+            const claimed = transaction.update(postDrafts).set({
+              state: input.claimState,
+              updatedAt: nowIso()
+            }).where(and(
+              eq(postDrafts.id, post.id),
+              eq(postDrafts.version, post.version),
+              eq(postDrafts.state, post.state)
+            )).returning().get();
+            if (claimed === undefined) {
+              throw new Error("Publish claim state changed before preview consumption completed");
+            }
+          }
+          return { outcome: "consumed", post, preview: consumed };
+        });
       },
       consume(tokenHash: string, consumedAt: string): PostPreview | undefined {
         assertIsoTimestamp("preview.consumedAt", consumedAt);
