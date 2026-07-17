@@ -25,13 +25,19 @@ it("uses complete, safe tool annotations", async () => {
   const { tools } = await client.listTools();
   await Promise.all([client.close(), server.close()]);
 
-  const byName = new Map(tools.map((tool) => [tool.name, tool.annotations]));
+  const byName = new Map(tools.map((tool) => [tool.name, tool]));
+  const annotationsFor = (name: string) => byName.get(name)?.annotations;
   for (const name of ["search_yc_companies", "discover_public_people", "find_pmm_opportunities", "rank_networking_targets", "explain_target_match", "preview_post", "list_pipeline", "list_post_history", "get_linkedin_connection_status"]) {
-    expect(byName.get(name)).toMatchObject({ readOnlyHint: true, destructiveHint: false });
+    expect(annotationsFor(name)).toMatchObject({ readOnlyHint: true, destructiveHint: false });
   }
   for (const name of ["draft_outreach", "draft_linkedin_post", "revise_post", "create_weekly_shortlist", "save_target", "update_outreach_status", "record_note", "create_linkedin_authorization_url"]) {
-    expect(byName.get(name)).toMatchObject({ readOnlyHint: false, openWorldHint: false, destructiveHint: false });
+    expect(annotationsFor(name)).toMatchObject({ readOnlyHint: false, openWorldHint: false, destructiveHint: false });
   }
-  expect(byName.get("publish_linkedin_post")).toMatchObject({ readOnlyHint: false, openWorldHint: true, destructiveHint: false });
-  expect([...byName.values()].every((annotation) => annotation !== undefined && annotation !== null)).toBe(true);
+  expect(annotationsFor("publish_linkedin_post")).toMatchObject({ readOnlyHint: false, openWorldHint: true, destructiveHint: false });
+  expect([...byName.values()].every((tool) => tool.annotations !== undefined && tool.annotations !== null)).toBe(true);
+  for (const tool of byName.values()) {
+    expect(tool._meta).toMatchObject({
+      securitySchemes: [{ type: "oauth2", scopes: ["openid", "email"] }]
+    });
+  }
 });

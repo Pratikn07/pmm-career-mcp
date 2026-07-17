@@ -123,9 +123,11 @@ it("passes production TLS intent from injected config instead of global process 
     DATABASE_URL: "postgresql://app@database.example/postgres",
     BASE_URL: "https://career.example",
     AUTH_MODE: "oauth",
-    OIDC_ISSUER: "https://issuer.example",
+    SUPABASE_URL: "https://project.supabase.co",
+    SUPABASE_PUBLISHABLE_KEY: "sb_publishable_example",
+    OIDC_ISSUER: "https://project.supabase.co/auth/v1",
     OIDC_AUDIENCE: "https://career.example",
-    ALLOWED_SUBJECT: "test-subject",
+    ALLOWED_SUBJECT: "123e4567-e89b-12d3-a456-426614174000",
     LINKEDIN_PUBLISH_ENABLED: "false",
     LINKEDIN_VERSION: "202606",
     TOKEN_ENCRYPTION_KEY: "a".repeat(64)

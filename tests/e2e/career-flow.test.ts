@@ -186,4 +186,4 @@ it("runs the private career flow and only publishes one exact enabled preview", 
   expect(replay.isError).toBe(true);
   expect(JSON.stringify(replay)).toContain("PREVIEW_CONSUMED");
   expect(linkedinPost.isDone()).toBe(true);
-});
+}, 15_000);

@@ -10,6 +10,8 @@ export type OAuthProtectedResourceMetadata = {
   resource_documentation: string;
 };
 
+export const SUPABASE_OAUTH_SCOPES = ["openid", "email"] as const;
+
 const oidcMetadataSchema = z.object({
   issuer: z.string().url(),
   jwks_uri: z.string().url()
@@ -24,7 +26,11 @@ function requireOAuthConfig(config: AppConfig): { issuer: string; audience: stri
   if (config.oidcIssuer === undefined || config.oidcAudience === undefined || config.allowedSubject === undefined) {
     throw new Error("OAuth resource authentication configuration is incomplete");
   }
-  return { issuer: config.oidcIssuer, audience: config.oidcAudience, subject: config.allowedSubject };
+  const audience = canonicalBaseUrl(config.baseUrl);
+  if (config.oidcAudience !== audience) {
+    throw new Error("OAuth audience must equal the canonical protected resource URL");
+  }
+  return { issuer: config.oidcIssuer, audience, subject: config.allowedSubject };
 }
 
 export function protectedResourceMetadata(config: AppConfig): OAuthProtectedResourceMetadata {
@@ -33,13 +39,17 @@ export function protectedResourceMetadata(config: AppConfig): OAuthProtectedReso
   return {
     resource,
     authorization_servers: [issuer],
-    scopes_supported: ["mcp"],
+    scopes_supported: [...SUPABASE_OAUTH_SCOPES],
     resource_documentation: `${resource}/docs`
   };
 }
 
 function protectedResourceMetadataUrl(config: AppConfig): string {
   return `${canonicalBaseUrl(config.baseUrl)}/.well-known/oauth-protected-resource`;
+}
+
+function authenticationChallenge(config: AppConfig): string {
+  return `Bearer resource_metadata="${protectedResourceMetadataUrl(config)}" scope="${SUPABASE_OAUTH_SCOPES.join(" ")}"`;
 }
 
 function bearerToken(authorization: string | undefined): string | undefined {
@@ -80,7 +90,7 @@ export function createResourceAuth(config: AppConfig): RequestHandler {
   return async (request, response, next) => {
     const token = bearerToken(request.get("authorization"));
     if (token === undefined) {
-      response.setHeader("WWW-Authenticate", `Bearer resource_metadata="${protectedResourceMetadataUrl(config)}"`);
+      response.setHeader("WWW-Authenticate", authenticationChallenge(config));
       response.status(401).json({ error: "Access to this MCP resource is denied" });
       return;
     }
@@ -88,12 +98,13 @@ export function createResourceAuth(config: AppConfig): RequestHandler {
     try {
       const { payload } = await jwtVerify(token, await keyFor(), { issuer, audience, requiredClaims: ["exp"] });
       if (payload.sub !== subject) {
-        response.status(403).json({ error: "Access to this MCP resource is denied" });
+        response.setHeader("WWW-Authenticate", authenticationChallenge(config));
+        response.status(401).json({ error: "Access to this MCP resource is denied" });
         return;
       }
       next();
     } catch {
-      response.setHeader("WWW-Authenticate", `Bearer resource_metadata="${protectedResourceMetadataUrl(config)}"`);
+      response.setHeader("WWW-Authenticate", authenticationChallenge(config));
       response.status(401).json({ error: "Access to this MCP resource is denied" });
     }
   };

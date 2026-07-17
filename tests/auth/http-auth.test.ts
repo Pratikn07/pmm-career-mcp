@@ -28,7 +28,7 @@ describe("MCP HTTP authentication", () => {
     issuerApp.get("/jwks", (_request, response) => response.json({ keys: [publicJwk] }));
     config = loadConfig({
       NODE_ENV: "test", AUTH_MODE: "oauth", BASE_URL: "http://127.0.0.1:3000",
-      OIDC_ISSUER: issuer, OIDC_AUDIENCE: "career-mcp", ALLOWED_SUBJECT: "user-123", TOKEN_ENCRYPTION_KEY: "a".repeat(64)
+      OIDC_ISSUER: issuer, OIDC_AUDIENCE: "http://127.0.0.1:3000", ALLOWED_SUBJECT: "123e4567-e89b-12d3-a456-426614174000", TOKEN_ENCRYPTION_KEY: "a".repeat(64)
     });
   });
 
@@ -37,7 +37,7 @@ describe("MCP HTTP authentication", () => {
   async function token(): Promise<string> {
     return new SignJWT({})
       .setProtectedHeader({ alg: "RS256", kid: "http-test-key" })
-      .setIssuer(issuer).setAudience("career-mcp").setSubject("user-123").setIssuedAt().setExpirationTime("5m")
+      .setIssuer(issuer).setAudience("http://127.0.0.1:3000").setSubject("123e4567-e89b-12d3-a456-426614174000").setIssuedAt().setExpirationTime("5m")
       .sign(key);
   }
 
@@ -48,11 +48,12 @@ describe("MCP HTTP authentication", () => {
     const metadata = await request(app).get("/.well-known/oauth-protected-resource");
     expect(metadata.status).toBe(200);
     expect(metadata.body.resource).toBe("http://127.0.0.1:3000");
+    expect(metadata.body.scopes_supported).toEqual(["openid", "email"]);
 
     const rejected = await request(app).post("/mcp").set("X-Request-Id", "mcp_auth_1").send({});
     expect(rejected.status).toBe(401);
     expect(rejected.headers["x-request-id"]).toBe("mcp_auth_1");
-    expect(rejected.headers["www-authenticate"]).toBe('Bearer resource_metadata="http://127.0.0.1:3000/.well-known/oauth-protected-resource"');
+    expect(rejected.headers["www-authenticate"]).toBe('Bearer resource_metadata="http://127.0.0.1:3000/.well-known/oauth-protected-resource" scope="openid email"');
     expect(rejected.body).toEqual({ error: "Access to this MCP resource is denied" });
 
     const accepted = await request(app).post("/mcp").set("authorization", `Bearer ${await token()}`).send({});

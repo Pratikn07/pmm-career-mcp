@@ -40,8 +40,8 @@ async function startIssuer(): Promise<IssuerFixture> {
       AUTH_MODE: "oauth",
       BASE_URL: "http://127.0.0.1:3000/",
       OIDC_ISSUER: issuer,
-      OIDC_AUDIENCE: "career-mcp",
-      ALLOWED_SUBJECT: "user-123",
+      OIDC_AUDIENCE: "http://127.0.0.1:3000",
+      ALLOWED_SUBJECT: "123e4567-e89b-12d3-a456-426614174000",
       TOKEN_ENCRYPTION_KEY: "a".repeat(64)
     }),
     server,
@@ -49,16 +49,16 @@ async function startIssuer(): Promise<IssuerFixture> {
     token: async (overrides = {}) => new SignJWT({})
       .setProtectedHeader({ alg: "RS256", kid: "test-key" })
       .setIssuer(issuer)
-      .setAudience(overrides.audience ?? "career-mcp")
-      .setSubject(overrides.subject ?? "user-123")
+      .setAudience(overrides.audience ?? "http://127.0.0.1:3000")
+      .setSubject(overrides.subject ?? "123e4567-e89b-12d3-a456-426614174000")
       .setIssuedAt()
       .setExpirationTime(overrides.expiresIn ?? "5m")
       .sign(privateKey),
     tokenWithoutExpiry: async () => new SignJWT({})
       .setProtectedHeader({ alg: "RS256", kid: "test-key" })
       .setIssuer(issuer)
-      .setAudience("career-mcp")
-      .setSubject("user-123")
+      .setAudience("http://127.0.0.1:3000")
+      .setSubject("123e4567-e89b-12d3-a456-426614174000")
       .setIssuedAt()
       .sign(privateKey)
   };
@@ -74,7 +74,7 @@ describe("protected resource authentication", () => {
     expect(protectedResourceMetadata(fixture.config)).toEqual({
       resource: "http://127.0.0.1:3000",
       authorization_servers: [fixture.issuer],
-      scopes_supported: ["mcp"],
+      scopes_supported: ["openid", "email"],
       resource_documentation: "http://127.0.0.1:3000/docs"
     });
   });
@@ -99,7 +99,7 @@ describe("protected resource authentication", () => {
       { label: "wrong audience", token: await fixture.token({ audience: "other" }), status: 401 },
       { label: "expired", token: await fixture.token({ expiresIn: "-1s" }), status: 401 },
       { label: "missing expiry", token: await fixture.tokenWithoutExpiry(), status: 401 },
-      { label: "wrong subject", token: await fixture.token({ subject: "someone-else" }), status: 403 }
+      { label: "wrong subject", token: await fixture.token({ subject: "someone-else" }), status: 401 }
     ] as const;
 
     for (const candidate of cases) {
@@ -108,7 +108,7 @@ describe("protected resource authentication", () => {
         .set(candidate.token === undefined ? {} : { authorization: `Bearer ${candidate.token}` });
       expect(response.status, candidate.label).toBe(candidate.status);
       expect(response.body, candidate.label).toEqual({ error: "Access to this MCP resource is denied" });
-      expect(response.text, candidate.label).not.toMatch(/user-123|someone-else|aud|claim|jwt|expired/i);
+      expect(response.text, candidate.label).not.toMatch(/123e4567|someone-else|aud|claim|jwt|expired/i);
     }
   });
 
@@ -117,7 +117,8 @@ describe("protected resource authentication", () => {
       ...fixture.config,
       nodeEnv: "production",
       baseUrl: "https://career.example",
-      oidcIssuer: "https://issuer.example"
+      oidcIssuer: "https://issuer.example",
+      oidcAudience: "https://career.example"
     };
     const fetchSpy = vi.fn().mockResolvedValue(new Response(JSON.stringify({
       issuer: "https://issuer.example",
