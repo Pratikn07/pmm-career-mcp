@@ -17,7 +17,7 @@ curl --fail http://127.0.0.1:3000/health
 
 The server applies its committed PostgreSQL migrations and verifies database readiness before opening its HTTP listener. For local development, `AUTH_MODE=none` is allowed only outside production and publishing stays off by default.
 
-The Docker health check calls `/health` because it is deliberately a process-liveness probe. Configure Railway deployment readiness verification to call `/ready`; it additionally checks the migrated database without exposing database errors or connection details.
+The Docker health check calls `/ready` so deployment health requires both the migrated process and database to be available. `/health` remains a public, database-independent liveness endpoint. `/ready` returns only a generic unavailable response when the database is not ready and never exposes database errors or connection details.
 
 ## Host and connect ChatGPT
 
@@ -46,7 +46,7 @@ Create a LinkedIn app for the account that will publish. Request the minimum ver
 https://your-host.example/linkedin/callback
 ```
 
-Set `LINKEDIN_CLIENT_ID`, `LINKEDIN_CLIENT_SECRET`, `LINKEDIN_REDIRECT_URI`, and a 64-character hexadecimal `TOKEN_ENCRYPTION_KEY` in the host's secret store. Restart the service, use `create_linkedin_authorization_url`, complete the browser authorization, then check `get_linkedin_connection_status`. Tokens are encrypted in SQLite and are never returned by MCP tools.
+Set `LINKEDIN_CLIENT_ID`, `LINKEDIN_CLIENT_SECRET`, `LINKEDIN_REDIRECT_URI`, and a 64-character hexadecimal `TOKEN_ENCRYPTION_KEY` in the host's secret store. Restart the service, use `create_linkedin_authorization_url`, complete the browser authorization, then check `get_linkedin_connection_status`. Tokens are encrypted in the managed PostgreSQL database and are never returned by MCP tools.
 
 ## Publishing safety
 
@@ -54,15 +54,9 @@ Set `LINKEDIN_CLIENT_ID`, `LINKEDIN_CLIENT_SECRET`, `LINKEDIN_REDIRECT_URI`, and
 
 Every post requires the exact immutable draft version, checksum, visibility, and a fresh one-use preview token. The server makes one LinkedIn create-post request only. It never batch-publishes or schedules posts. If LinkedIn times out, returns a 5xx/429, or returns an incomplete success response, the result is `publish_unknown`: do **not** retry. Check LinkedIn manually for the post first. If no post exists, create a new draft version, preview it again, and make a new explicit request.
 
-## Backups and credential rotation
+## Supabase operations and credential rotation
 
-Stop the service before copying a SQLite file, or use SQLite's online backup command so the WAL is captured consistently. Store encrypted backups separately from the encryption key:
-
-```bash
-sqlite3 data/career-mcp.sqlite ".backup 'backups/career-mcp-$(date +%F).sqlite'"
-```
-
-Test restores in an isolated directory by setting `DATABASE_PATH` to the restored file before relying on a backup. Backups contain encrypted LinkedIn tokens, but should still be treated as private career data.
+Use Supabase managed backups for the production database and keep `DATABASE_URL` only in the host's secret store. The container is stateless: do not copy database files from it or configure a volume for persistence. Backups contain encrypted LinkedIn tokens and should still be treated as private career data.
 
 For routine LinkedIn token rotation, revoke the old LinkedIn grant if required, remove the saved LinkedIn token through your controlled maintenance process, restart, and reconnect through `create_linkedin_authorization_url`. Keep the same encryption key for existing encrypted data. Encryption-key rotation requires a planned offline decrypt-and-reencrypt migration: back up first, run the migration in a trusted environment, verify a restore, then deploy the new key. Simply changing `TOKEN_ENCRYPTION_KEY` makes prior encrypted tokens unreadable.
 
@@ -71,7 +65,7 @@ For routine LinkedIn token rotation, revoke the old LinkedIn grant if required, 
 - Never paste client secrets, access tokens, refresh tokens, encryption keys, OAuth states, or `.env` contents into ChatGPT.
 - Research is limited to YC companies and allowed public company sources; people coverage is best-effort, never a complete directory.
 - YC company discovery uses an official server-rendered YC industry or location facet page selected from the query. Every MCP response includes a page-scoped coverage summary—even when no company matches—so an empty result is never presented as proof of complete YC-wide coverage.
-- The only external write is a text post through LinkedIn's official API. Drafting, previews, shortlists, targets, and notes stay private in the SQLite volume.
+- The only external write is a text post through LinkedIn's official API. Drafting, previews, shortlists, targets, and notes stay private in the managed database.
 - A failed or unknown publish attempt is not permission to retry automatically. Resolve it deliberately and create a fresh preview when needed.
 
 ## Acceptance evidence and handoff
@@ -80,7 +74,7 @@ The table maps the approved design to automated proof or an explicit operator ch
 
 | Approved criterion | Evidence |
 | --- | --- |
-| Private, single-user, hosted streaming-HTTP MCP with health, Docker, and persistent SQLite | `src/http/app.ts`, `src/index.ts`, `Dockerfile`, migration/repository tests, and `tests/e2e/career-flow.test.ts`. |
+| Private, single-user, hosted streaming-HTTP MCP with health, Docker, and managed PostgreSQL | `src/http/app.ts`, `src/index.ts`, `Dockerfile`, migration/repository tests, and `tests/e2e/career-flow.test.ts`. |
 | Production is OAuth-protected; local no-auth is development/test only | `tests/auth/resource-auth.test.ts`, `tests/auth/http-auth.test.ts`, and `tests/config.test.ts` prove issuer/audience/subject/expiry/JWKS checks, protected-resource metadata, and production fail-closed configuration. |
 | YC-only research, public-company sources, best-effort people coverage, citations, freshness, and transparent ranking | `tests/research/*.test.ts` and `tests/ranking/score-target.test.ts`; tool descriptions explicitly state authoritative-page-only/best-effort coverage. |
 | No LinkedIn scraping or unsafe public-page access | URL policy/fetch tests cover LinkedIn denial, SSRF/private-network/redirect/content bounds, and untrusted-content sanitization. |
@@ -94,4 +88,4 @@ The table maps the approved design to automated proof or an explicit operator ch
 | Safe error handling, source-change visibility, bounded retries, backups, rotation, and deployment guidance | Research/publish/auth tests plus the backup, rotation, and ambiguous-publish runbooks above. A changed YC page returns a safe error rather than invented results. |
 | Clean verification | On 2026-07-17: `npm test` (347 tests), `npm run typecheck`, `npm run build`, and two consecutive coverage runs passed. The production-only dependency audit is clean; the development dependency audit has four non-production moderate advisories. |
 | Live source and temporary HTTPS smoke | On 2026-07-17, a no-auth development server with publishing disabled was reached through a temporary HTTPS tunnel. MCP initialization listed 18 tools; draft and preview completed without credentials or a publish call. The initial YC source-change response led to a parser update; subsequent direct live checks returned 50 companies from YC's official recruiting page and 34 marketing matches. No ChatGPT connector/app was created. |
-| Production OAuth, ChatGPT connector, LinkedIn authorization, and any real post | **Manual, user-controlled handoff:** deploy to an HTTPS host with a persistent volume; configure the production OAuth values and keep `LINKEDIN_PUBLISH_ENABLED=false`; create the ChatGPT Developer Mode connector yourself; then connect LinkedIn privately. Enable the kill switch only when ready, and make any real post only through a newly previewed draft and an explicit current-conversation request. |
+| Production OAuth, ChatGPT connector, LinkedIn authorization, and any real post | **Manual, user-controlled handoff:** deploy to an HTTPS host with Supabase-managed PostgreSQL; configure the production OAuth values and keep `LINKEDIN_PUBLISH_ENABLED=false`; create the ChatGPT Developer Mode connector yourself; then connect LinkedIn privately. Enable the kill switch only when ready, and make any real post only through a newly previewed draft and an explicit current-conversation request. |
