@@ -23,3 +23,12 @@ The initial focused test run failed at TypeScript build because the new smoke an
 ## Live-operation status and concerns
 
 No live Supabase project, dashboard, credentials, migration application, or OAuth token was used. The smoke command was not invoked. Before any live use, set the confirmation gate deliberately and verify that the target is the intended Supabase database. Enable the prepared hook in the Supabase dashboard only if a real OAuth token proves that the native resource indicator does not already produce the exact Railway audience.
+
+## Security-review follow-up
+
+- Replaced delete-based marker cleanup with an adapter-owned transaction that always rolls back, including after a failed write or read assertion. A separate, fresh pinned connection then confirms the marker count is zero.
+- Restricted `DATABASE_URL` to a credential-free PostgreSQL URL for `db.<project-ref>.supabase.co` or an official `*.pooler.supabase.com` hostname. It rejects arbitrary hosts, URL userinfo, query strings, fragments, local/private forms, and non-public DNS answers. The command resolves once, validates every answer, pins the selected IP for both connections, and retains the original hostname only for TLS certificate verification.
+- The live path requires `CONFIRM_LIVE_SUPABASE_SMOKE=yes` before DNS lookup or connection construction. Error output remains a fixed safe summary.
+- Added faked resolver/operation tests for the confirmation gate, hostname rejection, private IPv4/IPv6/mapped-address results, rollback after read/write failures, independent fresh-marker verification, and independent connection closure.
+
+Follow-up verification: focused Task 7 tests passed (3 files / 33 tests); the complete suite passed (33 files / 460 tests); type checking, production build, and `git diff --check` passed. No live smoke command was run.

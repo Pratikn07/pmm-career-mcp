@@ -1,7 +1,12 @@
 import { randomUUID } from "node:crypto";
+import { lookup as dnsLookup } from "node:dns/promises";
+import { existsSync } from "node:fs";
+import { isIP } from "node:net";
+import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { drizzle } from "drizzle-orm/postgres-js";
+import { migrate } from "drizzle-orm/postgres-js/migrator";
 import postgres from "postgres";
-import { createDatabase } from "../src/db/client.js";
 
 const REQUIRED_TABLES = [
   "settings", "companies", "people", "evidence", "targets", "target_notes",
@@ -9,165 +14,291 @@ const REQUIRED_TABLES = [
   "publish_attempts", "oauth_tokens"
 ] as const;
 
-export type SupabaseSmokeOperations = {
+export type SupabaseSmokeTransaction = {
   verifySchema(): Promise<void>;
   insertCompany(marker: string): Promise<string>;
   insertPerson(companyId: string, marker: string): Promise<string>;
   verifyRead(marker: string): Promise<boolean>;
-  cleanupMarker(marker: string): Promise<void>;
-  countMarker(marker: string): Promise<number>;
-  close(): Promise<void>;
+};
+
+export type SupabaseSmokeOperations = {
+  runRollbackTransaction(operation: (transaction: SupabaseSmokeTransaction) => Promise<void>): Promise<void>;
+  verifyMarkerAbsent(marker: string): Promise<boolean>;
+  closeTransactionConnection(): Promise<void>;
+  closeVerificationConnection(): Promise<void>;
+};
+
+export type DnsRecord = { address: string; family: number };
+export type DnsResolver = (hostname: string) => Promise<DnsRecord[]>;
+export type PinnedSupabaseDatabaseTarget = { databaseUrl: string; tlsServerName: string };
+
+export type LiveSupabaseSmokeDependencies = {
+  lookup?: DnsResolver;
+  createOperations?: (target: PinnedSupabaseDatabaseTarget) => Promise<SupabaseSmokeOperations>;
 };
 
 function smokeFailure(): Error {
   return new Error("Supabase smoke verification failed");
 }
 
-/** Rejects development and loopback targets before a live smoke operation starts. */
-export function validateLiveSupabaseDatabaseUrl(databaseUrl: string): string {
-  let parsed: URL;
+function invalidLiveTarget(): Error {
+  return new Error("DATABASE_URL must be a live Supabase PostgreSQL URL");
+}
+
+function hostnameFromDatabaseUrl(databaseUrl: string): string {
   try {
-    parsed = new URL(databaseUrl);
-  } catch {
-    throw new Error("DATABASE_URL must be a live Supabase PostgreSQL URL");
+    const parsed = new URL(databaseUrl);
+    const hostname = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+    const allowedSupabaseHost = /^db\.[a-z0-9-]+\.supabase\.co$/.test(hostname)
+      || /^[a-z0-9-]+\.pooler\.supabase\.com$/.test(hostname);
+    if (
+      (parsed.protocol !== "postgres:" && parsed.protocol !== "postgresql:")
+      || parsed.username !== ""
+      || parsed.password !== ""
+      || parsed.search !== ""
+      || parsed.hash !== ""
+      || !allowedSupabaseHost
+    ) {
+      throw invalidLiveTarget();
+    }
+    return hostname;
+  } catch (error) {
+    if (error instanceof Error && error.message === "DATABASE_URL must be a live Supabase PostgreSQL URL") {
+      throw error;
+    }
+    throw invalidLiveTarget();
   }
-  const hostname = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
-  const ipv4 = hostname.split(".").map((part) => Number(part));
-  const isIpv4 = ipv4.length === 4 && ipv4.every((part) => Number.isInteger(part) && part >= 0 && part <= 255);
-  const [firstOctet = -1, secondOctet = -1] = ipv4;
-  const isPrivateIpv4 = isIpv4 && (
-    firstOctet === 0
-    || firstOctet === 10
-    || firstOctet === 127
-    || (firstOctet === 169 && secondOctet === 254)
-    || (firstOctet === 172 && secondOctet >= 16 && secondOctet <= 31)
-    || (firstOctet === 192 && secondOctet === 168)
-  );
-  const isLoopback = hostname === "localhost"
-    || hostname === "::1"
-    || hostname.startsWith("::ffff:127.")
-    || hostname === "::"
-    || hostname.startsWith("fc")
-    || hostname.startsWith("fd")
-    || hostname.startsWith("fe80:")
-    || hostname.endsWith(".local")
-    || isPrivateIpv4;
-  if (
-    (parsed.protocol !== "postgres:" && parsed.protocol !== "postgresql:")
-    || hostname.length === 0
-    || isLoopback
-  ) {
-    throw new Error("DATABASE_URL must be a live Supabase PostgreSQL URL");
-  }
+}
+
+/** Only accepts a canonical Supabase host before any DNS lookup or connection attempt. */
+export function validateLiveSupabaseDatabaseUrl(databaseUrl: string): string {
+  hostnameFromDatabaseUrl(databaseUrl);
   return databaseUrl;
 }
 
+function ipv4Octets(address: string): number[] | undefined {
+  const parts = address.split(".");
+  if (parts.length !== 4) return undefined;
+  const octets = parts.map((part) => Number(part));
+  return octets.every((part) => Number.isInteger(part) && part >= 0 && part <= 255) ? octets : undefined;
+}
+
+function isPublicIpv4(address: string): boolean {
+  const octets = ipv4Octets(address);
+  if (octets === undefined) return false;
+  const [first, second] = octets;
+  if (first === undefined || second === undefined) return false;
+  return !(
+    first === 0
+    || first === 10
+    || first === 100 && second >= 64 && second <= 127
+    || first === 127
+    || first === 169 && second === 254
+    || first === 172 && second >= 16 && second <= 31
+    || first === 192 && (second === 0 || second === 168)
+    || first === 198 && (second === 18 || second === 19 || second === 51)
+    || first === 203
+    || first >= 224
+  );
+}
+
+function ipv6Bytes(address: string): number[] | undefined {
+  const normalized = address.toLowerCase();
+  const halves = normalized.split("::");
+  if (halves.length > 2) return undefined;
+  const expand = (value: string): string[] | undefined => {
+    if (value.length === 0) return [];
+    const parts = value.split(":");
+    const embedded = parts.at(-1);
+    if (embedded !== undefined && embedded.includes(".")) {
+      const octets = ipv4Octets(embedded);
+      if (octets === undefined) return undefined;
+      parts.splice(-1, 1, ((octets[0]! << 8) | octets[1]!).toString(16), ((octets[2]! << 8) | octets[3]!).toString(16));
+    }
+    return parts.every((part) => /^[0-9a-f]{1,4}$/.test(part)) ? parts : undefined;
+  };
+  const left = expand(halves[0] ?? "");
+  const right = expand(halves[1] ?? "");
+  if (left === undefined || right === undefined) return undefined;
+  const missing = 8 - left.length - right.length;
+  if ((halves.length === 1 && missing !== 0) || missing < 0) return undefined;
+  const groups = [...left, ...Array<string>(missing).fill("0"), ...right];
+  if (groups.length !== 8) return undefined;
+  return groups.flatMap((group) => {
+    const value = Number.parseInt(group, 16);
+    return [value >> 8, value & 0xff];
+  });
+}
+
+function isPublicIpv6(address: string): boolean {
+  const bytes = ipv6Bytes(address);
+  if (bytes === undefined) return false;
+  const mappedIpv4 = bytes.slice(0, 12).every((byte, index) => byte === (index === 10 || index === 11 ? 0xff : 0));
+  if (mappedIpv4) return isPublicIpv4(bytes.slice(12).join("."));
+  const [first, second, third, fourth] = bytes;
+  if (first === undefined || second === undefined || third === undefined || fourth === undefined) return false;
+  return !(
+    first === 0
+    || first === 0xff
+    || (first & 0xfe) === 0xfc
+    || (first === 0xfe && (second & 0xc0) === 0x80)
+    || (first === 0x20 && second === 0x01 && third === 0x0d && fourth === 0xb8)
+  );
+}
+
+function isPublicIp(address: string): boolean {
+  const family = isIP(address);
+  return family === 4 ? isPublicIpv4(address) : family === 6 ? isPublicIpv6(address) : false;
+}
+
+const defaultLookup: DnsResolver = async (hostname) => dnsLookup(hostname, { all: true, verbatim: true });
+
+/** Resolves once, rejects all non-public answers, and pins subsequent connections to the chosen IP. */
+export async function resolveAndPinLiveSupabaseDatabaseUrl(
+  databaseUrl: string,
+  lookup: DnsResolver = defaultLookup
+): Promise<PinnedSupabaseDatabaseTarget> {
+  const hostname = hostnameFromDatabaseUrl(databaseUrl);
+  const records = await lookup(hostname).catch(() => { throw invalidLiveTarget(); });
+  if (records.length === 0 || !records.every((record) => record.family === isIP(record.address) && isPublicIp(record.address))) {
+    throw invalidLiveTarget();
+  }
+  const address = records[0]?.address;
+  if (address === undefined) throw invalidLiveTarget();
+  const pinned = new URL(databaseUrl);
+  pinned.hostname = address;
+  return { databaseUrl: pinned.toString(), tlsServerName: hostname };
+}
+
 /**
- * Runs the mutation portion of a smoke test. Every path attempts cleanup and
- * then checks for the marker before closing the connection.
+ * Runs marker writes inside an adapter-owned transaction that is always
+ * rolled back. A separate connection then verifies that the marker is absent.
  */
 export async function runSupabaseSmoke(operations: SupabaseSmokeOperations, marker: string): Promise<void> {
   let failed = false;
   try {
-    await operations.verifySchema();
-    const companyId = await operations.insertCompany(marker);
-    await operations.insertPerson(companyId, marker);
-    if (!await operations.verifyRead(marker)) throw smokeFailure();
+    await operations.runRollbackTransaction(async (transaction) => {
+      await transaction.verifySchema();
+      const companyId = await transaction.insertCompany(marker);
+      await transaction.insertPerson(companyId, marker);
+      if (!await transaction.verifyRead(marker)) throw smokeFailure();
+    });
   } catch {
     failed = true;
   }
 
   try {
-    await operations.cleanupMarker(marker);
-    if (await operations.countMarker(marker) !== 0) failed = true;
+    if (!await operations.verifyMarkerAbsent(marker)) failed = true;
   } catch {
     failed = true;
   }
 
-  try {
-    await operations.close();
-  } catch {
-    failed = true;
-  }
-
+  const closes = await Promise.allSettled([
+    operations.closeTransactionConnection(),
+    operations.closeVerificationConnection()
+  ]);
+  if (closes.some((result) => result.status === "rejected")) failed = true;
   if (failed) throw smokeFailure();
 }
 
-async function createLiveOperations(databaseUrl: string): Promise<SupabaseSmokeOperations> {
-  // This uses the application's migration runner before opening the one-off
-  // smoke connection, so committed migrations are applied/verified first.
-  const applicationDatabase = await createDatabase(databaseUrl, { requireTls: true });
-  try {
-    await applicationDatabase.checkReady();
-  } finally {
-    await applicationDatabase.close();
+function findMigrationsFolder(): string {
+  let directory = dirname(fileURLToPath(import.meta.url));
+  while (true) {
+    const migrationsFolder = resolve(directory, "drizzle");
+    if (existsSync(resolve(directory, "package.json")) && existsSync(resolve(migrationsFolder, "meta", "_journal.json"))) {
+      return migrationsFolder;
+    }
+    const parent = dirname(directory);
+    if (parent === directory) throw smokeFailure();
+    directory = parent;
   }
+}
 
-  const client = postgres(databaseUrl, { max: 1, ssl: "require" });
+function securePostgres(target: PinnedSupabaseDatabaseTarget) {
+  return postgres(target.databaseUrl, {
+    max: 1,
+    ssl: { rejectUnauthorized: true, servername: target.tlsServerName }
+  });
+}
+
+async function createLiveOperations(target: PinnedSupabaseDatabaseTarget): Promise<SupabaseSmokeOperations> {
+  const transactionClient = securePostgres(target);
+  try {
+    await migrate(drizzle(transactionClient), { migrationsFolder: findMigrationsFolder() });
+    await transactionClient`select 1`;
+  } catch {
+    await transactionClient.end({ timeout: 5 }).catch(() => undefined);
+    throw smokeFailure();
+  }
+  const verificationClient = securePostgres(target);
   const markerYcId = (marker: string) => `mcp-supabase-smoke-${marker}`;
 
   return {
-    verifySchema: async () => {
-      const rows = await client<{ table_name: string }[]>`
-        select table_name
-        from information_schema.tables
-        where table_schema = 'career_mcp'
-      `;
-      const available = new Set(rows.map((row) => row.table_name));
-      if (!REQUIRED_TABLES.every((table) => available.has(table))) throw smokeFailure();
+    runRollbackTransaction: async (operation) => {
+      const expectedRollback = new Error("rollback smoke marker");
+      try {
+        await transactionClient.begin(async (transaction) => {
+          await operation({
+            verifySchema: async () => {
+              const rows = await transaction<{ table_name: string }[]>`
+                select table_name from information_schema.tables where table_schema = 'career_mcp'
+              `;
+              const available = new Set(rows.map((row) => row.table_name));
+              if (!REQUIRED_TABLES.every((table) => available.has(table))) throw expectedRollback;
+            },
+            insertCompany: async (marker) => {
+              const id = randomUUID();
+              await transaction`
+                insert into career_mcp.companies (id, yc_id, name, created_at, updated_at)
+                values (${id}, ${markerYcId(marker)}, ${"MCP Supabase smoke marker"}, now(), now())
+              `;
+              return id;
+            },
+            insertPerson: async (companyId, marker) => {
+              const id = randomUUID();
+              await transaction`
+                insert into career_mcp.people (id, company_id, name, role, created_at, updated_at)
+                values (${id}, ${companyId}, ${`MCP smoke ${marker}`}, ${"verification"}, now(), now())
+              `;
+              return id;
+            },
+            verifyRead: async (marker) => {
+              const rows = await transaction<{ found: boolean }[]>`
+                select exists(
+                  select 1 from career_mcp.people person
+                  join career_mcp.companies company on company.id = person.company_id
+                  where company.yc_id = ${markerYcId(marker)} and person.name = ${`MCP smoke ${marker}`}
+                ) as found
+              `;
+              return rows[0]?.found === true;
+            }
+          });
+          throw expectedRollback;
+        });
+      } catch (error) {
+        if (error === expectedRollback) return;
+        throw smokeFailure();
+      }
     },
-    insertCompany: async (marker) => {
-      const id = randomUUID();
-      const ycId = markerYcId(marker);
-      await client`
-        insert into career_mcp.companies (id, yc_id, name, created_at, updated_at)
-        values (${id}, ${ycId}, ${"MCP Supabase smoke marker"}, now(), now())
+    verifyMarkerAbsent: async (marker) => {
+      const rows = await verificationClient<{ count: string }[]>`
+        select count(*)::text as count from career_mcp.companies where yc_id = ${markerYcId(marker)}
       `;
-      return id;
+      return Number(rows[0]?.count ?? "0") === 0;
     },
-    insertPerson: async (companyId, marker) => {
-      const id = randomUUID();
-      await client`
-        insert into career_mcp.people (id, company_id, name, role, created_at, updated_at)
-        values (${id}, ${companyId}, ${`MCP smoke ${marker}`}, ${"verification"}, now(), now())
-      `;
-      return id;
+    closeTransactionConnection: async () => {
+      await transactionClient.end({ timeout: 5 });
     },
-    verifyRead: async (marker) => {
-      const rows = await client<{ found: boolean }[]>`
-        select exists(
-          select 1
-          from career_mcp.people person
-          join career_mcp.companies company on company.id = person.company_id
-          where company.yc_id = ${markerYcId(marker)}
-            and person.name = ${`MCP smoke ${marker}`}
-        ) as found
-      `;
-      return rows[0]?.found === true;
-    },
-    cleanupMarker: async (marker) => {
-      const ycId = markerYcId(marker);
-      await client`
-        delete from career_mcp.people
-        where company_id in (select id from career_mcp.companies where yc_id = ${ycId})
-      `;
-      await client`delete from career_mcp.companies where yc_id = ${ycId}`;
-    },
-    countMarker: async (marker) => {
-      const rows = await client<{ count: string }[]>`
-        select count(*)::text as count
-        from career_mcp.companies
-        where yc_id = ${markerYcId(marker)}
-      `;
-      return Number(rows[0]?.count ?? "0");
-    },
-    close: async () => {
-      await client.end({ timeout: 5 });
+    closeVerificationConnection: async () => {
+      await verificationClient.end({ timeout: 5 });
     }
   };
 }
 
-export async function runLiveSupabaseSmoke(env: NodeJS.ProcessEnv): Promise<void> {
+export async function runLiveSupabaseSmoke(
+  env: NodeJS.ProcessEnv,
+  dependencies: LiveSupabaseSmokeDependencies = {}
+): Promise<void> {
   if (env.CONFIRM_LIVE_SUPABASE_SMOKE !== "yes") {
     throw new Error("Live Supabase smoke requires CONFIRM_LIVE_SUPABASE_SMOKE=yes");
   }
@@ -175,14 +306,15 @@ export async function runLiveSupabaseSmoke(env: NodeJS.ProcessEnv): Promise<void
   if (databaseUrl === undefined || databaseUrl.length === 0) {
     throw new Error("DATABASE_URL is required for the live Supabase smoke");
   }
-  const operations = await createLiveOperations(validateLiveSupabaseDatabaseUrl(databaseUrl));
+  const target = await resolveAndPinLiveSupabaseDatabaseUrl(databaseUrl, dependencies.lookup ?? defaultLookup);
+  const operations = await (dependencies.createOperations ?? createLiveOperations)(target);
   await runSupabaseSmoke(operations, randomUUID());
 }
 
 async function main(): Promise<void> {
   try {
     await runLiveSupabaseSmoke(process.env);
-    process.stdout.write("Supabase smoke verification passed; cleanup confirmed.\n");
+    process.stdout.write("Supabase smoke verification passed; transaction rollback confirmed.\n");
   } catch {
     process.stderr.write("Supabase smoke verification failed.\n");
     process.exitCode = 1;
