@@ -1,7 +1,15 @@
+import { lookup as dnsLookup } from "node:dns/promises";
+import { isIP } from "node:net";
 import { load } from "cheerio";
 import type { CareerDatabase } from "../db/client.js";
+import {
+  DiscoveryDeadlineError,
+  withDiscoveryDeadline,
+  type DiscoveryAdapterOptions
+} from "./discovery-deadline.js";
 import { fetchPublicPage, type FetchedPage } from "./fetch-page.js";
 import { SourceTimestampError, validateSourceTimestamp } from "./source-validation.js";
+import { assertFetchableUrl } from "./url-policy.js";
 import type {
   CareerPreferences,
   DiscoveryBudgets,
@@ -23,12 +31,14 @@ const JOB_CARD_SELECTOR = [
   "li.job-posting",
   "li.opening-card"
 ].join(", ");
+const STATIC_POLICY_ADDRESS = "2606:4700:4700::1111";
 
 type JobRepositories = Pick<CareerDatabase, "companies">;
 
 export type JobDiscoveryDependencies = {
   repositories: JobRepositories;
-  fetchPage?: (url: string) => Promise<FetchedPage>;
+  fetchPage?: (url: string, options: DiscoveryAdapterOptions) => Promise<FetchedPage>;
+  resolveAddresses?: (hostname: string, options: DiscoveryAdapterOptions) => Promise<string[]>;
   now?: () => Date;
   elapsedNow?: () => number;
   budgets?: Partial<Pick<
@@ -89,6 +99,15 @@ function invalidJobWarning(sourceUrl: string, field: keyof typeof FIELD_LIMITS):
   };
 }
 
+function invalidCitationWarning(sourceUrl: string, message: string): SourceWarning {
+  return { code: "invalid-data", sourceUrl, message };
+}
+
+async function defaultResolveAddresses(hostname: string): Promise<string[]> {
+  const results = await dnsLookup(hostname, { all: true, verbatim: true });
+  return results.map(({ address }) => address);
+}
+
 function normalizedHttpUrl(value: string, baseUrl?: string): string | undefined {
   try {
     const url = baseUrl === undefined ? new URL(value) : new URL(value, baseUrl);
@@ -140,12 +159,13 @@ function matchesLocation(location: string | undefined, preferences: CareerPrefer
   return includesAny(location ?? null, preferences.preferredLocations);
 }
 
-function parseJobs(
+async function parseJobs(
   page: FetchedPage,
   companyId: string,
   preferences: CareerPreferences,
-  now: Date
-): ParsedJobsPage {
+  now: Date,
+  resolveAddresses: (hostname: string) => Promise<string[]>
+): Promise<ParsedJobsPage> {
   const freshness = validateSourceTimestamp(page.checkedAt, now, "Official careers source");
   const checkedAt = freshness.checkedAt;
   const $ = load(page.html);
@@ -191,11 +211,36 @@ function parseJobs(
     }
     if (
       sourceUrl === undefined
-      || isLinkedInUrl(sourceUrl)
       || !matchesRole(title, preferences)
       || !matchesLocation(location === "" ? undefined : location, preferences)
     ) {
       continue;
+    }
+    const citationUrl = new URL(sourceUrl);
+    try {
+      assertFetchableUrl(citationUrl, [STATIC_POLICY_ADDRESS]);
+    } catch {
+      warnings.push(invalidCitationWarning(
+        page.url,
+        "Skipped official job record because its citation URL is not a public fetchable location"
+      ));
+      continue;
+    }
+    const pageOrigin = new URL(page.url).origin;
+    const citationHostname = citationUrl.hostname.replace(/^\[|\]$/g, "");
+    if (citationUrl.origin !== pageOrigin && isIP(citationHostname) === 0) {
+      try {
+        assertFetchableUrl(citationUrl, await resolveAddresses(citationHostname));
+      } catch (error) {
+        if (error instanceof DiscoveryDeadlineError) {
+          throw error;
+        }
+        warnings.push(invalidCitationWarning(
+          page.url,
+          "Skipped official job record because its ATS hostname does not resolve only to public addresses"
+        ));
+        continue;
+      }
     }
     const jobId = normalizedText($(card).attr("data-job-id") ?? "");
     if (jobId !== "" && !withinFieldLimit(jobId, FIELD_LIMITS.jobId)) {
@@ -276,7 +321,11 @@ function resultWithMetadata(
 }
 
 export function createJobDiscovery(dependencies: JobDiscoveryDependencies): JobDiscoveryService {
-  const fetchPage = dependencies.fetchPage ?? fetchPublicPage;
+  const fetchPage = dependencies.fetchPage ?? (async (
+    url: string,
+    options: DiscoveryAdapterOptions
+  ) => await fetchPublicPage(url, { signal: options.signal, timeoutMs: options.timeoutMs }));
+  const resolveAddresses = dependencies.resolveAddresses ?? defaultResolveAddresses;
   const now = dependencies.now ?? (() => new Date());
   const elapsedNow = dependencies.elapsedNow ?? (() => performance.now());
   const budgets = { ...DEFAULT_DISCOVERY_BUDGETS, ...dependencies.budgets };
@@ -323,10 +372,7 @@ export function createJobDiscovery(dependencies: JobDiscoveryDependencies): JobD
       let totalRequests = 0;
       let elapsedBudgetReported = false;
       let requestBudgetReported = false;
-      const addElapsedWarning = (): boolean => {
-        if (elapsedNow() - startedAt <= budgets.maxElapsedMsPerCompany) {
-          return true;
-        }
+      const reportElapsedWarning = (): void => {
         if (!elapsedBudgetReported) {
           warnings.push({
             code: "budget-exhausted",
@@ -335,7 +381,33 @@ export function createJobDiscovery(dependencies: JobDiscoveryDependencies): JobD
           });
           elapsedBudgetReported = true;
         }
+      };
+      const remainingMs = (): number => {
+        return budgets.maxElapsedMsPerCompany - (elapsedNow() - startedAt);
+      };
+      const addElapsedWarning = (): boolean => {
+        if (remainingMs() > 0) {
+          return true;
+        }
+        reportElapsedWarning();
         return false;
+      };
+      const runWithinDeadline = async <T>(
+        operation: (options: DiscoveryAdapterOptions) => Promise<T>
+      ): Promise<T> => {
+        try {
+          return await withDiscoveryDeadline(remainingMs(), operation);
+        } catch (error) {
+          if (error instanceof DiscoveryDeadlineError) {
+            reportElapsedWarning();
+          }
+          throw error;
+        }
+      };
+      const resolveCitationAddresses = async (hostname: string): Promise<string[]> => {
+        return await runWithinDeadline(async (options) => {
+          return await resolveAddresses(hostname, options);
+        });
       };
       const beginRequest = (): boolean => {
         if (!addElapsedWarning()) {
@@ -361,8 +433,14 @@ export function createJobDiscovery(dependencies: JobDiscoveryDependencies): JobD
         if (!beginRequest()) {
           continue;
         }
-        homePage = await fetchPage(websiteUrl);
-        const parsedHome = parseJobs(homePage, companyId, preferences, now());
+        homePage = await runWithinDeadline(async (options) => await fetchPage(websiteUrl, options));
+        const parsedHome = await parseJobs(
+          homePage,
+          companyId,
+          preferences,
+          now(),
+          resolveCitationAddresses
+        );
         checkedTimes.push(homePage.checkedAt);
         warnings.push(...parsedHome.warnings);
         for (const job of parsedHome.jobs) {
@@ -379,7 +457,9 @@ export function createJobDiscovery(dependencies: JobDiscoveryDependencies): JobD
           continue;
         }
       } catch (error) {
-        warnings.push(sourceWarning(websiteUrl, error));
+        if (!(error instanceof DiscoveryDeadlineError)) {
+          warnings.push(sourceWarning(websiteUrl, error));
+        }
         continue;
       }
 
@@ -403,9 +483,15 @@ export function createJobDiscovery(dependencies: JobDiscoveryDependencies): JobD
           break;
         }
         try {
-          const page = await fetchPage(url);
+          const page = await runWithinDeadline(async (options) => await fetchPage(url, options));
           fetchedUrls.add(page.url);
-          const parsedPage = parseJobs(page, companyId, preferences, now());
+          const parsedPage = await parseJobs(
+            page,
+            companyId,
+            preferences,
+            now(),
+            resolveCitationAddresses
+          );
           checkedTimes.push(page.checkedAt);
           warnings.push(...parsedPage.warnings);
           for (const job of parsedPage.jobs) {
@@ -425,7 +511,9 @@ export function createJobDiscovery(dependencies: JobDiscoveryDependencies): JobD
             break;
           }
         } catch (error) {
-          warnings.push(sourceWarning(url, error));
+          if (!(error instanceof DiscoveryDeadlineError)) {
+            warnings.push(sourceWarning(url, error));
+          }
         }
       }
     }

@@ -121,6 +121,34 @@ it("allowlists structural HTML and strips unsafe resources, attributes, and nest
   );
 });
 
+it("drops non-public structural links and exposes LinkedIn only as a non-fetching profile reference", async () => {
+  nock("https://acme.example")
+    .get("/public-link-policy")
+    .reply(200, `
+      <main>
+        <a href="http://127.0.0.1/admin">Loopback</a>
+        <a href="http://10.1.2.3/jobs">Private network</a>
+        <a href="http://169.254.169.254/latest/meta-data">Link local</a>
+        <a href="http://localhost/internal">Localhost</a>
+        <a href="https://user:password@jobs.example/opening">Credentials</a>
+        <a href="https://jobs.public.example/opening">Public ATS</a>
+        <a href="https://www.linkedin.com/in/ada-example">LinkedIn profile</a>
+      </main>
+    `, { "Content-Type": "text/html" });
+
+  const result = await fetchPublicPage("https://acme.example/public-link-policy", {
+    resolveAddresses: publicDns
+  });
+
+  expect(result.html).toContain('href="https://jobs.public.example/opening"');
+  expect(result.html).toContain(
+    'data-non-fetching-profile-url="https://www.linkedin.com/in/ada-example"'
+  );
+  expect(result.html).not.toMatch(
+    /127\.0\.0\.1|10\.1\.2\.3|169\.254\.169\.254|href="http:\/\/localhost|user:password|href="https:\/\/www\.linkedin\.com/i
+  );
+});
+
 it("removes instruction-like text even when it contains nested markup", async () => {
   nock("https://acme.example")
     .get("/nested-injection")

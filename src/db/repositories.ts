@@ -70,6 +70,7 @@ export type EvidenceAddInput = {
 
 export type CompanyPersonDiscoveryRefreshInput = {
   companyId: string;
+  replaceMissingDiscovery?: boolean;
   people: Array<{
     name: string;
     role: string;
@@ -263,6 +264,7 @@ export function createRepositories(database: Database) {
             }
           }
           const refreshed: PersonWithEvidence[] = [];
+          const refreshedPersonIds = new Set<string>();
           for (const personInput of input.people) {
             const name = personInput.name.replace(/\s+/g, " ").trim();
             const role = personInput.role.replace(/\s+/g, " ").trim();
@@ -289,6 +291,7 @@ export function createRepositories(database: Database) {
                   updatedAt: now
                 }).where(eq(people.id, existing.id)).returning().get()!;
             existingByIdentity.set(identity, person);
+            refreshedPersonIds.add(person.id);
 
             const priorDiscoveryEvidence = transaction.select().from(evidence).where(and(
               eq(evidence.personId, person.id),
@@ -333,6 +336,22 @@ export function createRepositories(database: Database) {
               transaction.delete(evidence).where(eq(evidence.id, staleEvidenceId)).run();
             }
             refreshed.push({ ...person, evidence: refreshedEvidence });
+          }
+          if (input.replaceMissingDiscovery === true) {
+            for (const existingPerson of existingPeople) {
+              if (refreshedPersonIds.has(existingPerson.id)) {
+                continue;
+              }
+              transaction.delete(evidence).where(and(
+                eq(evidence.personId, existingPerson.id),
+                eq(evidence.factType, "public_role")
+              )).run();
+              transaction.update(people).set({
+                publicProfileUrl: null,
+                checkedAt: null,
+                updatedAt: nowIso()
+              }).where(eq(people.id, existingPerson.id)).run();
+            }
           }
           return refreshed;
         });

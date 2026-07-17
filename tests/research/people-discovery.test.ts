@@ -183,6 +183,34 @@ describe("public people discovery", () => {
     expect(result.warnings).toEqual([]);
   });
 
+  it("retains a sanitized non-fetching LinkedIn profile reference without requesting it", async () => {
+    const company = database.companies.upsert({
+      ycId: "non-fetching-profile-reference",
+      name: "Non-fetching Profile Reference",
+      websiteUrl: TEAM_URL
+    });
+    const requestedUrls: string[] = [];
+    const result = await createPeopleDiscovery({
+      repositories: database,
+      fetchPage: async (url) => {
+        requestedUrls.push(url);
+        return fetchedPage(url, `
+          <article class="team-member">
+            <h2>Ada Reference</h2><p>Founder</p>
+            <a data-non-fetching-profile-url="https://www.linkedin.com/in/ada-reference">
+              LinkedIn
+            </a>
+          </article>
+        `, "Team");
+      }
+    }).discoverPublicPeople(company.id);
+
+    expect(result.people[0]?.publicProfileUrl).toBe(
+      "https://www.linkedin.com/in/ada-reference"
+    );
+    expect(requestedUrls).toEqual([TEAM_URL]);
+  });
+
   it("returns a source-changed partial warning for an unrecognized discovered team page", async () => {
     const company = database.companies.upsert({
       ycId: "changed-people-layout",
@@ -226,7 +254,10 @@ describe("public people discovery", () => {
     const provider = new DisabledSearchProvider();
 
     expect(provider.coverage).toBe("authoritative-pages-only");
-    await expect(provider.search("site:acme.example team", 10)).resolves.toEqual([]);
+    await expect(provider.search("site:acme.example team", 10, {
+      signal: AbortSignal.timeout(20),
+      timeoutMs: 20
+    })).resolves.toEqual([]);
   });
 
   it("starts with the official site and does not retain LinkedIn links from search-extended pages", async () => {
@@ -407,6 +438,85 @@ describe("public people discovery", () => {
     });
   });
 
+  it("returns at the company deadline when an injected fetch adapter ignores cancellation", async () => {
+    const company = database.companies.upsert({
+      ycId: "hard-fetch-deadline-people",
+      name: "Hard Fetch Deadline People",
+      websiteUrl: TEAM_URL
+    });
+    let adapterCompleted = false;
+    let receivedSignal: AbortSignal | undefined;
+    let adapterSettled!: () => void;
+    const settled = new Promise<void>((resolve) => {
+      adapterSettled = resolve;
+    });
+    const result = await createPeopleDiscovery({
+      repositories: database,
+      budgets: { maxElapsedMsPerCompany: 20 },
+      fetchPage: async (url, options?: { signal: AbortSignal; timeoutMs: number }) => {
+        receivedSignal = options?.signal;
+        await new Promise((resolve) => setTimeout(resolve, 80));
+        adapterCompleted = true;
+        adapterSettled();
+        return fetchedPage(url, `
+          <article class="team-member"><h2>Too Late</h2><p>Founder</p></article>
+        `, "Team");
+      }
+    }).discoverPublicPeople(company.id);
+    expect(adapterCompleted).toBe(false);
+    expect(receivedSignal?.aborted).toBe(true);
+    expect(result.people).toEqual([]);
+    expect(result.warnings).toContainEqual({
+      code: "budget-exhausted",
+      sourceUrl: TEAM_URL,
+      message: "People discovery elapsed-time budget of 20ms was exhausted"
+    });
+    await settled;
+  });
+
+  it("returns at the company deadline when a search adapter ignores cancellation", async () => {
+    const company = database.companies.upsert({
+      ycId: "hard-search-deadline-people",
+      name: "Hard Search Deadline People",
+      websiteUrl: HOME_URL
+    });
+    let adapterCompleted = false;
+    let receivedSignal: AbortSignal | undefined;
+    let adapterSettled!: () => void;
+    const settled = new Promise<void>((resolve) => {
+      adapterSettled = resolve;
+    });
+    const searchProvider = {
+      coverage: "search-extended" as const,
+      search: async (
+        _query: string,
+        _limit: number,
+        options?: { signal: AbortSignal; timeoutMs: number }
+      ) => {
+        receivedSignal = options?.signal;
+        await new Promise((resolve) => setTimeout(resolve, 80));
+        adapterCompleted = true;
+        adapterSettled();
+        return [];
+      }
+    };
+    const result = await createPeopleDiscovery({
+      repositories: database,
+      searchProvider,
+      budgets: { maxElapsedMsPerCompany: 20 },
+      fetchPage: async (url) => fetchedPage(url, "<main>Company</main>", "Company")
+    }).discoverPublicPeople(company.id);
+    expect(adapterCompleted).toBe(false);
+    expect(receivedSignal?.aborted).toBe(true);
+    expect(result.people).toEqual([]);
+    expect(result.warnings).toContainEqual({
+      code: "budget-exhausted",
+      sourceUrl: HOME_URL,
+      message: "People discovery elapsed-time budget of 20ms was exhausted"
+    });
+    await settled;
+  });
+
   it("skips oversized names, roles, facts, and profile URLs before database writes", async () => {
     const company = database.companies.upsert({
       ycId: "bounded-person-fields",
@@ -565,6 +675,81 @@ describe("public people discovery", () => {
     expect(second.people[0]?.id).toBe(first.people[0]?.id);
     expect(second.people[0]?.evidence[0]?.id).toBe(first.people[0]?.evidence[0]?.id);
     expect(persisted?.evidence).toHaveLength(1);
+  });
+
+  it("clears current discovery state for a person absent from the next complete authoritative snapshot", async () => {
+    const company = database.companies.upsert({
+      ycId: "authoritative-person-disappearance",
+      name: "Authoritative Person Disappearance",
+      websiteUrl: TEAM_URL
+    });
+    let html = `
+      <article class="team-member">
+        <h2>Ada Former</h2><p>Founder</p>
+        <a href="https://www.linkedin.com/in/ada-former">LinkedIn</a>
+      </article>
+    `;
+    const service = createPeopleDiscovery({
+      repositories: database,
+      fetchPage: async () => fetchedPage(TEAM_URL, html, "Team")
+    });
+    const first = await service.discoverPublicPeople(company.id);
+    const adaId = first.people[0]!.id;
+    html = `
+      <article class="team-member"><h2>Bob Current</h2><p>Founder</p></article>
+    `;
+
+    const second = await service.discoverPublicPeople(company.id);
+    const persistedAda = database.people.getWithEvidence(adaId);
+
+    expect(second.people.map(({ name }) => name)).toEqual(["Bob Current"]);
+    expect(persistedAda).toMatchObject({
+      id: adaId,
+      publicProfileUrl: null,
+      checkedAt: null,
+      evidence: []
+    });
+  });
+
+  it("preserves prior discovery state when an authoritative refresh is only partially successful", async () => {
+    const company = database.companies.upsert({
+      ycId: "partial-authoritative-preservation",
+      name: "Partial Authoritative Preservation",
+      websiteUrl: HOME_URL
+    });
+    let phase = 1;
+    const service = createPeopleDiscovery({
+      repositories: database,
+      fetchPage: async (url) => {
+        if (url === HOME_URL) {
+          return fetchedPage(url, phase === 1
+            ? '<a href="/team">Team</a>'
+            : '<a href="/team">Team</a><a href="/leadership">Leadership</a>', "Company");
+        }
+        if (url === "https://acme.example/leadership") {
+          throw new Error("leadership source failed");
+        }
+        return fetchedPage(url, phase === 1
+          ? '<article class="team-member"><h2>Ada Preserved</h2><p>Founder</p></article>'
+          : '<article class="team-member"><h2>Bob Partial</h2><p>CEO</p></article>', "Team");
+      }
+    });
+    const first = await service.discoverPublicPeople(company.id);
+    const adaId = first.people[0]!.id;
+    phase = 2;
+
+    const second = await service.discoverPublicPeople(company.id);
+    const persistedAda = database.people.getWithEvidence(adaId);
+
+    expect(second.people.map(({ name }) => name)).toEqual(["Bob Partial"]);
+    expect(second.warnings).toContainEqual({
+      sourceUrl: "https://acme.example/leadership",
+      message: "leadership source failed"
+    });
+    expect(persistedAda?.evidence.map(({ fact }) => fact)).toEqual([
+      "Ada Preserved — Founder"
+    ]);
+    expect(persistedAda?.checkedAt).toBe(CHECKED_AT);
   });
 
   it("normalizes persistent identity across case and whitespace drift and clears a removed profile link", async () => {

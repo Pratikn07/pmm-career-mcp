@@ -168,20 +168,40 @@ describe("YC company provider", () => {
     }]);
   });
 
-  it("skips oversized YC names and URLs with explicit invalid-data warnings", async () => {
+  it("fails loudly when every recognizable YC card is invalid", async () => {
+    const provider = createYcProvider(await fixtureSource({
+      html: `
+        <title>Y Combinator Companies</title>
+        <main data-yc-company-directory>
+          <article data-yc-company-id="invalid-company">
+            <a class="company-name" href="/companies/invalid-company">${"N".repeat(161)}</a>
+          </article>
+        </main>
+      `
+    }));
+
+    await expect(provider.search({})).rejects.toBeInstanceOf(SourceChangedError);
+    await expect(provider.search({})).rejects.toThrow(
+      /YC directory contains 1 invalid recognizable company card/i
+    );
+  });
+
+  it("fails loudly when a recognizable YC directory mixes valid and invalid cards", async () => {
     const fixture = await readFile(fixturePath, "utf8");
-    const html = fixture
-      .replace(">Acme AI</a>", `>${"N".repeat(161)}</a>`)
-      .replace("https://beacon.example/", `https://beacon.example/${"u".repeat(2_100)}`);
+    const html = fixture.replace(">Acme AI</a>", `>${"N".repeat(161)}</a>`);
     const provider = createYcProvider(await fixtureSource({ html }));
 
-    const results = await provider.search({});
+    await expect(provider.search({})).rejects.toBeInstanceOf(SourceChangedError);
+    await expect(provider.search({})).rejects.toThrow(
+      /YC directory contains 1 invalid recognizable company card/i
+    );
+  });
 
-    expect(results.map(({ name }) => name)).toEqual(["Orbit Health"]);
-    expect(results[0]?.warnings.filter(({ code }) => code === "invalid-data")).toHaveLength(2);
-    expect(results[0]?.warnings.map(({ message }) => message)).toEqual(expect.arrayContaining([
-      expect.stringMatching(/company name exceeds/i),
-      expect.stringMatching(/company website URL exceeds/i)
-    ]));
+  it("returns a legitimate filtered zero when every recognizable YC card is valid", async () => {
+    const provider = createYcProvider(await fixtureSource());
+
+    const results = await provider.search({ keyword: "no-company-matches-this" });
+
+    expect(results).toEqual([]);
   });
 });

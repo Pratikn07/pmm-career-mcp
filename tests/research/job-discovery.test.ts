@@ -10,6 +10,7 @@ const fixturePath = fileURLToPath(new URL("../fixtures/company-careers.html", im
 const CHECKED_AT = "2026-07-16T14:00:00.000Z";
 const HOME_URL = "https://acme.example/";
 const CAREERS_URL = "https://acme.example/careers";
+const publicDns = async () => ["93.184.216.34"];
 
 function fetchedPage(url: string, html: string, title: string): FetchedPage {
   return {
@@ -69,6 +70,7 @@ describe("PMM opportunity discovery", () => {
 
     const opportunities = await createJobDiscovery({
       repositories: database,
+      resolveAddresses: publicDns,
       fetchPage
     }).findPmmOpportunities([company.id], preferences);
 
@@ -104,6 +106,7 @@ describe("PMM opportunity discovery", () => {
     const careersHtml = await readFile(fixturePath, "utf8");
     const service = createJobDiscovery({
       repositories: database,
+      resolveAddresses: publicDns,
       fetchPage: async () => fetchedPage(CAREERS_URL, careersHtml, "Careers | Acme AI")
     });
 
@@ -155,6 +158,44 @@ describe("PMM opportunity discovery", () => {
 
     expect(result.opportunities.map(({ title }) => title)).toEqual(["Product Marketing Manager"]);
     expect(result.warnings).toEqual([]);
+  });
+
+  it("rejects non-public job citations and DNS-to-private ATS hosts while retaining a public ATS", async () => {
+    const company = database.companies.upsert({
+      ycId: "public-job-citations",
+      name: "Public Job Citations",
+      websiteUrl: CAREERS_URL,
+      industry: "AI"
+    });
+    const resolvedHosts: string[] = [];
+    const result = await createJobDiscovery({
+      repositories: database,
+      resolveAddresses: async (hostname: string) => {
+        resolvedHosts.push(hostname);
+        return hostname === "private-ats.example" ? ["10.0.0.8"] : ["93.184.216.34"];
+      },
+      fetchPage: async (url) => fetchedPage(url, `
+        <article class="job-card"><h2>Product Marketing Loopback</h2><a href="http://127.0.0.1/job">View</a></article>
+        <article class="job-card"><h2>Product Marketing Private</h2><a href="http://10.2.3.4/job">View</a></article>
+        <article class="job-card"><h2>Product Marketing Link Local</h2><a href="http://169.254.169.254/job">View</a></article>
+        <article class="job-card"><h2>Product Marketing Localhost</h2><a href="http://localhost/job">View</a></article>
+        <article class="job-card"><h2>Product Marketing Credentials</h2><a href="https://user:password@jobs.example/job">View</a></article>
+        <article class="job-card"><h2>Product Marketing Private DNS</h2><a href="https://private-ats.example/job">View</a></article>
+        <article class="job-card"><h2>Product Marketing Public ATS</h2><a href="https://public-ats.example/job">View</a></article>
+        <article class="job-card"><h2>Product Marketing LinkedIn</h2><a href="https://www.linkedin.com/jobs/1">View</a></article>
+      `, "Careers")
+    }).findPmmOpportunities([company.id], {
+      roleKeywords: ["product marketing"],
+      preferredLocations: [],
+      industries: ["AI"]
+    });
+
+    expect(result.opportunities.map(({ title, sourceUrl }) => ({ title, sourceUrl }))).toEqual([{
+      title: "Product Marketing Public ATS",
+      sourceUrl: "https://public-ats.example/job"
+    }]);
+    expect(resolvedHosts.sort()).toEqual(["private-ats.example", "public-ats.example"]);
+    expect(result.warnings.filter(({ code }) => code === "invalid-data")).toHaveLength(7);
   });
 
   it("returns a source-changed partial warning for an unrecognized discovered careers page", async () => {
@@ -433,6 +474,47 @@ describe("PMM opportunity discovery", () => {
       sourceUrl: CAREERS_URL,
       message: "Careers discovery elapsed-time budget of 1000ms was exhausted"
     });
+  });
+
+  it("returns at the company deadline when an injected careers fetch ignores cancellation", async () => {
+    const company = database.companies.upsert({
+      ycId: "hard-fetch-deadline-jobs",
+      name: "Hard Fetch Deadline Jobs",
+      websiteUrl: CAREERS_URL,
+      industry: "AI"
+    });
+    let adapterCompleted = false;
+    let receivedSignal: AbortSignal | undefined;
+    let adapterSettled!: () => void;
+    const settled = new Promise<void>((resolve) => {
+      adapterSettled = resolve;
+    });
+    const result = await createJobDiscovery({
+      repositories: database,
+      budgets: { maxElapsedMsPerCompany: 20 },
+      fetchPage: async (url, options?: { signal: AbortSignal; timeoutMs: number }) => {
+        receivedSignal = options?.signal;
+        await new Promise((resolve) => setTimeout(resolve, 80));
+        adapterCompleted = true;
+        adapterSettled();
+        return fetchedPage(url, `
+          <article class="job-card"><h2>Product Marketing Too Late</h2><a href="/job">View</a></article>
+        `, "Careers");
+      }
+    }).findPmmOpportunities([company.id], {
+      roleKeywords: ["product marketing"],
+      preferredLocations: [],
+      industries: ["AI"]
+    });
+    expect(adapterCompleted).toBe(false);
+    expect(receivedSignal?.aborted).toBe(true);
+    expect(result.opportunities).toEqual([]);
+    expect(result.warnings).toContainEqual({
+      code: "budget-exhausted",
+      sourceUrl: CAREERS_URL,
+      message: "Careers discovery elapsed-time budget of 20ms was exhausted"
+    });
+    await settled;
   });
 
   it("rejects an oversized official careers candidate URL before fetching", async () => {

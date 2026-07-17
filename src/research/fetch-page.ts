@@ -7,10 +7,15 @@ import { pipeline } from "node:stream/promises";
 import { setTimeout as wait } from "node:timers/promises";
 import { createBrotliDecompress, createGunzip, createInflate } from "node:zlib";
 import { load } from "cheerio";
+import {
+  asNonFetchingLinkedInProfileUrl,
+  type NonFetchingLinkedInProfileUrl
+} from "./non-fetching-profile-url.js";
 import { assertFetchableUrl } from "./url-policy.js";
 
 export type FetchPageOptions = {
   resolveAddresses?: (hostname: string) => Promise<string[]>;
+  signal?: AbortSignal;
   maxBytes?: number;
   maxRedirects?: number;
   timeoutMs?: number;
@@ -731,20 +736,29 @@ function removeAdjacentInstructionBlocks($: ReturnType<typeof load>): void {
   $(Array.from(blocksToRemove)).remove();
 }
 
-function normalizedStructuralHref(value: string, baseUrl: URL): string | undefined {
+type StructuralHref =
+  | { kind: "fetchable"; url: string }
+  | { kind: "non-fetching-profile"; url: NonFetchingLinkedInProfileUrl };
+
+function normalizedStructuralHref(value: string, baseUrl: URL): StructuralHref | undefined {
   if (value.length > MAX_STRUCTURAL_HREF_CHARS) {
     return undefined;
   }
   try {
     const url = new URL(value, baseUrl);
-    if (
-      (url.protocol !== "http:" && url.protocol !== "https:")
-      || url.username !== ""
-      || url.password !== ""
-    ) {
-      return undefined;
+    try {
+      assertFetchableUrl(url, [URL_POLICY_PREFLIGHT_ADDRESS]);
+      return { kind: "fetchable", url: url.href };
+    } catch {
+      try {
+        return {
+          kind: "non-fetching-profile",
+          url: asNonFetchingLinkedInProfileUrl(url.href)
+        };
+      } catch {
+        return undefined;
+      }
     }
-    return url.href;
   } catch {
     return undefined;
   }
@@ -784,7 +798,9 @@ function sanitizeStructuralHtml($: ReturnType<typeof load>, baseUrl: URL): void 
       if (tagName === "a" && name === "href") {
         const href = normalizedStructuralHref(rawValue.trim(), baseUrl);
         if (href !== undefined) {
-          retainedAttributes.push(["href", href]);
+          retainedAttributes.push(href.kind === "fetchable"
+            ? ["href", href.url]
+            : ["data-non-fetching-profile-url", href.url]);
         }
         continue;
       }
@@ -992,7 +1008,10 @@ export async function fetchPublicPage(
     throw new Error("maxConcurrencyPerHost must be a positive integer");
   }
 
-  const signal = AbortSignal.timeout(timeoutMs);
+  const timeoutSignal = AbortSignal.timeout(timeoutMs);
+  const signal = options.signal === undefined
+    ? timeoutSignal
+    : AbortSignal.any([options.signal, timeoutSignal]);
   let currentUrl = url;
   let redirectCount = 0;
   let retryCount = 0;

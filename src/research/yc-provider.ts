@@ -240,10 +240,15 @@ function parseCompanies(page: YcSourcePage, now: Date): CompanyResult[] {
     }
     results.push(normalizeCompany(raw));
   }
-  return results.map((company) => ({
-    ...company,
-    warnings: [...company.warnings, ...invalidWarnings]
-  }));
+  if (invalidWarnings.length > 0) {
+    const label = invalidWarnings.length === 1 ? "card" : "cards";
+    throw new SourceChangedError(
+      `YC directory contains ${invalidWarnings.length} invalid recognizable company ${label}: ${
+        invalidWarnings.map(({ message }) => message).join("; ")
+      }`
+    );
+  }
+  return results;
 }
 
 function includesNormalized(value: string | undefined, query: string): boolean {

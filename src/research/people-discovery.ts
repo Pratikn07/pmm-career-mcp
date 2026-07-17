@@ -1,9 +1,18 @@
 import { load } from "cheerio";
 import type { CareerDatabase } from "../db/client.js";
+import {
+  DiscoveryDeadlineError,
+  withDiscoveryDeadline,
+  type DiscoveryAdapterOptions
+} from "./discovery-deadline.js";
 import type { FetchedPage } from "./fetch-page.js";
 import { fetchPublicPage } from "./fetch-page.js";
 import { DisabledSearchProvider, type SearchProvider } from "./search-provider.js";
 import { SourceTimestampError, validateSourceTimestamp } from "./source-validation.js";
+import {
+  asNonFetchingLinkedInProfileUrl,
+  type NonFetchingLinkedInProfileUrl
+} from "./non-fetching-profile-url.js";
 import type {
   DiscoveryResult,
   DiscoveryBudgets,
@@ -18,7 +27,7 @@ type PeopleRepositories = Pick<CareerDatabase, "companies" | "people" | "evidenc
 
 export type PeopleDiscoveryDependencies = {
   repositories: PeopleRepositories;
-  fetchPage?: (url: string) => Promise<FetchedPage>;
+  fetchPage?: (url: string, options: DiscoveryAdapterOptions) => Promise<FetchedPage>;
   searchProvider?: SearchProvider;
   now?: () => Date;
   elapsedNow?: () => number;
@@ -45,7 +54,7 @@ type DiscoveredPerson = {
   checkedAt: string;
   confidence: number;
   fact: string;
-  publicProfileUrl?: string;
+  publicProfileUrl?: NonFetchingLinkedInProfileUrl;
 };
 
 type ParsedPeoplePage = {
@@ -109,12 +118,16 @@ function explicitLinkedInUrl(
   $: ReturnType<typeof load>,
   card: Parameters<ReturnType<typeof load>>[0],
   pageUrl: string
-): string | undefined {
-  for (const anchor of $(card).find("a[href]").toArray()) {
-    const href = $(anchor).attr("href");
+): NonFetchingLinkedInProfileUrl | undefined {
+  for (const anchor of $(card).find("a[href], a[data-non-fetching-profile-url]").toArray()) {
+    const href = $(anchor).attr("data-non-fetching-profile-url") ?? $(anchor).attr("href");
     const normalized = href === undefined ? undefined : normalizedHttpUrl(href, pageUrl);
     if (normalized !== undefined && isLinkedInUrl(normalized)) {
-      return normalized;
+      try {
+        return asNonFetchingLinkedInProfileUrl(normalized);
+      } catch {
+        continue;
+      }
     }
   }
   return undefined;
@@ -273,7 +286,10 @@ function evidenceFor(person: DiscoveredPerson, id: string): Evidence {
 export function createPeopleDiscovery(
   dependencies: PeopleDiscoveryDependencies
 ): PeopleDiscoveryService {
-  const fetchPage = dependencies.fetchPage ?? fetchPublicPage;
+  const fetchPage = dependencies.fetchPage ?? (async (
+    url: string,
+    options: DiscoveryAdapterOptions
+  ) => await fetchPublicPage(url, { signal: options.signal, timeoutMs: options.timeoutMs }));
   const searchProvider = dependencies.searchProvider ?? new DisabledSearchProvider();
   const now = dependencies.now ?? (() => new Date());
   const elapsedNow = dependencies.elapsedNow ?? (() => performance.now());
@@ -302,13 +318,13 @@ export function createPeopleDiscovery(
     const checkedTimes: string[] = [];
     const fetchedUrls = new Set<string>();
     const startedAt = elapsedNow();
+    let refreshCoverageComplete = true;
+    let authoritativeRecognized = false;
     let totalRequests = 0;
     let elapsedBudgetReported = false;
     let requestBudgetReported = false;
-    const addElapsedWarning = (): boolean => {
-      if (elapsedNow() - startedAt <= budgets.maxElapsedMsPerCompany) {
-        return true;
-      }
+    const reportElapsedWarning = (): void => {
+      refreshCoverageComplete = false;
       if (!elapsedBudgetReported) {
         warnings.push({
           code: "budget-exhausted",
@@ -317,13 +333,35 @@ export function createPeopleDiscovery(
         });
         elapsedBudgetReported = true;
       }
+    };
+    const remainingMs = (): number => {
+      return budgets.maxElapsedMsPerCompany - (elapsedNow() - startedAt);
+    };
+    const addElapsedWarning = (): boolean => {
+      if (remainingMs() > 0) {
+        return true;
+      }
+      reportElapsedWarning();
       return false;
+    };
+    const runWithinDeadline = async <T>(
+      operation: (options: DiscoveryAdapterOptions) => Promise<T>
+    ): Promise<T> => {
+      try {
+        return await withDiscoveryDeadline(remainingMs(), operation);
+      } catch (error) {
+        if (error instanceof DiscoveryDeadlineError) {
+          reportElapsedWarning();
+        }
+        throw error;
+      }
     };
     const beginRequest = (): boolean => {
       if (!addElapsedWarning()) {
         return false;
       }
       if (totalRequests >= budgets.maxTotalRequestsPerCompany) {
+        refreshCoverageComplete = false;
         if (!requestBudgetReported) {
           warnings.push({
             code: "budget-exhausted",
@@ -349,9 +387,13 @@ export function createPeopleDiscovery(
           warnings
         };
       }
-      homePage = await fetchPage(websiteUrl);
+      homePage = await runWithinDeadline(async (options) => await fetchPage(websiteUrl, options));
       fetchedUrls.add(homePage.url);
       const parsedHome = parsePeople(homePage, companyId, 0.95, true, now());
+      authoritativeRecognized ||= parsedHome.recognized;
+      if (parsedHome.warnings.some(({ code }) => code === "invalid-data")) {
+        refreshCoverageComplete = false;
+      }
       checkedTimes.push(homePage.checkedAt);
       discovered.push(...parsedHome.people);
       warnings.push(...parsedHome.warnings);
@@ -359,6 +401,7 @@ export function createPeopleDiscovery(
         OFFICIAL_PAGE_PATTERN.test(new URL(homePage.url).pathname)
         && !parsedHome.recognized
       ) {
+        refreshCoverageComplete = false;
         warnings.push({
           code: "source-changed",
           sourceUrl: homePage.url,
@@ -367,16 +410,23 @@ export function createPeopleDiscovery(
       }
       traversalWithinTime = addElapsedWarning();
     } catch (error) {
-      warnings.push(warning(websiteUrl, error));
+      refreshCoverageComplete = false;
+      if (!(error instanceof DiscoveryDeadlineError)) {
+        warnings.push(warning(websiteUrl, error));
+      }
     }
 
     const officialCandidates = homePage === undefined || !traversalWithinTime
       ? { urls: [], warnings: [] }
       : officialPageUrls(homePage);
     warnings.push(...officialCandidates.warnings);
+    if (officialCandidates.warnings.length > 0) {
+      refreshCoverageComplete = false;
+    }
     const allOfficialUrls = officialCandidates.urls;
     const officialUrls = allOfficialUrls.slice(0, budgets.maxOfficialPagesPerCompany);
     if (allOfficialUrls.length > officialUrls.length) {
+      refreshCoverageComplete = false;
       warnings.push({
         code: "budget-exhausted",
         sourceUrl: websiteUrl,
@@ -388,16 +438,22 @@ export function createPeopleDiscovery(
         continue;
       }
       if (!beginRequest()) {
+        refreshCoverageComplete = false;
         break;
       }
       try {
-        const page = await fetchPage(url);
+        const page = await runWithinDeadline(async (options) => await fetchPage(url, options));
         fetchedUrls.add(page.url);
         const parsedPage = parsePeople(page, companyId, 0.95, true, now());
+        authoritativeRecognized ||= parsedPage.recognized;
+        if (parsedPage.warnings.some(({ code }) => code === "invalid-data")) {
+          refreshCoverageComplete = false;
+        }
         checkedTimes.push(page.checkedAt);
         discovered.push(...parsedPage.people);
         warnings.push(...parsedPage.warnings);
         if (!parsedPage.recognized) {
+          refreshCoverageComplete = false;
           warnings.push({
             code: "source-changed",
             sourceUrl: page.url,
@@ -408,22 +464,28 @@ export function createPeopleDiscovery(
           break;
         }
       } catch (error) {
-        warnings.push(warning(url, error));
+        refreshCoverageComplete = false;
+        if (!(error instanceof DiscoveryDeadlineError)) {
+          warnings.push(warning(url, error));
+        }
       }
     }
 
     if (searchProvider.coverage === "search-extended" && addElapsedWarning()) {
       try {
         if (!beginRequest()) {
+          refreshCoverageComplete = false;
           throw new Error("People discovery search skipped because its request budget was exhausted");
         }
-        const results = await searchProvider.search(
+        const results = await runWithinDeadline(async (options) => await searchProvider.search(
           `${company.name} team leadership`,
-          budgets.maxSearchResultsPerCompany
-        );
+          budgets.maxSearchResultsPerCompany,
+          options
+        ));
         const searchWithinTime = addElapsedWarning();
         const boundedResults = results.slice(0, budgets.maxSearchResultsPerCompany);
         if (results.length > boundedResults.length) {
+          refreshCoverageComplete = false;
           warnings.push({
             code: "budget-exhausted",
             sourceUrl: websiteUrl,
@@ -432,6 +494,7 @@ export function createPeopleDiscovery(
         }
         const freshResults = boundedResults.filter((result) => {
           if (result.checkedAt === undefined) {
+            refreshCoverageComplete = false;
             warnings.push({
               code: "invalid-data",
               sourceUrl: result.url.slice(0, FIELD_LIMITS.url.characters),
@@ -440,6 +503,7 @@ export function createPeopleDiscovery(
             return false;
           }
           if (!withinFieldLimit(result.url, FIELD_LIMITS.url)) {
+            refreshCoverageComplete = false;
             warnings.push({
               code: "invalid-data",
               sourceUrl: result.url.slice(0, FIELD_LIMITS.url.characters),
@@ -448,6 +512,7 @@ export function createPeopleDiscovery(
             return false;
           }
           if (!withinFieldLimit(result.title, FIELD_LIMITS.title)) {
+            refreshCoverageComplete = false;
             warnings.push({
               code: "invalid-data",
               sourceUrl: result.url,
@@ -466,6 +531,7 @@ export function createPeopleDiscovery(
             }
             return true;
           } catch (error) {
+            refreshCoverageComplete = false;
             warnings.push(warning(result.url, error));
             return false;
           }
@@ -480,16 +546,18 @@ export function createPeopleDiscovery(
             continue;
           }
           if (!beginRequest()) {
+            refreshCoverageComplete = false;
             break;
           }
           try {
-            const page = await fetchPage(url);
+            const page = await runWithinDeadline(async (options) => await fetchPage(url, options));
             fetchedUrls.add(page.url);
             const parsedPage = parsePeople(page, companyId, 0.75, false, now());
             checkedTimes.push(page.checkedAt);
             discovered.push(...parsedPage.people);
             warnings.push(...parsedPage.warnings);
             if (!parsedPage.recognized) {
+              refreshCoverageComplete = false;
               warnings.push({
                 code: "source-changed",
                 sourceUrl: page.url,
@@ -500,11 +568,17 @@ export function createPeopleDiscovery(
               break;
             }
           } catch (error) {
-            warnings.push(warning(url, error));
+            refreshCoverageComplete = false;
+            if (!(error instanceof DiscoveryDeadlineError)) {
+              warnings.push(warning(url, error));
+            }
           }
         }
       } catch (error) {
-        warnings.push(warning(websiteUrl, error));
+        refreshCoverageComplete = false;
+        if (!(error instanceof DiscoveryDeadlineError)) {
+          warnings.push(warning(websiteUrl, error));
+        }
       }
     }
 
@@ -526,6 +600,7 @@ export function createPeopleDiscovery(
     });
     const refreshedRows = dependencies.repositories.people.refreshDiscovery({
       companyId,
+      replaceMissingDiscovery: refreshCoverageComplete && authoritativeRecognized,
       people: sortedPeople.map((person) => ({
         name: person.name,
         role: person.role,
