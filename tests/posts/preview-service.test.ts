@@ -1,7 +1,7 @@
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
-import { createTestDatabase } from "../support/database.js";
+import { createTestDatabase, queryTestDatabase } from "../support/database.js";
 import { createDraftService } from "../../src/drafts/service.js";
 import { DomainError } from "../../src/domain/errors.js";
 import {
@@ -163,6 +163,70 @@ describe("post previews", () => {
       preview.previewToken
     ));
     expect(replay.message).toBe("Preview token has already been used");
+  });
+
+  it("allows exactly one concurrent preview consumer to claim the token", async () => {
+    const post = await drafts.createPost({ text: "Concurrent consume", visibility: "PUBLIC" });
+    const preview = await previews.create(post.id, post.version);
+
+    const outcomes = await Promise.allSettled([
+      previews.consume(preview.previewToken, expectedFor(preview)),
+      previews.consume(preview.previewToken, expectedFor(preview))
+    ]);
+
+    expect(outcomes.filter((outcome) => outcome.status === "fulfilled")).toHaveLength(1);
+    const rejected = outcomes.find((outcome) => outcome.status === "rejected");
+    expect(rejected).toMatchObject({ reason: { code: "PREVIEW_CONSUMED" } });
+    expect((await db.previews.listForPostDraft(post.versionId))[0]?.consumedAt).toBe(
+      "2026-07-16T12:00:00.000Z"
+    );
+  });
+
+  it("serializes preview creation with a concurrently added latest revision", async () => {
+    const first = await drafts.createPost({ text: "Preview or revise", visibility: "PUBLIC" });
+
+    const [previewOutcome, revisionOutcome] = await Promise.allSettled([
+      previews.create(first.id, first.version),
+      drafts.revisePost(first.id, "Concurrent revision")
+    ]);
+
+    expect(revisionOutcome).toMatchObject({ status: "fulfilled", value: { version: 2 } });
+    if (previewOutcome.status === "fulfilled") {
+      await expect(previews.consume(
+        previewOutcome.value.previewToken,
+        expectedFor(previewOutcome.value)
+      )).rejects.toMatchObject({ code: "PREVIEW_STALE" });
+    } else {
+      expect(previewOutcome.reason).toMatchObject({ code: "PREVIEW_STALE" });
+      expect(await db.previews.listForPostDraft(first.versionId)).toEqual([]);
+    }
+  });
+
+  it("rolls back preview consumption when the exact post-state claim fails", async () => {
+    const post = await drafts.createPost({ text: "Reject claim state", visibility: "PUBLIC" });
+    const preview = await previews.create(post.id, post.version);
+    await queryTestDatabase(db, `
+      alter table career_mcp.post_drafts
+      add constraint post_drafts_reject_publishing
+      check (state <> 'publishing')
+    `);
+
+    try {
+      await expect(previews.consumeForPublish(
+        preview.previewToken,
+        expectedFor(preview),
+        "2026-07-16T12:00:00.000Z"
+      )).rejects.toMatchObject({ code: "DATA_INTEGRITY" });
+
+      expect((await db.previews.listForPostDraft(post.versionId))[0]?.consumedAt).toBeNull();
+      expect(await db.postDrafts.getVersion(post.id, post.version)).toMatchObject({ state: "draft" });
+      expect(await db.publishAttempts.listForPostDraft(post.versionId)).toEqual([]);
+    } finally {
+      await queryTestDatabase(db, `
+        alter table career_mcp.post_drafts
+        drop constraint post_drafts_reject_publishing
+      `);
+    }
   });
 
   it("uses a 15-minute lifetime and treats the exact expiry instant as expired", async () => {

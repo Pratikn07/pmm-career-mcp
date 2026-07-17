@@ -32,6 +32,7 @@ export type PreviewExpected = {
 };
 
 export type PreviewPublishClaim = {
+  attemptId: string;
   postId: string;
   versionId: string;
   version: number;
@@ -269,23 +270,32 @@ export function createPreviewService(
 
     async consumeForPublish(
       tokenInput: string,
-      expectedInput: PreviewExpected
+      expectedInput: PreviewExpected,
+      requestedAt: string
     ): Promise<PreviewPublishClaim> {
       const tokenHash = hashPreviewToken(tokenInput);
       const expected = parseExpected(expectedInput);
       const consumedAt = canonicalNow(clock).toISOString();
       try {
-        const result = await database.previews.consumeExact({
+        const result = await database.publishAttempts.record({
+          postDraftId: expected.versionId,
+          version: expected.version,
+          requestedAt,
+          responseCategory: "pending"
+        }, {
           tokenHash,
           consumedAt,
           expected,
           allowedStates: PUBLISHABLE_STATES,
           claimState: "publishing"
         });
-        if (result.outcome !== "consumed") {
+        if (result.outcome !== "recorded") {
           throwConsumptionOutcome(result);
         }
-        return publicPublishClaim(result.post);
+        return {
+          ...publicPublishClaim(result.post),
+          attemptId: result.attempt.id
+        };
       } catch (error) {
         return mapPreviewPersistenceError(error);
       }
@@ -293,7 +303,7 @@ export function createPreviewService(
   };
 }
 
-function publicPublishClaim(post: PostDraft): PreviewPublishClaim {
+function publicPublishClaim(post: PostDraft): Omit<PreviewPublishClaim, "attemptId"> {
   if (!POST_VISIBILITIES.has(post.visibility)) {
     throw new DomainError("DATA_INTEGRITY", "Stored post visibility is invalid", {
       entity: "post_draft"

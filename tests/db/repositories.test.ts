@@ -1,8 +1,11 @@
+import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { postgresErrorKind } from "../../src/domain/errors.js";
+import { computePostChecksum } from "../../src/drafts/service.js";
+import { createRepositories } from "../../src/db/repositories.js";
 import {
   createTestDatabase,
   queryTestDatabase,
@@ -259,6 +262,76 @@ describe("database lifecycle", () => {
   });
 });
 
+describe("PostgreSQL transaction retries", () => {
+  function databaseThatRejectsTransactions(error: unknown) {
+    const transaction = vi.fn().mockRejectedValue(error);
+    const repositories = createRepositories({ transaction } as never);
+    return { repositories, transaction };
+  }
+
+  it.each(["40001", "40P01"])("bounds retries for SQLSTATE %s", async (code) => {
+    const error = Object.assign(new Error("retryable transaction"), { code });
+    const { repositories, transaction } = databaseThatRejectsTransactions(error);
+
+    await expect(repositories.postDrafts.createVersion({
+      draftId: randomUUID(),
+      text: "Retry me",
+      visibility: "PUBLIC",
+      checksum: "checksum",
+      state: "draft"
+    })).rejects.toBe(error);
+
+    expect(transaction).toHaveBeenCalledTimes(3);
+  });
+
+  it.each([
+    ["post_draft_version_unique", "postDrafts"] as const,
+    ["outreach_target_purpose_version_unique", "outreachDrafts"] as const
+  ])("retries only the named %s version conflict", async (constraintName, repositoryName) => {
+    const error = Object.assign(new Error("version conflict"), {
+      code: "23505",
+      constraint_name: constraintName
+    });
+    const { repositories, transaction } = databaseThatRejectsTransactions(error);
+
+    const operation = repositoryName === "postDrafts"
+      ? repositories.postDrafts.createVersion({
+          draftId: randomUUID(),
+          text: "Retry me",
+          visibility: "PUBLIC",
+          checksum: "checksum",
+          state: "draft"
+        })
+      : repositories.outreachDrafts.createVersion({
+          targetId: randomUUID(),
+          purpose: "connection_note",
+          text: "Retry me",
+          evidenceIds: []
+        });
+    await expect(operation).rejects.toBe(error);
+
+    expect(transaction).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not retry an unrelated unique violation", async () => {
+    const error = Object.assign(new Error("unrelated conflict"), {
+      code: "23505",
+      constraint_name: "settings_key_unique"
+    });
+    const { repositories, transaction } = databaseThatRejectsTransactions(error);
+
+    await expect(repositories.postDrafts.createVersion({
+      draftId: randomUUID(),
+      text: "Do not retry",
+      visibility: "PUBLIC",
+      checksum: "checksum",
+      state: "draft"
+    })).rejects.toBe(error);
+
+    expect(transaction).toHaveBeenCalledTimes(1);
+  });
+});
+
 it("stores structured settings", async () => {
   const structuredValue = {
     roleKeywords: ["product marketing"],
@@ -342,6 +415,44 @@ it("creates immutable outreach draft versions with evidence IDs", async () => {
   expect((await db.outreachDrafts.listForTarget(target.id))).toHaveLength(2);
 });
 
+it.each([0, 1])(
+  "allocates concurrent outreach versions contiguously from a sequence containing %i rows",
+  async (existingVersionCount) => {
+    const { target } = await addTarget(`Concurrent outreach ${existingVersionCount}`);
+    if (existingVersionCount === 1) {
+      await db.outreachDrafts.createVersion({
+        targetId: target.id,
+        purpose: "connection_note",
+        text: "Existing",
+        evidenceIds: []
+      });
+    }
+
+    const created = await Promise.all([
+      db.outreachDrafts.createVersion({
+        targetId: target.id,
+        purpose: "connection_note",
+        text: "Concurrent A",
+        evidenceIds: []
+      }),
+      db.outreachDrafts.createVersion({
+        targetId: target.id,
+        purpose: "connection_note",
+        text: "Concurrent B",
+        evidenceIds: []
+      })
+    ]);
+
+    expect(created.map((draft) => draft.version).sort((left, right) => left - right)).toEqual([
+      existingVersionCount + 1,
+      existingVersionCount + 2
+    ]);
+    expect((await db.outreachDrafts.listForTarget(target.id)).map((draft) => draft.version)).toEqual(
+      Array.from({ length: existingVersionCount + 2 }, (_, index) => index + 1)
+    );
+  }
+);
+
 it("preserves shortlist ordering", async () => {
   const first = (await addTarget("Ada One")).target;
   const second = (await addTarget("Ada Two")).target;
@@ -355,6 +466,17 @@ it("preserves shortlist ordering", async () => {
     first.id
   ]);
   expect((await db.shortlists.list())).toEqual([shortlist]);
+});
+
+it("rolls back a shortlist when a later target violates its foreign key", async () => {
+  const validTarget = (await addTarget("Valid shortlist target")).target;
+
+  await expect(db.shortlists.create({
+    name: "Must roll back",
+    targetIds: [validTarget.id, randomUUID()]
+  })).rejects.toBeDefined();
+
+  expect(await db.shortlists.list()).toEqual([]);
 });
 
 it("creates immutable post draft versions", async () => {
@@ -376,6 +498,82 @@ it("creates immutable post draft versions", async () => {
   expect((await db.postDrafts.getVersion(first.draftId, 1))?.text).toBe("First");
   expect((await db.postDrafts.getVersion(first.draftId, 2))?.text).toBe("Second");
   expect((await db.postDrafts.listVersions(first.draftId)).map((draft) => draft.version)).toEqual([1, 2]);
+});
+
+it.each([0, 1])(
+  "allocates concurrent post versions and checksums from a sequence containing %i rows",
+  async (existingVersionCount) => {
+    const draftId = randomUUID();
+    if (existingVersionCount === 1) {
+      await db.postDrafts.createVersion({
+        draftId,
+        text: "Existing",
+        visibility: "PUBLIC",
+        checksum: (version) => computePostChecksum("Existing", version),
+        state: "draft"
+      });
+    }
+
+    const created = await Promise.all(["Concurrent A", "Concurrent B"].map(async (text) => (
+      db.postDrafts.createVersion({
+        draftId,
+        text,
+        visibility: "PUBLIC",
+        checksum: (version) => computePostChecksum(text, version),
+        state: "draft"
+      })
+    )));
+
+    expect(created.map((post) => post.version).sort((left, right) => left - right)).toEqual([
+      existingVersionCount + 1,
+      existingVersionCount + 2
+    ]);
+    for (const post of created) {
+      expect(post.checksum).toBe(computePostChecksum(post.text, post.version));
+    }
+    expect((await db.postDrafts.listVersions(draftId)).map((post) => post.version)).toEqual(
+      Array.from({ length: existingVersionCount + 2 }, (_, index) => index + 1)
+    );
+  }
+);
+
+it("rolls back a discovery refresh when a later evidence row is invalid", async () => {
+  const company = await db.companies.upsert({
+    ycId: "rollback-discovery-w24",
+    name: "Rollback Discovery"
+  });
+
+  await expect(db.people.refreshDiscovery({
+    companyId: company.id,
+    people: [
+      {
+        name: "Valid first person",
+        role: "Founder",
+        checkedAt: "2026-07-16T00:00:00.000Z",
+        evidence: [{
+          sourceUrl: "https://example.com/valid",
+          factType: "public_role",
+          fact: "Founder",
+          checkedAt: "2026-07-16T00:00:00.000Z",
+          confidence: 0.9
+        }]
+      },
+      {
+        name: "Invalid later person",
+        role: "Founder",
+        checkedAt: "2026-07-16T00:00:00.000Z",
+        evidence: [{
+          sourceUrl: "https://example.com/invalid",
+          factType: "public_role",
+          fact: "Founder",
+          checkedAt: "invalid-timestamp",
+          confidence: 0.9
+        }]
+      }
+    ]
+  })).rejects.toThrow(/ISO timestamp/);
+
+  expect(await db.people.listByCompany(company.id)).toEqual([]);
 });
 
 it("consumes a preview at most once", async () => {
@@ -435,6 +633,52 @@ it("records publish attempts against an exact post version", async () => {
   }));
 
   expect((await db.publishAttempts.listForPostDraft(post.id))).toEqual([completed]);
+});
+
+it("rolls back a publish claim whose attempt names a different exact post version", async () => {
+  const claimedPost = await db.postDrafts.createVersion({
+    text: "Claim this post",
+    visibility: "PUBLIC",
+    checksum: "claimed-checksum",
+    state: "draft"
+  });
+  const differentPost = await db.postDrafts.createVersion({
+    text: "Do not attach the attempt here",
+    visibility: "PUBLIC",
+    checksum: "different-checksum",
+    state: "draft"
+  });
+  await db.previews.create({
+    postDraftId: claimedPost.id,
+    version: claimedPost.version,
+    tokenHash: "exact-attempt-claim",
+    expiresAt: "2026-07-16T00:15:00.000Z"
+  });
+
+  await expect(db.publishAttempts.record({
+    postDraftId: differentPost.id,
+    version: differentPost.version,
+    requestedAt: "2026-07-16T00:00:00.000Z",
+    responseCategory: "pending"
+  }, {
+    tokenHash: "exact-attempt-claim",
+    consumedAt: "2026-07-16T00:00:00.000Z",
+    expected: {
+      postId: claimedPost.draftId,
+      versionId: claimedPost.id,
+      version: claimedPost.version,
+      checksum: claimedPost.checksum,
+      visibility: claimedPost.visibility
+    },
+    allowedStates: ["draft"],
+    claimState: "publishing"
+  })).rejects.toThrow(/does not match preview claim/);
+
+  expect((await db.previews.getByTokenHash("exact-attempt-claim"))?.consumedAt).toBeNull();
+  expect(await db.postDrafts.getVersion(claimedPost.draftId, claimedPost.version)).toMatchObject({
+    state: "draft"
+  });
+  expect(await db.publishAttempts.listForPostDraft(differentPost.id)).toEqual([]);
 });
 
 it("rejects a publish-attempt version that does not match its post draft row", async () => {

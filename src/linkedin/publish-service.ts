@@ -171,21 +171,7 @@ export function createPublishService(database: CareerDatabase, dependencies: Pub
         version: input.version,
         checksum: input.checksum,
         visibility: input.visibility
-      });
-
-      let attemptId: string;
-      try {
-        attemptId = (await database.publishAttempts.record({
-          postDraftId: claim.versionId,
-          version: claim.version,
-          requestedAt: nowIso(clock),
-          responseCategory: "pending"
-        })).id;
-      } catch {
-        throw new DomainError("DATA_INTEGRITY", "Publish attempt could not be recorded", {
-          entity: "publish_attempt"
-        });
-      }
+      }, nowIso(clock));
 
       let completion: Completion;
       try {
@@ -198,7 +184,7 @@ export function createPublishService(database: CareerDatabase, dependencies: Pub
       }
 
       try {
-        const updatedAttempt = await database.publishAttempts.updateResult(attemptId, {
+        const updatedAttempt = await database.publishAttempts.updateResult(claim.attemptId, {
           responseCategory: completion.responseCategory,
           ...(completion.postUrn === undefined ? {} : { postUrn: completion.postUrn }),
           ...(completion.sanitizedError === undefined

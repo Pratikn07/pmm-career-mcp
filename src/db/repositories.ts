@@ -1,5 +1,5 @@
 import { randomUUID, timingSafeEqual } from "node:crypto";
-import { and, asc, desc, eq, isNull, max, sql } from "drizzle-orm";
+import { and, asc, desc, eq, isNull, sql } from "drizzle-orm";
 import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
 import {
   companies,
@@ -136,6 +136,76 @@ export type PreviewConsumptionResult =
         | "race";
     };
 
+export type PreviewConsumptionInput = {
+  tokenHash: string;
+  consumedAt: string;
+  expected: PreviewExpectedRow;
+  allowedStates: readonly string[];
+  claimState?: string;
+};
+
+export type PublishAttemptRecordInput = Omit<typeof publishAttempts.$inferInsert, "id">;
+
+export type PublishClaimRecordResult =
+  | {
+      outcome: "recorded";
+      post: PostDraft;
+      preview: PostPreview;
+      attempt: PublishAttempt;
+    }
+  | Exclude<PreviewConsumptionResult, { outcome: "consumed" }>;
+
+const SERIALIZABLE_RETRY_DELAYS_MS = Object.freeze([5, 15]);
+
+function postgresErrorField(error: unknown, field: "code" | "constraint_name"): string | undefined {
+  let current = error;
+  for (let depth = 0; depth < 4; depth += 1) {
+    if (typeof current !== "object" || current === null) {
+      return undefined;
+    }
+    if (field in current && typeof (current as Record<string, unknown>)[field] === "string") {
+      return (current as Record<string, string>)[field];
+    }
+    current = "cause" in current ? (current as { cause?: unknown }).cause : undefined;
+  }
+  return undefined;
+}
+
+function isRetryableTransactionError(error: unknown, uniqueConstraint?: string): boolean {
+  const code = postgresErrorField(error, "code");
+  if (code === "40001" || code === "40P01") {
+    return true;
+  }
+  return code === "23505"
+    && uniqueConstraint !== undefined
+    && postgresErrorField(error, "constraint_name") === uniqueConstraint;
+}
+
+async function delay(milliseconds: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function serializableTransaction<T>(
+  database: Database,
+  operation: (transaction: Database) => Promise<T>,
+  uniqueConstraint?: string
+): Promise<T> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await database.transaction(operation, {
+        isolationLevel: "serializable",
+        accessMode: "read write"
+      });
+    } catch (error) {
+      const retryDelay = SERIALIZABLE_RETRY_DELAYS_MS[attempt];
+      if (retryDelay === undefined || !isRetryableTransactionError(error, uniqueConstraint)) {
+        throw error;
+      }
+      await delay(retryDelay);
+    }
+  }
+}
+
 function nowIso(): string {
   return new Date().toISOString();
 }
@@ -193,6 +263,125 @@ function timingSafeTextEqual(left: string, right: string): boolean {
 }
 
 export function createRepositories(database: Database) {
+  async function consumePreviewExact(
+    transaction: Database,
+    input: PreviewConsumptionInput
+  ): Promise<PreviewConsumptionResult> {
+    const [previewRow] = await transaction.select().from(postPreviews).where(
+      eq(postPreviews.tokenHash, input.tokenHash)
+    ).for("update");
+    if (
+      previewRow === undefined
+      || !timingSafeTextEqual(previewRow.tokenHash, input.tokenHash)
+    ) {
+      return { outcome: "not_found" };
+    }
+    const preview = normalizeRowTimestamps(previewRow);
+    if (preview.consumedAt !== null) {
+      return { outcome: "already_consumed" };
+    }
+    if (input.consumedAt >= preview.expiresAt) {
+      return { outcome: "expired" };
+    }
+    const [postRow] = await transaction.select().from(postDrafts).where(and(
+      eq(postDrafts.id, preview.postDraftId),
+      eq(postDrafts.version, preview.version)
+    )).for("update");
+    if (postRow === undefined) {
+      return { outcome: "stale" };
+    }
+    const post = normalizeRowTimestamps(postRow);
+    if (
+      input.expected.postId !== post.draftId
+      || input.expected.versionId !== post.id
+      || input.expected.version !== post.version
+      || input.expected.checksum !== post.checksum
+      || input.expected.visibility !== post.visibility
+    ) {
+      return { outcome: "mismatch" };
+    }
+    const [latest] = await transaction.select().from(postDrafts).where(
+      eq(postDrafts.draftId, post.draftId)
+    ).orderBy(desc(postDrafts.version)).limit(1).for("update");
+    if (latest === undefined || latest.id !== post.id) {
+      return { outcome: "stale" };
+    }
+    if (!input.allowedStates.includes(post.state)) {
+      return { outcome: "invalid_state" };
+    }
+    const [consumedRow] = await transaction.update(postPreviews).set({
+      consumedAt: input.consumedAt
+    }).where(and(
+      eq(postPreviews.id, preview.id),
+      isNull(postPreviews.consumedAt)
+    )).returning();
+    if (consumedRow === undefined) {
+      return { outcome: "race" };
+    }
+    const consumed = normalizeRowTimestamps(consumedRow);
+    if (input.claimState !== undefined) {
+      const [claimed] = await transaction.update(postDrafts).set({
+        state: input.claimState,
+        updatedAt: nowIso()
+      }).where(and(
+        eq(postDrafts.id, post.id),
+        eq(postDrafts.version, post.version),
+        eq(postDrafts.state, post.state)
+      )).returning();
+      if (claimed === undefined) {
+        throw new Error("Publish claim state changed before preview consumption completed");
+      }
+    }
+    return { outcome: "consumed", post, preview: consumed };
+  }
+
+  function recordPublishAttempt(input: PublishAttemptRecordInput): Promise<PublishAttempt>;
+  function recordPublishAttempt(
+    input: PublishAttemptRecordInput,
+    claim: PreviewConsumptionInput & { claimState: string }
+  ): Promise<PublishClaimRecordResult>;
+  async function recordPublishAttempt(
+    input: PublishAttemptRecordInput,
+    claim?: PreviewConsumptionInput & { claimState: string }
+  ): Promise<PublishAttempt | PublishClaimRecordResult> {
+    assertIsoTimestamp("publishAttempt.requestedAt", input.requestedAt);
+    if (input.completedAt !== undefined && input.completedAt !== null) {
+      assertIsoTimestamp("publishAttempt.completedAt", input.completedAt);
+    }
+    if (claim !== undefined) {
+      assertIsoTimestamp("preview.consumedAt", claim.consumedAt);
+    }
+    return serializableTransaction(database, async (transaction) => {
+      let claimed: Extract<PreviewConsumptionResult, { outcome: "consumed" }> | undefined;
+      if (claim !== undefined) {
+        const result = await consumePreviewExact(transaction, claim);
+        if (result.outcome !== "consumed") {
+          return result;
+        }
+        claimed = result;
+        if (
+          input.postDraftId !== claimed.post.id
+          || input.version !== claimed.post.version
+        ) {
+          throw new Error("Publish attempt does not match preview claim");
+        }
+      }
+      const [attempt] = await transaction.insert(publishAttempts).values({
+        id: randomUUID(),
+        ...input
+      }).returning();
+      const recordedAttempt = requiredRow(attempt, "publish attempt");
+      return claimed === undefined
+        ? recordedAttempt
+        : {
+            outcome: "recorded" as const,
+            post: claimed.post,
+            preview: claimed.preview,
+            attempt: recordedAttempt
+          };
+    });
+  }
+
   return {
     settings: {
       async set(key: string, value: unknown): Promise<Setting> {
@@ -339,7 +528,10 @@ export function createRepositories(database: Database) {
       async refreshDiscovery(
         input: CompanyPersonDiscoveryRefreshInput
       ): Promise<PersonWithEvidence[]> {
-        return database.transaction(async (transaction) => {
+        return serializableTransaction(database, async (transaction) => {
+          await transaction.select({ id: companies.id }).from(companies).where(
+            eq(companies.id, input.companyId)
+          ).for("update");
           const existingPeople = normalizeRows(await transaction.select().from(people).where(
             eq(people.companyId, input.companyId)
           ).orderBy(asc(people.name), asc(people.role), asc(people.id)));
@@ -576,13 +768,14 @@ export function createRepositories(database: Database) {
     },
     outreachDrafts: {
       async createVersion(input: OutreachDraftVersionInput): Promise<OutreachDraft> {
-        return database.transaction(async (transaction) => {
-          const [latest] = await transaction.select({ version: max(outreachDrafts.version) }).from(
-            outreachDrafts
-          ).where(and(
+        return serializableTransaction(database, async (transaction) => {
+          await transaction.select({ id: targets.id }).from(targets).where(
+            eq(targets.id, input.targetId)
+          ).for("update");
+          const [latest] = await transaction.select().from(outreachDrafts).where(and(
             eq(outreachDrafts.targetId, input.targetId),
             eq(outreachDrafts.purpose, input.purpose)
-          ));
+          )).orderBy(desc(outreachDrafts.version)).limit(1).for("update");
           const now = nowIso();
           const [row] = await transaction.insert(outreachDrafts).values({
             id: randomUUID(),
@@ -595,7 +788,7 @@ export function createRepositories(database: Database) {
             updatedAt: now
           }).returning();
           return decodeOutreachDraft(requiredRow(row, "outreach draft"));
-        });
+        }, "outreach_target_purpose_version_unique");
       },
       async getVersion(
         targetId: string,
@@ -671,11 +864,11 @@ export function createRepositories(database: Database) {
     },
     postDrafts: {
       async createVersion(input: PostDraftVersionInput): Promise<PostDraft> {
-        return database.transaction(async (transaction) => {
-          const draftId = input.draftId ?? randomUUID();
-          const [latest] = await transaction.select({ version: max(postDrafts.version) }).from(
-            postDrafts
-          ).where(eq(postDrafts.draftId, draftId));
+        const draftId = input.draftId ?? randomUUID();
+        return serializableTransaction(database, async (transaction) => {
+          const [latest] = await transaction.select().from(postDrafts).where(
+            eq(postDrafts.draftId, draftId)
+          ).orderBy(desc(postDrafts.version)).limit(1).for("update");
           const version = (latest?.version ?? 0) + 1;
           const now = nowIso();
           const [post] = await transaction.insert(postDrafts).values({
@@ -692,7 +885,7 @@ export function createRepositories(database: Database) {
             updatedAt: now
           }).returning();
           return requiredRow(post, "post draft");
-        });
+        }, "post_draft_version_unique");
       },
       async getVersion(draftId: string, version: number): Promise<PostDraft | undefined> {
         if (!isUuid(draftId)) {
@@ -770,19 +963,24 @@ export function createRepositories(database: Database) {
         if (!isUuid(input.draftId)) {
           return { outcome: "not_found" };
         }
-        return database.transaction(async (transaction) => {
-          const [postRow] = await transaction.select().from(postDrafts).where(and(
-            eq(postDrafts.draftId, input.draftId),
-            eq(postDrafts.version, input.version)
-          ));
+        return serializableTransaction(database, async (transaction) => {
+          const [latest] = await transaction.select().from(postDrafts).where(
+            eq(postDrafts.draftId, input.draftId)
+          ).orderBy(desc(postDrafts.version)).limit(1).for("update");
+          if (latest === undefined) {
+            return { outcome: "not_found" };
+          }
+          const [postRow] = latest.version === input.version
+            ? [latest]
+            : await transaction.select().from(postDrafts).where(and(
+                eq(postDrafts.draftId, input.draftId),
+                eq(postDrafts.version, input.version)
+              ));
           if (postRow === undefined) {
             return { outcome: "not_found" };
           }
           const post = normalizeRowTimestamps(postRow);
-          const [latest] = await transaction.select().from(postDrafts).where(
-            eq(postDrafts.draftId, input.draftId)
-          ).orderBy(desc(postDrafts.version));
-          if (latest === undefined || latest.id !== post.id) {
+          if (latest.id !== post.id) {
             return { outcome: "not_latest" };
           }
           if (!input.allowedStates.includes(post.state)) {
@@ -807,72 +1005,10 @@ export function createRepositories(database: Database) {
         claimState?: string;
       }): Promise<PreviewConsumptionResult> {
         const consumedAt = assertIsoTimestamp("preview.consumedAt", input.consumedAt);
-        return database.transaction(async (transaction) => {
-          const [previewRow] = await transaction.select().from(postPreviews).where(
-            eq(postPreviews.tokenHash, input.tokenHash)
-          );
-          if (
-            previewRow === undefined
-            || !timingSafeTextEqual(previewRow.tokenHash, input.tokenHash)
-          ) {
-            return { outcome: "not_found" };
-          }
-          const preview = normalizeRowTimestamps(previewRow);
-          if (preview.consumedAt !== null) {
-            return { outcome: "already_consumed" };
-          }
-          if (consumedAt >= preview.expiresAt) {
-            return { outcome: "expired" };
-          }
-          const [postRow] = await transaction.select().from(postDrafts).where(and(
-            eq(postDrafts.id, preview.postDraftId),
-            eq(postDrafts.version, preview.version)
-          ));
-          if (postRow === undefined) {
-            return { outcome: "stale" };
-          }
-          const post = normalizeRowTimestamps(postRow);
-          if (
-            input.expected.postId !== post.draftId
-            || input.expected.versionId !== post.id
-            || input.expected.version !== post.version
-            || input.expected.checksum !== post.checksum
-            || input.expected.visibility !== post.visibility
-          ) {
-            return { outcome: "mismatch" };
-          }
-          const [latest] = await transaction.select().from(postDrafts).where(
-            eq(postDrafts.draftId, post.draftId)
-          ).orderBy(desc(postDrafts.version));
-          if (latest === undefined || latest.id !== post.id) {
-            return { outcome: "stale" };
-          }
-          if (!input.allowedStates.includes(post.state)) {
-            return { outcome: "invalid_state" };
-          }
-          const [consumedRow] = await transaction.update(postPreviews).set({ consumedAt }).where(and(
-            eq(postPreviews.id, preview.id),
-            isNull(postPreviews.consumedAt)
-          )).returning();
-          if (consumedRow === undefined) {
-            return { outcome: "race" };
-          }
-          const consumed = normalizeRowTimestamps(consumedRow);
-          if (input.claimState !== undefined) {
-            const [claimed] = await transaction.update(postDrafts).set({
-              state: input.claimState,
-              updatedAt: nowIso()
-            }).where(and(
-              eq(postDrafts.id, post.id),
-              eq(postDrafts.version, post.version),
-              eq(postDrafts.state, post.state)
-            )).returning();
-            if (claimed === undefined) {
-              throw new Error("Publish claim state changed before preview consumption completed");
-            }
-          }
-          return { outcome: "consumed", post, preview: consumed };
-        });
+        return serializableTransaction(database, async (transaction) => consumePreviewExact(
+          transaction,
+          { ...input, consumedAt }
+        ));
       },
       async consume(tokenHash: string, consumedAt: string): Promise<PostPreview | undefined> {
         assertIsoTimestamp("preview.consumedAt", consumedAt);
@@ -886,21 +1022,7 @@ export function createRepositories(database: Database) {
       }
     },
     publishAttempts: {
-      async record(
-        input: Omit<typeof publishAttempts.$inferInsert, "id">
-      ): Promise<PublishAttempt> {
-        assertIsoTimestamp("publishAttempt.requestedAt", input.requestedAt);
-        if (input.completedAt !== undefined && input.completedAt !== null) {
-          assertIsoTimestamp("publishAttempt.completedAt", input.completedAt);
-        }
-        return database.transaction(async (transaction) => {
-          const [attempt] = await transaction.insert(publishAttempts).values({
-            id: randomUUID(),
-            ...input
-          }).returning();
-          return requiredRow(attempt, "publish attempt");
-        });
-      },
+      record: recordPublishAttempt,
       async updateResult(id: string, input: {
         responseCategory: string;
         postUrn?: string;
