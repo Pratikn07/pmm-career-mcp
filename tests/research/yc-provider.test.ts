@@ -9,8 +9,12 @@ import {
 } from "../../src/research/yc-provider.js";
 
 const fixturePath = fileURLToPath(new URL("../fixtures/yc-company.html", import.meta.url));
+const currentListFixturePath = fileURLToPath(
+  new URL("../fixtures/yc-company-list-current.html", import.meta.url)
+);
 const CHECKED_AT = "2026-07-16T12:00:00.000Z";
 const YC_DIRECTORY_URL = "https://www.ycombinator.com/companies";
+const YC_DEFAULT_FACET_URL = "https://www.ycombinator.com/companies/industry/marketing";
 
 async function fixtureSource(overrides: Partial<Awaited<ReturnType<YcSource["fetch"]>>> = {}) {
   return {
@@ -78,7 +82,109 @@ describe("YC company provider", () => {
     const results = await createYcProvider(source).search({ keyword: "robotics" });
 
     expect(results.map((item) => item.name)).toEqual(["Beacon Robotics"]);
-    expect(requestedUrls).toEqual([YC_DIRECTORY_URL]);
+    expect(requestedUrls).toEqual([YC_DEFAULT_FACET_URL]);
+  });
+
+  it("parses the current server-rendered YC company-list cards", async () => {
+    const source = {
+      fetch: async () => ({
+        html: await readFile(currentListFixturePath, "utf8"),
+        url: "https://www.ycombinator.com/companies/industry/recruiting",
+        checkedAt: CHECKED_AT
+      })
+    } satisfies YcSource;
+
+    const results = await createYcProvider(source).search({ industry: "recruiting" });
+
+    expect(results).toHaveLength(2);
+    expect(results[0]).toMatchObject({
+      ycId: "drippay",
+      name: "Drip",
+      batch: "P2026",
+      status: "Active",
+      location: "San Francisco",
+      industry: "messaging / recruiting / b2b",
+      description: "Never miss a lead."
+    });
+    expect(results[1]).toMatchObject({
+      ycId: "litmus-hiring",
+      name: "Litmus",
+      batch: "S2026",
+      status: "Active",
+      location: "New York City",
+      industry: "talent-acquisition / recruiting"
+    });
+  });
+
+  it("parses current YC cards after the safety fetcher resolves company links", async () => {
+    const html = (await readFile(currentListFixturePath, "utf8")).replaceAll(
+      'href="/companies/',
+      'href="https://www.ycombinator.com/companies/'
+    );
+    const source = {
+      fetch: async () => ({
+        html,
+        url: "https://www.ycombinator.com/companies/industry/recruiting",
+        checkedAt: CHECKED_AT
+      })
+    } satisfies YcSource;
+
+    const results = await createYcProvider(source).search({ industry: "recruiting" });
+
+    expect(results.map((company) => company.ycId)).toEqual(["drippay", "litmus-hiring"]);
+  });
+
+  it("keeps a current YC card while omitting an oversized SEO description", async () => {
+    const html = (await readFile(currentListFixturePath, "utf8")).replace(
+      "Never miss a lead.",
+      "D".repeat(501)
+    );
+    const source = {
+      fetch: async () => ({
+        html,
+        url: "https://www.ycombinator.com/companies/industry/recruiting",
+        checkedAt: CHECKED_AT
+      })
+    } satisfies YcSource;
+
+    const results = await createYcProvider(source).search({ industry: "recruiting" });
+    const drip = results.find((company) => company.ycId === "drippay");
+
+    expect(drip).toMatchObject({ name: "Drip" });
+    expect(drip).not.toHaveProperty("description");
+    expect(drip?.warnings).toContainEqual({
+      code: "invalid-data",
+      sourceUrl: "https://www.ycombinator.com/companies/industry/recruiting",
+      message: "Omitted an oversized YC company description"
+    });
+  });
+
+  it("selects official server-rendered YC facet pages from the search query", async () => {
+    const requestedUrls: string[] = [];
+    const html = await readFile(currentListFixturePath, "utf8");
+    const source = createPublicYcSource(async (url) => {
+      requestedUrls.push(url);
+      return {
+        url,
+        title: "YC companies",
+        text: "YC companies",
+        html,
+        checkedAt: CHECKED_AT,
+        contentType: "text/html",
+        untrusted: true
+      };
+    });
+    const provider = createYcProvider(source);
+
+    await provider.search({ industry: "Recruiting" });
+    await provider.search({ location: "San Francisco", hiring: true });
+    await provider.search({ keyword: "lead" });
+
+    expect(requestedUrls).toEqual([
+      "https://www.ycombinator.com/companies/industry/recruiting",
+      "https://www.ycombinator.com/companies/location/san-francisco-bay-area/hiring",
+      "https://www.ycombinator.com/companies/industry/marketing"
+    ]);
   });
 
   it("rejects a production YC source redirected to an off-origin page", async () => {

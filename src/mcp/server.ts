@@ -10,6 +10,7 @@ import { explainTargetMatch, rankTargetScores, type TargetScore } from "../ranki
 import type { JobDiscoveryService } from "../research/job-discovery.js";
 import type { PeopleDiscoveryService } from "../research/people-discovery.js";
 import type { CompanyResult, CompanySearchQuery } from "../research/types.js";
+import { describeYcCompanyCoverage } from "../research/yc-provider.js";
 import type { PreviewExpected } from "../posts/preview-service.js";
 import {
   createWeeklyShortlistInput,
@@ -33,7 +34,7 @@ import {
   updateOutreachStatusInput
 } from "./schemas.js";
 
-export const CAREER_MCP_INSTRUCTIONS = "Never fetch LinkedIn for research. Never claim complete employee coverage. Never call publish_linkedin_post unless the current user explicitly asks to publish the exact preview. Never batch or retry publishing. Research is restricted to YC companies and allowed public sources. Drafts and pipeline data stay private. Publishing is text-only and requires the exact saved version, checksum, visibility, and fresh one-use preview token.";
+export const CAREER_MCP_INSTRUCTIONS = "Never fetch LinkedIn for research. Never claim complete employee coverage. Never claim complete YC-company coverage. Never call publish_linkedin_post unless the current user explicitly asks to publish the exact preview. Never batch or retry publishing. Research is restricted to YC companies and allowed public sources. Drafts and pipeline data stay private. Publishing is text-only and requires the exact saved version, checksum, visibility, and fresh one-use preview token.";
 
 type YcProvider = { searchYcCompanies(query: CompanySearchQuery): Promise<CompanyResult[]> };
 type ConnectionStatus = { connected: boolean; valid: boolean; publishingEnabled: boolean };
@@ -96,11 +97,14 @@ function withoutUndefined<T extends Record<string, unknown>>(value: T): Record<s
 export function createCareerMcpServer(deps: CareerMcpDependencies): McpServer {
   const server = new McpServer({ name: "pmm-career-mcp", version: "1.0.0" }, { instructions: CAREER_MCP_INSTRUCTIONS });
 
-  server.registerTool("search_yc_companies", { title: "Search YC companies", description: "Find YC companies from public YC sources.", inputSchema: searchYcCompaniesInput, outputSchema: toolOutputSchema, annotations: readOnly }, async (input) => guarded(async () => {
-    const companies = await deps.ycProvider.searchYcCompanies(
-      withoutUndefined(input) as CompanySearchQuery
-    );
-    return { companies, coverage: coverageFor(companies) };
+  server.registerTool("search_yc_companies", { title: "Search YC companies", description: "Find YC companies from an official, page-scoped public YC source; results are never claimed as complete.", inputSchema: searchYcCompaniesInput, outputSchema: toolOutputSchema, annotations: readOnly }, async (input) => guarded(async () => {
+    const query = withoutUndefined(input) as CompanySearchQuery;
+    const companies = await deps.ycProvider.searchYcCompanies(query);
+    return {
+      companies,
+      coverage: coverageFor(companies),
+      coverageSummary: describeYcCompanyCoverage(query)
+    };
   })());
   server.registerTool("discover_public_people", { title: "Discover public people", description: "Find people from allowed public company sources; coverage is best-effort, never complete.", inputSchema: discoverPublicPeopleInput, outputSchema: toolOutputSchema, annotations: readOnly }, async ({ companyId }) => guarded(async () => ({ ...await deps.peopleDiscovery.discoverPublicPeople(companyId) }))());
   server.registerTool("find_pmm_opportunities", { title: "Find PMM opportunities", description: "Find PMM and adjacent openings on official public sources.", inputSchema: findPmmOpportunitiesInput, outputSchema: toolOutputSchema, annotations: readOnly }, async ({ companyIds, preferences }) => guarded(async () => ({ ...await deps.jobDiscovery.findPmmOpportunities(companyIds, preferences), coverage: "authoritative-pages-only" }))());

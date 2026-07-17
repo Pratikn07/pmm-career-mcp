@@ -263,19 +263,19 @@ it("fails closed quickly when stylesheet work exceeds explicit limits", async ()
   const rules = Array.from({ length: 10_000 }, (_value, index) => {
     return `#hidden-${index}{display:none}`;
   }).join("");
-  const elements = Array.from({ length: 10_000 }, (_value, index) => {
-    return `<i id="hidden-${index}">hidden</i>`;
-  }).join("");
   nock("https://acme.example")
     .get("/excessive-stylesheet")
-    .reply(200, `<style>${rules}</style><p>Visible evidence</p>${elements}`, {
+    .reply(200, `<style>${rules}</style><p>Visible evidence</p>`, {
       "Content-Type": "text/html"
     });
 
   const startedAt = performance.now();
   await expect(fetchPublicPage("https://acme.example/excessive-stylesheet", {
     resolveAddresses: publicDns,
-    timeoutMs: 100
+    // This test isolates the stylesheet byte/rule guard. The separate request
+    // deadline tests cover timeouts, so instrumentation must not race the
+    // structural limit that this assertion is intended to exercise.
+    timeoutMs: 1_000
   })).rejects.toThrow(/stylesheet.*limit/i);
   expect(performance.now() - startedAt).toBeLessThan(500);
 }, 15_000);

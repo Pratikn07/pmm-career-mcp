@@ -5,6 +5,7 @@ import type { CompanyResult, CompanySearchQuery, Evidence, SourceWarning } from 
 
 const YC_ORIGINS = new Set(["https://www.ycombinator.com", "https://ycombinator.com"]);
 const YC_DIRECTORY_URL = "https://www.ycombinator.com/companies";
+const YC_DEFAULT_FACET_URL = `${YC_DIRECTORY_URL}/industry/marketing`;
 const FIELD_LIMITS = {
   id: { characters: 160, bytes: 320 },
   name: { characters: 160, bytes: 320 },
@@ -22,21 +23,64 @@ export type YcSourcePage = {
 };
 
 export interface YcSource {
-  fetch(): Promise<YcSourcePage>;
+  fetch(query?: CompanySearchQuery): Promise<YcSourcePage>;
+}
+
+function facetSlug(value: string): string {
+  const primary = value.split("/", 1)[0] ?? value;
+  const slug = primary.toLocaleLowerCase("en")
+    .normalize("NFKD")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80);
+  return slug === "" ? "marketing" : slug;
+}
+
+function locationSlug(value: string): string {
+  const normalized = value.trim().toLocaleLowerCase("en");
+  if (normalized.includes("san francisco") || normalized.includes("bay area")) {
+    return "san-francisco-bay-area";
+  }
+  return facetSlug(value);
+}
+
+function publicFacetUrl(query: CompanySearchQuery = {}): string {
+  if (query.industry !== undefined && query.industry.trim() !== "") {
+    return `${YC_DIRECTORY_URL}/industry/${facetSlug(query.industry)}`;
+  }
+  if (query.location !== undefined && query.location.trim() !== "") {
+    return `${YC_DIRECTORY_URL}/location/${locationSlug(query.location)}${
+      query.hiring === true ? "/hiring" : ""
+    }`;
+  }
+  if (query.hiring === true) {
+    return `${YC_DIRECTORY_URL}/location/san-francisco-bay-area/hiring`;
+  }
+  return YC_DEFAULT_FACET_URL;
+}
+
+export function describeYcCompanyCoverage(query: CompanySearchQuery = {}) {
+  return {
+    coverage: "authoritative-page-only" as const,
+    complete: false as const,
+    sourceUrl: publicFacetUrl(query),
+    limitation: "Results are limited to the selected official server-rendered YC facet page. An empty result is not proof that no matching YC company exists."
+  };
 }
 
 export function createPublicYcSource(
   fetchPage: (url: string) => Promise<FetchedPage> = fetchPublicPage
 ): YcSource {
   return {
-    fetch: async () => {
-      const page = await fetchPage(YC_DIRECTORY_URL);
+    fetch: async (query = {}) => {
+      const requestedUrl = publicFacetUrl(query);
+      const page = await fetchPage(requestedUrl);
       const finalUrl = new URL(page.url);
       if (!YC_ORIGINS.has(finalUrl.origin)) {
         throw new SourceChangedError("The production YC source final origin is not approved");
       }
-      if (finalUrl.pathname !== "/companies") {
-        throw new SourceChangedError("The production YC source final pathname is not the approved directory");
+      if (!/^\/companies\/(?:industry|location)\/[a-z0-9-]+(?:\/hiring)?$/.test(finalUrl.pathname)) {
+        throw new SourceChangedError("The production YC source final pathname is not an approved company list");
       }
       return { html: page.html, url: page.url, checkedAt: page.checkedAt };
     }
@@ -167,10 +211,109 @@ function parseCompanies(page: YcSourcePage, now: Date): CompanyResult[] {
   const $ = load(page.html);
   const directory = $("[data-yc-company-directory]").first();
   const cards = directory.find("[data-yc-company-id]").toArray();
-  if (directory.length !== 1 || cards.length === 0) {
-    throw new SourceChangedError();
-  }
   const sourceTitle = optionalText($("title").first().text()) ?? "Y Combinator Companies";
+
+  if (directory.length !== 1 || cards.length === 0) {
+    const currentCards = $("ul > li").filter((_index, card) => {
+      const element = $(card);
+      return element.find(".text-2xl").length === 1
+        && element.find("a[href*='/companies/']").length > 0;
+    }).toArray();
+    if (currentCards.length === 0) {
+      throw new SourceChangedError();
+    }
+    const results: CompanyResult[] = [];
+    const invalidWarnings: SourceWarning[] = [];
+    for (const card of currentCards) {
+      const element = $(card);
+      const href = element.find("a[href*='/companies/']").first().attr("href");
+      const name = normalizedText(element.find(".text-2xl").first().text());
+      if (href === undefined || name === "") {
+        throw new SourceChangedError("A YC company card no longer has the recognizable required fields");
+      }
+      const ycUrl = assertYcCompanyUrl(href, page.url);
+      const ycId = new URL(ycUrl).pathname.split("/").filter(Boolean).at(-1) ?? "";
+      const detailTexts = element.find(".text-gray-700").toArray()
+        .map((item) => normalizedText($(item).text()))
+        .filter((item) => item !== "");
+      const batch = element.find("span").toArray()
+        .map((item) => normalizedText($(item).text()))
+        .find((item) => /^(?:[WSFP]\d{2,4}|(?:Winter|Summer|Fall|Spring)\s+\d{4})$/i.test(item));
+      const status = detailTexts[0];
+      const location = detailTexts
+        .filter((item) => !/^\d+\s+employees?$/i.test(item) && item !== status)
+        .at(-1);
+      const rawDescription = optionalText(
+        element.find(".line-clamp-3.text-gray-600").first().text()
+      );
+      const description = rawDescription !== undefined
+        && withinFieldLimit(rawDescription, FIELD_LIMITS.description)
+        ? rawDescription
+        : undefined;
+      const tags = element.find("div.mt-2").last().children("div").toArray()
+        .map((item) => normalizedText($(item).text()))
+        .filter((item) => item !== "");
+      const industry = tags.length === 0 ? undefined : tags.join(" / ");
+      const warnings: SourceWarning[] = [];
+      if (rawDescription !== undefined && description === undefined) {
+        warnings.push({
+          code: "invalid-data",
+          sourceUrl: page.url,
+          message: "Omitted an oversized YC company description"
+        });
+      }
+      if (freshness.stale) {
+        warnings.push({
+          code: "stale-source",
+          sourceUrl: page.url,
+          message: "YC source is older than the 30-day freshness policy"
+        });
+      }
+      const raw: RawYcCompany = {
+        ycId,
+        name,
+        ycUrl,
+        sourceTitle,
+        checkedAt,
+        ...(batch === undefined ? {} : { batch }),
+        ...(status === undefined ? {} : { status }),
+        ...(location === undefined ? {} : { location }),
+        ...(industry === undefined ? {} : { industry }),
+        ...(description === undefined ? {} : { description }),
+        ...(new URL(page.url).pathname.endsWith("/hiring") ? { hiring: true } : {}),
+        ...(warnings.length === 0 ? {} : { warnings })
+      };
+      const boundedFields: Array<readonly [string, string | undefined, {
+        characters: number;
+        bytes: number;
+      }]> = [
+        ["company ID", ycId, FIELD_LIMITS.id],
+        ["company name", name, FIELD_LIMITS.name],
+        ["company batch", batch, FIELD_LIMITS.shortText],
+        ["company status", status, FIELD_LIMITS.shortText],
+        ["company location", location, FIELD_LIMITS.shortText],
+        ["company industry", industry, FIELD_LIMITS.shortText],
+        ["company description", description, FIELD_LIMITS.description],
+        ["YC source title", sourceTitle, FIELD_LIMITS.title],
+        ["YC company URL", ycUrl, FIELD_LIMITS.url],
+        ["evidence fact", companyFact(raw), FIELD_LIMITS.fact]
+      ];
+      const invalidField = boundedFields.find(([_label, value, limit]) => {
+        return value !== undefined && !withinFieldLimit(value, limit);
+      });
+      if (invalidField !== undefined) {
+        invalidWarnings.push(invalidCompanyWarning(page.url, invalidField[0], invalidField[2]));
+        continue;
+      }
+      results.push(normalizeCompany(raw));
+    }
+    if (invalidWarnings.length > 0) {
+      throw new SourceChangedError(
+        `YC company list contains ${invalidWarnings.length} invalid recognizable company cards`
+      );
+    }
+    return results;
+  }
 
   const results: CompanyResult[] = [];
   const invalidWarnings: SourceWarning[] = [];
@@ -283,7 +426,7 @@ export function createYcProvider(source: YcSource, options: { now?: () => Date }
   search(query: CompanySearchQuery): Promise<CompanyResult[]>;
 } {
   const searchYcCompanies = async (query: CompanySearchQuery): Promise<CompanyResult[]> => {
-    const companies = parseCompanies(await source.fetch(), (options.now ?? (() => new Date()))());
+    const companies = parseCompanies(await source.fetch(query), (options.now ?? (() => new Date()))());
     return companies.filter((company) => matches(company, query)).sort((left, right) => {
       return left.name.localeCompare(right.name, "en") || left.ycId.localeCompare(right.ycId, "en");
     });

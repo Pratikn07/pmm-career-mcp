@@ -97,6 +97,33 @@ it("serves MCP initialization through stateless Streamable HTTP", async () => {
   expect(response.headers["mcp-session-id"]).toBeUndefined();
 });
 
+it("reports page-scoped YC coverage even when a filtered search is empty", async () => {
+  const server = createCareerMcpServer(dependencies());
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "test", version: "1.0.0" });
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+
+  const result = await client.callTool({
+    name: "search_yc_companies",
+    arguments: { keyword: "outside-the-fetched-facet" }
+  });
+  await Promise.all([client.close(), server.close()]);
+
+  expect(result.structuredContent).toMatchObject({
+    data: {
+      companies: [],
+      coverageSummary: {
+        coverage: "authoritative-page-only",
+        complete: false,
+        sourceUrl: "https://www.ycombinator.com/companies/industry/marketing"
+      }
+    }
+  });
+  expect(JSON.stringify(result.structuredContent)).toContain(
+    "An empty result is not proof that no matching YC company exists"
+  );
+});
+
 it("returns a safe tool error without exposing an implementation message", async () => {
   const server = createCareerMcpServer(dependencies());
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
