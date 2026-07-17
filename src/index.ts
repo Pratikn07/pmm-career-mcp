@@ -1,21 +1,199 @@
-import { loadConfig } from "./config.js";
+import { fileURLToPath } from "node:url";
+import type { Express } from "express";
+import { loadConfig, type AppConfig } from "./config.js";
+import { createDatabase, type CareerDatabase } from "./db/client.js";
+import { DomainError } from "./domain/errors.js";
+import { createDraftService } from "./drafts/service.js";
 import { createHttpApp } from "./http/app.js";
+import { createLinkedInOAuth, type LinkedInOAuth } from "./linkedin/oauth.js";
+import { createLinkedInPostsClient } from "./linkedin/posts-client.js";
+import type { LinkedInPostsClient } from "./linkedin/publish-service.js";
+import { createPublishService } from "./linkedin/publish-service.js";
+import { createCareerMcpServer } from "./mcp/server.js";
+import { createPipelineService } from "./pipeline/service.js";
+import { createPreviewService } from "./posts/preview-service.js";
+import { createJobDiscovery } from "./research/job-discovery.js";
+import { createPeopleDiscovery } from "./research/people-discovery.js";
+import type { DiscoveryAdapterOptions } from "./research/discovery-deadline.js";
+import type { FetchedPage } from "./research/fetch-page.js";
+import type { CompanyResult, CompanySearchQuery } from "./research/types.js";
+import { createPublicYcSource, createYcProvider, type YcSource } from "./research/yc-provider.js";
 
-const config = loadConfig(process.env);
-const app = createHttpApp({
-  config,
-  mcpHandler: (_request, response) => {
-    response.sendStatus(501);
+type FetchPage = (url: string, options: DiscoveryAdapterOptions) => Promise<FetchedPage>;
+type ResolveAddresses = (hostname: string, options: DiscoveryAdapterOptions) => Promise<string[]>;
+
+type ApplicationOptions = {
+  config: AppConfig;
+  database?: CareerDatabase;
+  ycSource?: YcSource;
+  fetchPage?: FetchPage;
+  resolveAddresses?: ResolveAddresses;
+  now?: () => Date;
+  linkedinClient?: LinkedInPostsClient;
+  linkedinOAuth?: Pick<LinkedInOAuth, "createAuthorizationUrl" | "exchangeCallback">;
+};
+
+export type CareerApplication = {
+  app: Express;
+  database: CareerDatabase;
+};
+
+function unavailableLinkedInClient(): LinkedInPostsClient {
+  return {
+    async createTextPost() {
+      throw new DomainError("OAUTH_PROVIDER_ERROR", "LinkedIn authorization must be reconnected");
+    }
+  };
+}
+
+function unavailableLinkedInOAuth(): Pick<LinkedInOAuth, "createAuthorizationUrl" | "exchangeCallback"> {
+  const unavailable = () => {
+    throw new DomainError("OAUTH_PROVIDER_ERROR", "LinkedIn authorization is not configured");
+  };
+  return { createAuthorizationUrl: unavailable, exchangeCallback: async () => unavailable() };
+}
+
+function persistedYcProvider(
+  database: CareerDatabase,
+  source: YcSource,
+  now: () => Date
+): { searchYcCompanies(query: CompanySearchQuery): Promise<CompanyResult[]> } {
+  const provider = createYcProvider(source, { now });
+  return {
+    async searchYcCompanies(query: CompanySearchQuery): Promise<CompanyResult[]> {
+      const imported = await provider.searchYcCompanies(query);
+      return imported.map((company) => {
+        const stored = database.companies.upsert({
+          ycId: company.ycId,
+          name: company.name,
+          ...(company.batch === undefined ? {} : { batch: company.batch }),
+          ...(company.status === undefined ? {} : { status: company.status }),
+          ...(company.location === undefined ? {} : { location: company.location }),
+          ...(company.industry === undefined ? {} : { industry: company.industry }),
+          ...(company.hiring === undefined ? {} : { isHiring: company.hiring }),
+          ...(company.websiteUrl === undefined ? {} : { websiteUrl: company.websiteUrl }),
+          ...(company.sources[0] === undefined ? {} : { ycUrl: company.sources[0].sourceUrl }),
+          checkedAt: company.checkedAt
+        });
+        return { ...company, id: stored.id };
+      });
+    }
+  };
+}
+
+function oauthFromEnvironment(
+  database: CareerDatabase,
+  config: AppConfig,
+  env: NodeJS.ProcessEnv
+): Pick<LinkedInOAuth, "createAuthorizationUrl" | "exchangeCallback"> {
+  const clientId = env.LINKEDIN_CLIENT_ID;
+  const clientSecret = env.LINKEDIN_CLIENT_SECRET;
+  const redirectUri = env.LINKEDIN_REDIRECT_URI;
+  if (
+    config.tokenEncryptionKey === undefined
+    || clientId === undefined
+    || clientSecret === undefined
+    || redirectUri === undefined
+  ) {
+    return unavailableLinkedInOAuth();
   }
-});
-const server = app.listen(config.port);
-
-for (const signal of ["SIGTERM", "SIGINT"] as const) {
-  process.once(signal, () => {
-    server.close((error) => {
-      if (error) {
-        process.exitCode = 1;
-      }
-    });
+  return createLinkedInOAuth(database, {
+    clientId,
+    clientSecret,
+    redirectUri,
+    tokenEncryptionKey: config.tokenEncryptionKey
   });
+}
+
+/**
+ * Composes the production server and also provides an injection seam for the
+ * offline end-to-end test. No service is contacted until its MCP tool is called.
+ */
+export function createCareerApplication(options: ApplicationOptions): CareerApplication {
+  const database = options.database ?? createDatabase(options.config.databasePath);
+  const now = options.now ?? (() => new Date());
+  const ycProvider = persistedYcProvider(database, options.ycSource ?? createPublicYcSource(), now);
+  const peopleDiscovery = createPeopleDiscovery({
+    repositories: database,
+    ...(options.fetchPage === undefined ? {} : { fetchPage: options.fetchPage }),
+    now
+  });
+  const jobDiscovery = createJobDiscovery({
+    repositories: database,
+    ...(options.fetchPage === undefined ? {} : { fetchPage: options.fetchPage }),
+    ...(options.resolveAddresses === undefined ? {} : { resolveAddresses: options.resolveAddresses }),
+    now
+  });
+  const pipeline = createPipelineService(database);
+  const drafts = createDraftService(database);
+  const previews = createPreviewService(database, { clock: now });
+  const client = options.linkedinClient ?? (options.config.tokenEncryptionKey === undefined
+    ? unavailableLinkedInClient()
+    : createLinkedInPostsClient(database, {
+      tokenEncryptionKey: options.config.tokenEncryptionKey,
+      linkedinVersion: options.config.linkedinVersion
+    }));
+  const publish = createPublishService(database, {
+    previewService: previews,
+    client,
+    publishEnabled: options.config.linkedinPublishEnabled,
+    clock: now
+  });
+  const linkedin = options.linkedinOAuth ?? unavailableLinkedInOAuth();
+  const app = createHttpApp({
+    config: options.config,
+    mcpServerFactory: () => createCareerMcpServer({
+      ycProvider,
+      peopleDiscovery,
+      jobDiscovery,
+      pipeline,
+      drafts,
+      previews,
+      publish,
+      linkedin,
+      getLinkedInConnectionStatus: () => {
+        const token = database.oauthTokens.getByProvider("linkedin");
+        return {
+          connected: token !== undefined,
+          valid: token !== undefined && (token.expiresAt === null || Date.parse(token.expiresAt) > now().getTime()),
+          publishingEnabled: options.config.linkedinPublishEnabled
+        };
+      }
+    })
+  });
+  app.get("/linkedin/callback", async (request, response) => {
+    const code = typeof request.query.code === "string" ? request.query.code : undefined;
+    const state = typeof request.query.state === "string" ? request.query.state : undefined;
+    if (code === undefined || state === undefined) {
+      response.status(400).send("LinkedIn authorization could not be completed.");
+      return;
+    }
+    try {
+      await linkedin.exchangeCallback({ code, state });
+      response.status(200).send("LinkedIn is connected. You can close this window.");
+    } catch {
+      response.status(400).send("LinkedIn authorization could not be completed.");
+    }
+  });
+  return { app, database };
+}
+
+export function startServer(env: NodeJS.ProcessEnv = process.env) {
+  const config = loadConfig(env);
+  const database = createDatabase(config.databasePath);
+  const linkedin = oauthFromEnvironment(database, config, env);
+  const runtime = createCareerApplication({ config, database, linkedinOAuth: linkedin });
+  const server = runtime.app.listen(config.port);
+  const close = () => {
+    server.close((error) => {
+      runtime.database.close();
+      if (error !== undefined) process.exitCode = 1;
+    });
+  };
+  for (const signal of ["SIGTERM", "SIGINT"] as const) process.once(signal, close);
+  return { ...runtime, server };
+}
+
+if (process.argv[1] !== undefined && fileURLToPath(import.meta.url) === process.argv[1]) {
+  startServer();
 }

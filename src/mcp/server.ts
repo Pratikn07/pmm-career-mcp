@@ -36,7 +36,7 @@ import {
 export const CAREER_MCP_INSTRUCTIONS = "Never fetch LinkedIn for research. Never claim complete employee coverage. Never call publish_linkedin_post unless the current user explicitly asks to publish the exact preview. Never batch or retry publishing. Research is restricted to YC companies and allowed public sources. Drafts and pipeline data stay private. Publishing is text-only and requires the exact saved version, checksum, visibility, and fresh one-use preview token.";
 
 type YcProvider = { searchYcCompanies(query: CompanySearchQuery): Promise<CompanyResult[]> };
-type ConnectionStatus = { connected: boolean; valid: boolean };
+type ConnectionStatus = { connected: boolean; valid: boolean; publishingEnabled: boolean };
 
 export type CareerMcpDependencies = {
   ycProvider: YcProvider;

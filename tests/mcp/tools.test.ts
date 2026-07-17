@@ -51,7 +51,7 @@ function dependencies(): CareerMcpDependencies {
     previews: { create: () => { throw new Error("not called"); } },
     publish: { publish: async () => ({ state: "publish_failed" as const }) },
     linkedin: { createAuthorizationUrl: () => "https://www.linkedin.com/oauth/v2/authorization" },
-    getLinkedInConnectionStatus: () => ({ connected: false, valid: false })
+    getLinkedInConnectionStatus: () => ({ connected: false, valid: false, publishingEnabled: false })
   };
 }
 
