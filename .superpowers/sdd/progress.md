@@ -10,8 +10,8 @@ Worktree: `/Users/pratik.nandoskar/Documents/working/pmm-career-mcp/.worktrees/s
 | 2. PostgreSQL/PGlite migration | Complete | Complete | Approved | `60b51e1`, `3996537` |
 | 3. Transaction/concurrency invariants | Complete | Complete | Approved | `16b6d97` |
 | 4. Supabase OAuth resource protection | Complete | Complete | Approved | `7470828`, `c149cc3`, `2aa950b` |
-| 5. Login and consent page | In progress | — | — | — |
-| 6. Readiness/startup/Docker | Pending | — | — | — |
+| 5. Login and consent page | Complete | Complete | Approved | `4146c4e`, `6d3e77f` |
+| 6. Readiness/startup/Docker | In progress | — | — | — |
 | 7. Live smoke verification | Pending | — | — | — |
 | 8. Operator documentation | Pending | — | — | — |
 | 9. Final local release gate | Pending | — | — | — |
@@ -25,3 +25,4 @@ Worktree: `/Users/pratik.nandoskar/Documents/working/pmm-career-mcp/.worktrees/s
 - Task 2 completed with 368/368 tests, typecheck, build, no SQLite runtime dependencies, and explicit production TLS.
 - Task 3 completed with 387/387 tests and independent approval of rollback, retry, locking, and exactly-once publish safeguards.
 - Task 4 completed with 403/403 tests, build/typecheck, and independent approval of OAuth configuration, public-metadata, and secret-boundary hardening.
+- Task 5 completed with 419 tests, a verified Docker image build, and independent approval of consent-page delivery/security controls.
