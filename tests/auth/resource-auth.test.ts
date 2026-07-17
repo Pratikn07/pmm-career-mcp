@@ -1,0 +1,105 @@
+import { createServer, type Server } from "node:http";
+import express from "express";
+import { exportJWK, generateKeyPair, SignJWT } from "jose";
+import request from "supertest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { loadConfig, type AppConfig } from "../../src/config.js";
+import { createResourceAuth, protectedResourceMetadata } from "../../src/auth/resource-auth.js";
+
+type IssuerFixture = {
+  issuer: string;
+  config: AppConfig;
+  server: Server;
+  key: Awaited<ReturnType<typeof generateKeyPair>>["privateKey"];
+  token(overrides?: { audience?: string; subject?: string; expiresIn?: string }): Promise<string>;
+};
+
+async function startIssuer(): Promise<IssuerFixture> {
+  const { privateKey, publicKey } = await generateKeyPair("RS256");
+  const publicJwk = await exportJWK(publicKey);
+  publicJwk.kid = "test-key";
+  publicJwk.use = "sig";
+  publicJwk.alg = "RS256";
+
+  const issuerApp = express();
+  const server = createServer(issuerApp);
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (address === null || typeof address === "string") throw new Error("No test issuer address");
+  const issuer = `http://127.0.0.1:${address.port}`;
+  issuerApp.get("/.well-known/openid-configuration", (_request, response) => {
+    response.json({ issuer, jwks_uri: `${issuer}/jwks` });
+  });
+  issuerApp.get("/jwks", (_request, response) => response.json({ keys: [publicJwk] }));
+
+  return {
+    issuer,
+    config: loadConfig({
+      NODE_ENV: "test",
+      AUTH_MODE: "oauth",
+      BASE_URL: "http://127.0.0.1:3000/",
+      OIDC_ISSUER: issuer,
+      OIDC_AUDIENCE: "career-mcp",
+      ALLOWED_SUBJECT: "user-123",
+      TOKEN_ENCRYPTION_KEY: "a".repeat(64)
+    }),
+    server,
+    key: privateKey,
+    token: async (overrides = {}) => new SignJWT({})
+      .setProtectedHeader({ alg: "RS256", kid: "test-key" })
+      .setIssuer(issuer)
+      .setAudience(overrides.audience ?? "career-mcp")
+      .setSubject(overrides.subject ?? "user-123")
+      .setIssuedAt()
+      .setExpirationTime(overrides.expiresIn ?? "5m")
+      .sign(privateKey)
+  };
+}
+
+describe("protected resource authentication", () => {
+  let fixture: IssuerFixture;
+
+  beforeAll(async () => { fixture = await startIssuer(); });
+  afterAll(async () => { await new Promise<void>((resolve, reject) => fixture.server.close((error) => error ? reject(error) : resolve())); });
+
+  it("publishes canonical protected-resource metadata", () => {
+    expect(protectedResourceMetadata(fixture.config)).toEqual({
+      resource: "http://127.0.0.1:3000",
+      authorization_servers: [fixture.issuer],
+      scopes_supported: ["mcp"],
+      resource_documentation: "http://127.0.0.1:3000/docs"
+    });
+  });
+
+  it("accepts a correctly signed, issuer-bound, audience-bound token for the configured subject", async () => {
+    const app = express();
+    app.use(createResourceAuth(fixture.config));
+    app.get("/protected", (_request, response) => response.json({ ok: true }));
+
+    const response = await request(app).get("/protected").set("authorization", `Bearer ${await fixture.token()}`);
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({ ok: true });
+  });
+
+  it("returns generic responses for missing, invalid, expired, and unauthorized-subject tokens", async () => {
+    const app = express();
+    app.use(createResourceAuth(fixture.config));
+    app.get("/protected", (_request, response) => response.json({ ok: true }));
+
+    const cases = [
+      { label: "missing", token: undefined, status: 401 },
+      { label: "wrong audience", token: await fixture.token({ audience: "other" }), status: 401 },
+      { label: "expired", token: await fixture.token({ expiresIn: "-1s" }), status: 401 },
+      { label: "wrong subject", token: await fixture.token({ subject: "someone-else" }), status: 403 }
+    ] as const;
+
+    for (const candidate of cases) {
+      const response = await request(app)
+        .get("/protected")
+        .set(candidate.token === undefined ? {} : { authorization: `Bearer ${candidate.token}` });
+      expect(response.status, candidate.label).toBe(candidate.status);
+      expect(response.body, candidate.label).toEqual({ error: "Access to this MCP resource is denied" });
+      expect(response.text, candidate.label).not.toMatch(/user-123|someone-else|aud|claim|jwt|expired/i);
+    }
+  });
+});

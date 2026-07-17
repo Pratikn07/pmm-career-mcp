@@ -4,12 +4,19 @@ import type { ErrorRequestHandler } from "express";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import type { AppConfig } from "../config.js";
+import { createResourceAuth, protectedResourceMetadata } from "../auth/resource-auth.js";
 
-type LegacyHttpDependencies = {
+type CommonHttpDependencies = {
+  /** Required by hosted OAuth deployments; omitted only for existing local test handlers. */
+  config?: AppConfig;
+};
+
+type LegacyHttpDependencies = CommonHttpDependencies & {
   mcpHandler: RequestHandler;
 };
 
-type StreamableMcpDependencies = {
+type StreamableMcpDependencies = CommonHttpDependencies & {
   /** A fresh server prevents one stateless request leaking state into another. */
   mcpServerFactory: () => McpServer;
 };
@@ -77,11 +84,22 @@ export function createHttpApp(deps: HttpDependencies): Express {
   // This runs before body parsing so malformed and too-large body responses
   // receive the same correlation header as normal MCP responses.
   app.use("/mcp", mcpRequestId);
+  // Authenticate before parsing a potentially large or malformed MCP body.
+  // The public metadata route is registered below and is deliberately outside
+  // this path-scoped middleware.
+  if (deps.config !== undefined && deps.config.authMode === "oauth") {
+    app.use("/mcp", createResourceAuth(deps.config));
+  }
   app.use(express.json({ limit: "1mb" }));
 
   app.get("/health", (_request, response) => {
     response.json({ status: "ok" });
   });
+  if (deps.config !== undefined && deps.config.authMode === "oauth") {
+    app.get("/.well-known/oauth-protected-resource", (_request, response) => {
+      response.json(protectedResourceMetadata(deps.config!));
+    });
+  }
   app.all("/mcp", "mcpHandler" in deps ? deps.mcpHandler : streamableMcpHandler(deps.mcpServerFactory));
   app.use(mcpJsonBodyError);
 
