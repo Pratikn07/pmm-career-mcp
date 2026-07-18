@@ -32,6 +32,15 @@ function localCliAnonKey(rawPayload = `{
   return legacySupabaseKey("anon", { rawPayload });
 }
 
+// Claim values and formatting mirror the current public Supabase Docker
+// `.env.example`; the test uses this suite's fake canonical signature.
+const OFFICIAL_DOCKER_ANON_PAYLOAD = "{  \n"
+  + "    \"role\": \"anon\",\n"
+  + "    \"iss\": \"supabase-demo\",\n"
+  + "    \"iat\": 1641769200,\n"
+  + "    \"exp\": 1799535600\n"
+  + "}";
+
 describe("loadConfig", () => {
   const productionConfig = {
     NODE_ENV: "production" as const,
@@ -159,6 +168,15 @@ describe("loadConfig", () => {
     }).supabasePublishableKey).toBe(key);
   });
 
+  it("accepts the exact current public Supabase Docker anon claim profile on loopback", () => {
+    const key = localCliAnonKey(OFFICIAL_DOCKER_ANON_PAYLOAD);
+    expect(loadConfig({
+      NODE_ENV: "development",
+      SUPABASE_URL: "http://127.0.0.1:54321",
+      SUPABASE_PUBLISHABLE_KEY: key
+    }).supabasePublishableKey).toBe(key);
+  });
+
   it.each([
     { label: "remote URL", env: { NODE_ENV: "test", SUPABASE_URL: "https://project.supabase.co" } },
     { label: "non-loopback IP", env: { NODE_ENV: "test", SUPABASE_URL: "http://127.0.0.2:54321" } },
@@ -171,9 +189,13 @@ describe("loadConfig", () => {
   it.each([
     localCliAnonKey(`{"iss":"supabase-demo","role":"service_role","exp":2035091493}`),
     localCliAnonKey(`{"iss":"supabase-demo","role":"anon","exp":1}`),
+    localCliAnonKey(`{"iss":"supabase-demo","role":"anon","iat":"1641769200","exp":1799535600}`),
+    localCliAnonKey(`{"iss":"supabase-demo","role":"anon","iat":0,"exp":1799535600}`),
+    localCliAnonKey(`{"iss":"supabase-demo","role":"anon","iat":1799535600,"exp":1799535600}`),
+    localCliAnonKey(`{"iss":"supabase-demo","role":"anon","iat":1799535601,"exp":1799535600}`),
+    localCliAnonKey(`{"iss":"supabase-demo","role":"anon","iat":9007199254740992,"exp":1799535600}`),
     localCliAnonKey(`{"iss":"supabase-demo","role":"service_role","role":"anon","exp":2035091493}`),
     localCliAnonKey(`{"iss":"supabase-demo","role":"service_role","r\\u006fle":"anon","exp":2035091493}`),
-    localCliAnonKey(`{"iss":"supabase-demo","role":"anon","exp":2035091493,"iat":1700000000}`),
     localCliAnonKey(`{"iss":"supabase-demo","role":"anon","exp":2035091493,"ref":"${FAKE_PROJECT_REF}"}`)
   ])("rejects a malformed or ambiguous CLI local anon profile", (key) => {
     expect(() => loadConfig({

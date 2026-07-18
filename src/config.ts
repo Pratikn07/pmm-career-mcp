@@ -197,14 +197,21 @@ function isLocalCliAnonKey(value: string): boolean {
   const payload = decodeUnambiguousLegacyJwtPart(parts[1]!);
   if (header?.alg !== "HS256" || header.typ !== "JWT" || payload === undefined) return false;
   const keys = Object.keys(payload);
-  return keys.length === 3
-    && keys.every((key) => key === "iss" || key === "role" || key === "exp")
+  const hasIssuedAt = Object.hasOwn(payload, "iat");
+  const validIssuedAt = !hasIssuedAt || (typeof payload.iat === "number"
+    && Number.isSafeInteger(payload.iat)
+    && payload.iat > 0
+    && typeof payload.exp === "number"
+    && payload.iat < payload.exp);
+  return (keys.length === 3 || keys.length === 4)
+    && keys.every((key) => key === "iss" || key === "role" || key === "exp" || key === "iat")
     && payload.iss === "supabase-demo"
     && payload.role === "anon"
     && typeof payload.exp === "number"
     && Number.isSafeInteger(payload.exp)
-    && payload.exp > Math.floor(Date.now() / 1_000)
-    && payload.exp <= 4_102_444_800;
+    && payload.exp >= 1_000_000_000
+    && payload.exp <= 4_102_444_800
+    && validIssuedAt;
 }
 
 function requireBrowserSafeSupabaseKey(
