@@ -30,6 +30,14 @@ describe("Supabase runtime-role operator template", () => {
     expect(sql).not.toMatch(/password\s+['"][^'"]+['"]/i);
   });
 
+  it("works with Supabase's non-superuser postgres owner and fails closed on unsafe reused attributes", async () => {
+    const sql = await runtimeRoleSql();
+
+    expect(sql).toMatch(/rolsuper[\s\S]*rolcreatedb[\s\S]*rolcreaterole[\s\S]*rolreplication[\s\S]*rolbypassrls/i);
+    expect(sql).toMatch(/raise\s+exception[\s\S]*unsafe role attributes/i);
+    expect(sql).not.toMatch(/alter\s+role\s+career_mcp_runtime[\s\S]{0,180}\b(?:nosuperuser|nocreatedb|nocreaterole|noreplication|nobypassrls)\b/i);
+  });
+
   it("grants only the existing and future application data access the runtime needs", async () => {
     const sql = await runtimeRoleSql();
 
