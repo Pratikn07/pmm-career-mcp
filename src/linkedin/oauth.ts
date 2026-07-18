@@ -100,6 +100,7 @@ export function createLinkedInOAuth(database: CareerDatabase, dependencies: Link
 
     const url = new URL(AUTHORIZATION_ENDPOINT);
     url.searchParams.set("response_type", "code");
+    url.searchParams.set("enable_extended_login", "true");
     url.searchParams.set("client_id", dependencies.clientId);
     url.searchParams.set("redirect_uri", dependencies.redirectUri);
     url.searchParams.set("scope", REQUIRED_SCOPES.join(" "));

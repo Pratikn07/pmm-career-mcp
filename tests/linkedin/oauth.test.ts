@@ -38,6 +38,7 @@ describe("LinkedIn OAuth", () => {
 
     expect(url.origin + url.pathname).toBe("https://www.linkedin.com/oauth/v2/authorization");
     expect(url.searchParams.get("response_type")).toBe("code");
+    expect(url.searchParams.get("enable_extended_login")).toBe("true");
     expect(url.searchParams.get("client_id")).toBe("client-id");
     expect(url.searchParams.get("redirect_uri")).toBe("https://career.example.com/linkedin/callback");
     expect(new Set(url.searchParams.get("scope")?.split(" "))).toEqual(
