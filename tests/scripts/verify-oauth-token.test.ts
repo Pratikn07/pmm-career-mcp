@@ -8,12 +8,13 @@ const expected = {
 };
 
 describe("OAuth token verification script helpers", () => {
-  it("accepts the exact configured issuer, Base URL audience, expiry, and subject", () => {
+  it("accepts the exact configured issuer, Base URL audience, expiry, subject, and resource scopes", () => {
     expect(() => validateVerifiedTokenClaims({
       iss: expected.issuer,
       aud: expected.audience,
       exp: Math.floor(Date.now() / 1000) + 60,
-      sub: expected.subject
+      sub: expected.subject,
+      scope: "email openid"
     }, expected)).not.toThrow();
   });
 
@@ -21,13 +22,18 @@ describe("OAuth token verification script helpers", () => {
     { label: "array audience", mutate: (claims: Record<string, unknown>) => { claims.aud = [expected.audience]; } },
     { label: "wrong audience", mutate: (claims: Record<string, unknown>) => { claims.aud = "https://other.example"; } },
     { label: "missing subject", mutate: (claims: Record<string, unknown>) => { delete claims.sub; } },
-    { label: "expired", mutate: (claims: Record<string, unknown>) => { claims.exp = Math.floor(Date.now() / 1000) - 1; } }
+    { label: "expired", mutate: (claims: Record<string, unknown>) => { claims.exp = Math.floor(Date.now() / 1000) - 1; } },
+    { label: "missing scope", mutate: (claims: Record<string, unknown>) => { delete claims.scope; } },
+    { label: "partial scope", mutate: (claims: Record<string, unknown>) => { claims.scope = "openid"; } },
+    { label: "unexpected scope", mutate: (claims: Record<string, unknown>) => { claims.scope = "openid email profile"; } },
+    { label: "duplicate scope", mutate: (claims: Record<string, unknown>) => { claims.scope = "openid email email"; } }
   ])("rejects $label without including claims in its error", ({ mutate }) => {
     const claims: Record<string, unknown> = {
       iss: expected.issuer,
       aud: expected.audience,
       exp: Math.floor(Date.now() / 1000) + 60,
-      sub: expected.subject
+      sub: expected.subject,
+      scope: "openid email"
     };
     mutate(claims);
     expect(() => validateVerifiedTokenClaims(claims, expected)).toThrow("OAuth token verification failed");

@@ -2,15 +2,15 @@ import { createRemoteJWKSet, customFetch, jwtVerify, type FetchImplementation, t
 import type { RequestHandler } from "express";
 import { z } from "zod";
 import type { AppConfig } from "../config.js";
+import { hasExactSupabaseOAuthScopes, SUPABASE_OAUTH_SCOPES } from "./scopes.js";
+
+export { SUPABASE_OAUTH_SCOPES } from "./scopes.js";
 
 export type OAuthProtectedResourceMetadata = {
   resource: string;
   authorization_servers: string[];
   scopes_supported: string[];
-  resource_documentation: string;
 };
-
-export const SUPABASE_OAUTH_SCOPES = ["openid", "email"] as const;
 
 const oidcMetadataSchema = z.object({
   issuer: z.string().url(),
@@ -57,8 +57,7 @@ export function protectedResourceMetadata(config: AppConfig): OAuthProtectedReso
   return {
     resource,
     authorization_servers: [issuer],
-    scopes_supported: [...SUPABASE_OAUTH_SCOPES],
-    resource_documentation: `${resource}/docs`
+    scopes_supported: [...SUPABASE_OAUTH_SCOPES]
   };
 }
 
@@ -132,13 +131,9 @@ export function createResourceAuth(config: AppConfig): RequestHandler {
 
     try {
       const { payload } = await jwtVerify(token, await keyFor(), { issuer, audience, requiredClaims: ["exp"] });
-      const grantedScopes = typeof payload.scope === "string"
-        ? new Set(payload.scope.split(/\s+/).filter(Boolean))
-        : undefined;
       if (payload.aud !== audience
         || payload.sub !== subject
-        || grantedScopes === undefined
-        || !SUPABASE_OAUTH_SCOPES.every((scope) => grantedScopes.has(scope))) {
+        || !hasExactSupabaseOAuthScopes(payload.scope)) {
         response.setHeader("WWW-Authenticate", authenticationChallenge(config));
         response.status(401).json({ error: "Access to this MCP resource is denied" });
         return;

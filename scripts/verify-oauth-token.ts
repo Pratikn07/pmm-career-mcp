@@ -1,5 +1,6 @@
 import { fileURLToPath } from "node:url";
 import { createRemoteJWKSet, jwtVerify, type JWTPayload } from "jose";
+import { hasExactSupabaseOAuthScopes } from "../src/auth/scopes.js";
 
 export type OAuthTokenExpectations = {
   issuer: string;
@@ -62,6 +63,7 @@ export function validateVerifiedTokenClaims(payload: JWTPayload, expected: OAuth
     || payload.sub !== expected.subject
     || typeof payload.exp !== "number"
     || payload.exp <= now
+    || !hasExactSupabaseOAuthScopes(payload.scope)
   ) {
     throw tokenFailure();
   }
@@ -73,7 +75,7 @@ export async function verifyOAuthAccessToken(token: string, expected: OAuthToken
     const { payload } = await jwtVerify(token, jwks, {
       issuer: expected.issuer,
       audience: expected.audience,
-      requiredClaims: ["exp", "sub"]
+      requiredClaims: ["exp", "sub", "scope"]
     });
     validateVerifiedTokenClaims(payload, expected);
   } catch {
@@ -86,7 +88,7 @@ async function main(): Promise<void> {
     const expected = oauthTokenExpectations(process.env);
     const token = await readOAuthAccessToken(process.env);
     await verifyOAuthAccessToken(token, expected);
-    process.stdout.write("OAuth token accepted for the configured issuer, audience, and subject.\n");
+    process.stdout.write("OAuth token accepted for the configured issuer, audience, subject, and exact resource scopes.\n");
   } catch {
     process.stderr.write("OAuth token verification failed.\n");
     process.exitCode = 1;

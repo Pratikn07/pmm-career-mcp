@@ -97,8 +97,7 @@ describe("protected resource authentication", () => {
     expect(protectedResourceMetadata(fixture.config)).toEqual({
       resource: "http://127.0.0.1:3000",
       authorization_servers: [fixture.issuer],
-      scopes_supported: ["openid", "email"],
-      resource_documentation: "http://127.0.0.1:3000/docs"
+      scopes_supported: ["openid", "email"]
     });
   });
 
@@ -191,7 +190,9 @@ describe("protected resource authentication", () => {
       { label: "wrong subject", token: await fixture.token({ subject: "someone-else" }), status: 401 },
       { label: "missing scope", token: await fixture.token({ scope: null }), status: 401 },
       { label: "missing email scope", token: await fixture.token({ scope: "openid" }), status: 401 },
-      { label: "missing openid scope", token: await fixture.token({ scope: "email" }), status: 401 }
+      { label: "missing openid scope", token: await fixture.token({ scope: "email" }), status: 401 },
+      { label: "unexpected scope", token: await fixture.token({ scope: "openid email profile" }), status: 401 },
+      { label: "duplicate scope", token: await fixture.token({ scope: "openid email email" }), status: 401 }
     ] as const;
 
     for (const candidate of cases) {

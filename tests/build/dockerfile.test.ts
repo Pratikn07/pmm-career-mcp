@@ -77,7 +77,10 @@ it("provides a no-secret Supabase, Railway, and ChatGPT operator runbook", async
   expect(runbook).toContain("/ready");
   expect(runbook).toContain("/mcp");
   expect(runbook).toContain("beta");
-  expect(runbook).toContain("wrong `aud` claim");
+  expect(runbook).toMatch(/mandatory OAuth audience hook/i);
+  expect(runbook).toMatch(/monitor[^\n]*registered clients/i);
+  expect(runbook).toMatch(/refresh token/i);
+  expect(runbook).toMatch(/Business[^\n]*admin (?:or|\/) owner/i);
   expect(runbook).toContain("GitHub App access to only this repository");
   expect(runbook).toContain("LINKEDIN_PUBLISH_ENABLED=false");
   expect(runbook).toContain("`LINKEDIN_REDIRECT_URI`");
