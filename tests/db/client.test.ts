@@ -75,6 +75,22 @@ describe("production PostgreSQL client", () => {
     }
   );
 
+  it.each([
+    ["runtime", `${DATABASE_URL}?statement_timeout=0`],
+    ["runtime", `${DATABASE_URL}?idle_in_transaction_session_timeout=0`],
+    ["runtime", `${DATABASE_URL}?application_name=untrusted`],
+    ["migration", `${MIGRATION_DATABASE_URL}?statement_timeout=0`],
+    ["migration", `${MIGRATION_DATABASE_URL}?idle_in_transaction_session_timeout=0`],
+    ["migration", `${MIGRATION_DATABASE_URL}?application_name=untrusted`]
+  ])("rejects a %s URL that overrides a protected startup parameter", async (purpose, unsafeUrl) => {
+    const runtimeUrl = purpose === "runtime" ? unsafeUrl : DATABASE_URL;
+    const migrationDatabaseUrl = purpose === "migration" ? unsafeUrl : MIGRATION_DATABASE_URL;
+
+    await expect(createDatabase(runtimeUrl, { migrationDatabaseUrl, requireTls: false }))
+      .rejects.toThrow(/application_name|statement_timeout|idle_in_transaction_session_timeout/i);
+    expect(mocks.postgres).not.toHaveBeenCalled();
+  });
+
   it("uses separate migration and runtime pools with verified TLS and finite timeouts", async () => {
     process.env.NODE_ENV = "development";
 
@@ -171,6 +187,18 @@ describe("production PostgreSQL client", () => {
     );
 
     expect(mocks.migrationEnd).toHaveBeenCalledWith({ timeout: 5 });
+    expect(mocks.runtimeEnd).toHaveBeenCalledWith({ timeout: 5 });
+  });
+
+  it("retries migration-pool shutdown after the first end attempt rejects", async () => {
+    mocks.migrationEnd
+      .mockRejectedValueOnce(new Error("first migration close failed"))
+      .mockResolvedValueOnce(undefined);
+
+    await expect(createDatabase(DATABASE_URL, { requireTls: false }))
+      .rejects.toThrow("first migration close failed");
+
+    expect(mocks.migrationEnd).toHaveBeenCalledTimes(2);
     expect(mocks.runtimeEnd).toHaveBeenCalledWith({ timeout: 5 });
   });
 

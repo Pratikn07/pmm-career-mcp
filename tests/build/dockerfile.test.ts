@@ -51,6 +51,12 @@ it("provides a no-secret Supabase, Railway, and ChatGPT operator runbook", async
   expect(environmentExample).toContain("LINKEDIN_PUBLISH_ENABLED=false");
   expect(environmentExample).toMatch(/OIDC_ISSUER=.*\/auth\/v1/);
   expect(environmentExample).toContain("OIDC_AUDIENCE=https://<railway-service-domain>");
+  expect(environmentExample).toContain("career_mcp_runtime.<project-ref>");
+  expect(environmentExample).toContain("postgres.<project-ref>");
+  expect(environmentExample).toContain("aws-<region>.pooler.supabase.com");
+  expect(environmentExample).toMatch(/percent-encode/i);
+  expect(readme).toMatch(/change both `DATABASE_URL` and `MIGRATION_DATABASE_URL`/i);
+  expect(readme).toMatch(/production[\s\S]*`DATABASE_URL`[\s\S]*`MIGRATION_DATABASE_URL`/i);
   expect(runbook).toContain("Data API");
   expect(runbook).toContain("`anon` or `authenticated`");
   expect(runbook).toContain("asymmetric JWT");
@@ -58,6 +64,11 @@ it("provides a no-secret Supabase, Railway, and ChatGPT operator runbook", async
   expect(runbook).toContain("Site URL");
   expect(runbook).toContain("Dynamic Client Registration");
   expect(runbook).toContain("npm run smoke:supabase");
+  expect(runbook).toMatch(/Dashboard[^\n]*Connect/i);
+  expect(runbook).toMatch(/Session Pooler/i);
+  expect(runbook).toMatch(/percent-encode/i);
+  expect(runbook).toMatch(/`MIGRATION_DATABASE_URL`[^\n]*migrat/i);
+  expect(runbook).toMatch(/`DATABASE_URL`[^\n]*(?:read|write|DML|runtime)/i);
   expect(runbook).toContain("/oauth/consent");
   expect(runbook).toContain("/health");
   expect(runbook).toContain("/ready");

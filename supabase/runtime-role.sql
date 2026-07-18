@@ -15,6 +15,15 @@ begin
   ) then
     create role career_mcp_runtime;
   end if;
+
+  if exists (
+    select 1
+    from pg_catalog.pg_auth_members membership
+    join pg_catalog.pg_roles member_role on member_role.oid = membership.member
+    where member_role.rolname = 'career_mcp_runtime'
+  ) then
+    raise exception 'career_mcp_runtime has an existing parent role membership; remove it before continuing';
+  end if;
 end
 $operator$;
 

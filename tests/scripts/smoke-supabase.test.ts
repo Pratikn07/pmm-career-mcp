@@ -2,11 +2,21 @@ import { describe, expect, it, vi } from "vitest";
 import {
   resolveAndPinLiveSupabaseDatabaseUrl,
   runLiveSupabaseSmoke,
+  runSupabaseMigration,
   runSupabaseSmoke,
   validateLiveSupabaseDatabaseUrl,
   type PinnedSupabaseDatabaseTarget,
+  type SupabaseMigrationOperations,
   type SupabaseSmokeOperations
 } from "../../scripts/smoke-supabase.js";
+
+function migrationOperations(overrides: Partial<SupabaseMigrationOperations> = {}): SupabaseMigrationOperations {
+  return {
+    migrate: vi.fn(async () => undefined),
+    close: vi.fn(async () => undefined),
+    ...overrides
+  };
+}
 
 function operations(overrides: Partial<SupabaseSmokeOperations> = {}): SupabaseSmokeOperations {
   const transaction = {
@@ -84,46 +94,114 @@ describe("Supabase live target guard", () => {
 
   it("requires confirmation before DNS lookup or any operation factory", async () => {
     const lookup = vi.fn(async () => [{ address: "1.1.1.1", family: 4 }]);
-    const createOperations = vi.fn();
+    const createMigrationOperations = vi.fn();
+    const createRuntimeOperations = vi.fn();
 
-    await expect(runLiveSupabaseSmoke({ DATABASE_URL: canonicalUrl }, { lookup, createOperations }))
+    await expect(runLiveSupabaseSmoke({
+      DATABASE_URL: canonicalUrl,
+      MIGRATION_DATABASE_URL: canonicalUrl
+    }, { lookup, createMigrationOperations, createRuntimeOperations }))
       .rejects.toThrow("CONFIRM_LIVE_SUPABASE_SMOKE=yes");
 
     expect(lookup).not.toHaveBeenCalled();
-    expect(createOperations).not.toHaveBeenCalled();
+    expect(createMigrationOperations).not.toHaveBeenCalled();
+    expect(createRuntimeOperations).not.toHaveBeenCalled();
   });
 
   it("rejects an arbitrary hostname before DNS lookup or connection creation", async () => {
     const lookup = vi.fn(async () => [{ address: "1.1.1.1", family: 4 }]);
-    const createOperations = vi.fn();
+    const createMigrationOperations = vi.fn();
+    const createRuntimeOperations = vi.fn();
 
     await expect(runLiveSupabaseSmoke({
       CONFIRM_LIVE_SUPABASE_SMOKE: "yes",
-      DATABASE_URL: "postgresql://db.example.com:5432/postgres"
-    }, { lookup, createOperations })).rejects.toThrow(/live Supabase PostgreSQL/i);
+      DATABASE_URL: "postgresql://db.example.com:5432/postgres",
+      MIGRATION_DATABASE_URL: canonicalUrl
+    }, { lookup, createMigrationOperations, createRuntimeOperations })).rejects.toThrow(/live Supabase PostgreSQL/i);
 
     expect(lookup).not.toHaveBeenCalled();
-    expect(createOperations).not.toHaveBeenCalled();
+    expect(createMigrationOperations).not.toHaveBeenCalled();
+    expect(createRuntimeOperations).not.toHaveBeenCalled();
   });
 
   it("passes a credential-bearing pooler URL privately to the pinned client factory", async () => {
-    const createOperations = vi.fn(async (_target: PinnedSupabaseDatabaseTarget) => operations());
+    const createMigrationOperations = vi.fn(async (_target: PinnedSupabaseDatabaseTarget) => migrationOperations());
+    const createRuntimeOperations = vi.fn(async (_target: PinnedSupabaseDatabaseTarget) => operations());
     const databaseUrl = "postgresql://postgres.project-ref:fake-password@aws-0-us-east-1.pooler.supabase.com:5432/postgres";
 
     await runLiveSupabaseSmoke({
       CONFIRM_LIVE_SUPABASE_SMOKE: "yes",
-      DATABASE_URL: databaseUrl
+      DATABASE_URL: databaseUrl,
+      MIGRATION_DATABASE_URL: databaseUrl
     }, {
       lookup: async () => [{ address: "1.1.1.1", family: 4 }],
-      createOperations
+      createMigrationOperations,
+      createRuntimeOperations
     });
 
-    const target = createOperations.mock.calls[0]?.[0];
+    const target = createRuntimeOperations.mock.calls[0]?.[0];
     if (target === undefined) throw new Error("client factory was not called");
     const pinnedUrl = new URL(target.databaseUrl);
     expect(pinnedUrl.hostname).toBe("1.1.1.1");
     expect(pinnedUrl.username).toBe("postgres.project-ref");
     expect(pinnedUrl.password).toBe("fake-password");
+  });
+
+  it("uses the migration URL only for migrations and the runtime URL only for DML verification", async () => {
+    const migration = migrationOperations();
+    const runtime = operations();
+    const createMigrationOperations = vi.fn(async (_target: PinnedSupabaseDatabaseTarget) => migration);
+    const createRuntimeOperations = vi.fn(async (_target: PinnedSupabaseDatabaseTarget) => runtime);
+    const migrationUrl = "postgresql://postgres.project-ref:owner-password@aws-0-us-east-1.pooler.supabase.com:5432/postgres";
+    const runtimeUrl = "postgresql://career_mcp_runtime.project-ref:runtime-password@aws-0-us-east-1.pooler.supabase.com:5432/postgres";
+
+    await runLiveSupabaseSmoke({
+      CONFIRM_LIVE_SUPABASE_SMOKE: "yes",
+      DATABASE_URL: runtimeUrl,
+      MIGRATION_DATABASE_URL: migrationUrl
+    }, {
+      lookup: async () => [{ address: "1.1.1.1", family: 4 }],
+      createMigrationOperations,
+      createRuntimeOperations
+    });
+
+    expect(new URL(createMigrationOperations.mock.calls[0]![0].databaseUrl).username).toBe("postgres.project-ref");
+    expect(new URL(createRuntimeOperations.mock.calls[0]![0].databaseUrl).username).toBe("career_mcp_runtime.project-ref");
+    expect(migration.migrate).toHaveBeenCalledOnce();
+    expect(migration.close).toHaveBeenCalledOnce();
+    expect(runtime.runRollbackTransaction).toHaveBeenCalledOnce();
+    expect(runtime.closeTransactionConnection).toHaveBeenCalledOnce();
+    expect(runtime.closeVerificationConnection).toHaveBeenCalledOnce();
+  });
+});
+
+describe("Supabase migration setup", () => {
+  it("closes the migration connection when migration succeeds", async () => {
+    const migration = migrationOperations();
+
+    await runSupabaseMigration(migration);
+
+    expect(migration.migrate).toHaveBeenCalledOnce();
+    expect(migration.close).toHaveBeenCalledOnce();
+  });
+
+  it("closes the migration connection and fails safely when migration rejects", async () => {
+    const migration = migrationOperations({
+      migrate: vi.fn(async () => { throw new Error("private migration error"); })
+    });
+
+    await expect(runSupabaseMigration(migration)).rejects.toThrow("verification failed");
+
+    expect(migration.close).toHaveBeenCalledOnce();
+  });
+
+  it("fails safely when closing the migration connection rejects", async () => {
+    const migration = migrationOperations({
+      close: vi.fn(async () => { throw new Error("private close error"); })
+    });
+
+    await expect(runSupabaseMigration(migration)).rejects.toThrow("verification failed");
+    expect(migration.close).toHaveBeenCalledOnce();
   });
 });
 

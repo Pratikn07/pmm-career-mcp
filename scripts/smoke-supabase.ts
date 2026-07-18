@@ -28,13 +28,19 @@ export type SupabaseSmokeOperations = {
   closeVerificationConnection(): Promise<void>;
 };
 
+export type SupabaseMigrationOperations = {
+  migrate(): Promise<void>;
+  close(): Promise<void>;
+};
+
 export type DnsRecord = { address: string; family: number };
 export type DnsResolver = (hostname: string) => Promise<DnsRecord[]>;
 export type PinnedSupabaseDatabaseTarget = { databaseUrl: string; tlsServerName: string };
 
 export type LiveSupabaseSmokeDependencies = {
   lookup?: DnsResolver;
-  createOperations?: (target: PinnedSupabaseDatabaseTarget) => Promise<SupabaseSmokeOperations>;
+  createMigrationOperations?: (target: PinnedSupabaseDatabaseTarget) => Promise<SupabaseMigrationOperations>;
+  createRuntimeOperations?: (target: PinnedSupabaseDatabaseTarget) => Promise<SupabaseSmokeOperations>;
 };
 
 function smokeFailure(): Error {
@@ -156,6 +162,22 @@ export async function runSupabaseSmoke(operations: SupabaseSmokeOperations, mark
   if (failed) throw smokeFailure();
 }
 
+/** Applies committed migrations and closes the owner connection on every path. */
+export async function runSupabaseMigration(operations: SupabaseMigrationOperations): Promise<void> {
+  let failed = false;
+  try {
+    await operations.migrate();
+  } catch {
+    failed = true;
+  }
+  try {
+    await operations.close();
+  } catch {
+    failed = true;
+  }
+  if (failed) throw smokeFailure();
+}
+
 function findMigrationsFolder(): string {
   let directory = dirname(fileURLToPath(import.meta.url));
   while (true) {
@@ -176,10 +198,25 @@ function securePostgres(target: PinnedSupabaseDatabaseTarget) {
   });
 }
 
-async function createLiveOperations(target: PinnedSupabaseDatabaseTarget): Promise<SupabaseSmokeOperations> {
+async function createLiveMigrationOperations(
+  target: PinnedSupabaseDatabaseTarget
+): Promise<SupabaseMigrationOperations> {
+  const migrationClient = securePostgres(target);
+  return {
+    migrate: async () => {
+      await migrate(drizzle(migrationClient), { migrationsFolder: findMigrationsFolder() });
+    },
+    close: async () => {
+      await migrationClient.end({ timeout: 5 });
+    }
+  };
+}
+
+async function createLiveRuntimeOperations(
+  target: PinnedSupabaseDatabaseTarget
+): Promise<SupabaseSmokeOperations> {
   const transactionClient = securePostgres(target);
   try {
-    await migrate(drizzle(transactionClient), { migrationsFolder: findMigrationsFolder() });
     await transactionClient`select 1`;
   } catch {
     await transactionClient.end({ timeout: 5 }).catch(() => undefined);
@@ -261,9 +298,29 @@ export async function runLiveSupabaseSmoke(
   if (databaseUrl === undefined || databaseUrl.length === 0) {
     throw new Error("DATABASE_URL is required for the live Supabase smoke");
   }
-  const target = await resolveAndPinLiveSupabaseDatabaseUrl(databaseUrl, dependencies.lookup ?? defaultLookup);
-  const operations = await (dependencies.createOperations ?? createLiveOperations)(target);
-  await runSupabaseSmoke(operations, randomUUID());
+  const migrationDatabaseUrl = env.MIGRATION_DATABASE_URL;
+  if (migrationDatabaseUrl === undefined || migrationDatabaseUrl.length === 0) {
+    throw new Error("MIGRATION_DATABASE_URL is required for the live Supabase smoke");
+  }
+
+  // Reject either target before DNS or client creation so an invalid runtime
+  // URL cannot cause the migration owner to connect first.
+  validateLiveSupabaseDatabaseUrl(databaseUrl);
+  validateLiveSupabaseDatabaseUrl(migrationDatabaseUrl);
+
+  const lookup = dependencies.lookup ?? defaultLookup;
+  const migrationTarget = await resolveAndPinLiveSupabaseDatabaseUrl(migrationDatabaseUrl, lookup);
+  const runtimeTarget = await resolveAndPinLiveSupabaseDatabaseUrl(databaseUrl, lookup);
+
+  const migrationOperations = await (
+    dependencies.createMigrationOperations ?? createLiveMigrationOperations
+  )(migrationTarget);
+  await runSupabaseMigration(migrationOperations);
+
+  const runtimeOperations = await (
+    dependencies.createRuntimeOperations ?? createLiveRuntimeOperations
+  )(runtimeTarget);
+  await runSupabaseSmoke(runtimeOperations, randomUUID());
 }
 
 async function main(): Promise<void> {

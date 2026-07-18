@@ -240,16 +240,40 @@ function requirePostgresUrl(value: string, name: "DATABASE_URL" | "MIGRATION_DAT
   if (url.protocol !== "postgres:" && url.protocol !== "postgresql:") {
     throw new Error(`${name} must be a PostgreSQL URL in production`);
   }
+  const protectedStartupParameters = new Set([
+    "application_name",
+    "statement_timeout",
+    "idle_in_transaction_session_timeout"
+  ]);
+  for (const key of url.searchParams.keys()) {
+    const normalizedKey = key.toLowerCase();
+    if (protectedStartupParameters.has(normalizedKey)) {
+      throw new Error(`${name} must not override the ${normalizedKey} connection parameter`);
+    }
+  }
   return url;
 }
 
-function requireExplicitDatabaseRole(url: URL, name: "DATABASE_URL" | "MIGRATION_DATABASE_URL"): string {
+function requireExplicitDatabaseRole(
+  url: URL,
+  name: "DATABASE_URL" | "MIGRATION_DATABASE_URL",
+  supabaseProjectRef: string
+): string {
   if (url.username === "") throw new Error(`${name} must include an explicit database role username`);
+  let role: string;
   try {
-    return decodeURIComponent(url.username);
+    role = decodeURIComponent(url.username);
   } catch {
     throw new Error(`${name} must include a valid database role username`);
   }
+  if (url.hostname.toLowerCase().endsWith(".pooler.supabase.com")) {
+    const projectSuffix = `.${supabaseProjectRef}`;
+    if (!role.endsWith(projectSuffix) || role.length === projectSuffix.length) {
+      throw new Error(`${name} Supabase pooler username must end with .${supabaseProjectRef}`);
+    }
+    return role.slice(0, -projectSuffix.length);
+  }
+  return role;
 }
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -273,13 +297,18 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
   if (parsed.NODE_ENV === "production") {
     if (env.DATABASE_PATH !== undefined) throw new Error("DATABASE_PATH is not supported; use DATABASE_URL");
 
+    const supabaseUrl = canonicalSupabaseUrl(required(parsed.SUPABASE_URL, "SUPABASE_URL"), true);
+    const supabaseProjectRef = new URL(supabaseUrl).hostname.split(".")[0]!;
     const runtimeDatabase = requirePostgresUrl(required(parsed.DATABASE_URL, "DATABASE_URL"), "DATABASE_URL");
     const migrationDatabase = requirePostgresUrl(
       required(parsed.MIGRATION_DATABASE_URL, "MIGRATION_DATABASE_URL"),
       "MIGRATION_DATABASE_URL"
     );
-    const runtimeRole = requireExplicitDatabaseRole(runtimeDatabase, "DATABASE_URL");
-    const migrationRole = requireExplicitDatabaseRole(migrationDatabase, "MIGRATION_DATABASE_URL");
+    const runtimeRole = requireExplicitDatabaseRole(runtimeDatabase, "DATABASE_URL", supabaseProjectRef);
+    const migrationRole = requireExplicitDatabaseRole(migrationDatabase, "MIGRATION_DATABASE_URL", supabaseProjectRef);
+    if (runtimeRole !== "career_mcp_runtime") {
+      throw new Error("DATABASE_URL must use the career_mcp_runtime database role");
+    }
     if (runtimeRole === migrationRole) {
       throw new Error("MIGRATION_DATABASE_URL must use a different database role from DATABASE_URL");
     }
@@ -287,7 +316,6 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
     if (new URL(baseUrl).protocol !== "https:") {
       throw new Error("BASE_URL must use HTTPS in production");
     }
-    const supabaseUrl = canonicalSupabaseUrl(required(parsed.SUPABASE_URL, "SUPABASE_URL"), true);
     required(parsed.SUPABASE_PUBLISHABLE_KEY, "SUPABASE_PUBLISHABLE_KEY");
 
     const issuer = canonicalUrl(required(parsed.OIDC_ISSUER, "OIDC_ISSUER"), "OIDC_ISSUER");

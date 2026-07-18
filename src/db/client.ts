@@ -23,15 +23,30 @@ const CONNECTION_TIMEOUT_SECONDS = 10;
 const IDLE_TIMEOUT_SECONDS = 30;
 const SESSION_TIMEOUT_MILLISECONDS = 30_000;
 
-function validateDatabaseUrl(databaseUrl: string): URL {
+const PROTECTED_STARTUP_PARAMETERS = new Set([
+  "application_name",
+  "statement_timeout",
+  "idle_in_transaction_session_timeout"
+]);
+
+function validateDatabaseUrl(
+  databaseUrl: string,
+  name: "DATABASE_URL" | "MIGRATION_DATABASE_URL"
+): URL {
   let parsed: URL;
   try {
     parsed = new URL(databaseUrl);
   } catch {
-    throw new Error("DATABASE_URL must be a valid PostgreSQL URL");
+    throw new Error(`${name} must be a valid PostgreSQL URL`);
   }
   if (parsed.protocol !== "postgres:" && parsed.protocol !== "postgresql:") {
-    throw new Error("DATABASE_URL must use the postgres or postgresql scheme");
+    throw new Error(`${name} must use the postgres or postgresql scheme`);
+  }
+  for (const key of parsed.searchParams.keys()) {
+    const normalizedKey = key.toLowerCase();
+    if (PROTECTED_STARTUP_PARAMETERS.has(normalizedKey)) {
+      throw new Error(`${name} must not override the ${normalizedKey} connection parameter`);
+    }
   }
   return parsed;
 }
@@ -80,20 +95,32 @@ export async function createDatabase(
   databaseUrl: string,
   options: DatabaseConnectionOptions
 ): Promise<CareerDatabase> {
-  const runtimeUrl = validateDatabaseUrl(databaseUrl);
+  const runtimeUrl = validateDatabaseUrl(databaseUrl, "DATABASE_URL");
   const migrationDatabaseUrl = options.migrationDatabaseUrl ?? databaseUrl;
-  const migrationUrl = validateDatabaseUrl(migrationDatabaseUrl);
+  const migrationUrl = validateDatabaseUrl(migrationDatabaseUrl, "MIGRATION_DATABASE_URL");
   const migrationClient = postgres(
     migrationDatabaseUrl,
     connectionOptions(migrationUrl, "migration", options.requireTls)
   );
   let runtimeClient: ReturnType<typeof postgres> | undefined;
   let migrationClosed = false;
+  let migrationClosing: Promise<void> | undefined;
 
   const closeMigration = async (): Promise<void> => {
     if (migrationClosed) return;
-    migrationClosed = true;
-    await migrationClient.end({ timeout: 5 });
+    if (migrationClosing === undefined) {
+      const attempt = migrationClient.end({ timeout: 5 });
+      migrationClosing = attempt;
+      try {
+        await attempt;
+        migrationClosed = true;
+      } catch (error) {
+        if (migrationClosing === attempt) migrationClosing = undefined;
+        throw error;
+      }
+      return;
+    }
+    await migrationClosing;
   };
 
   try {

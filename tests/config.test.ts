@@ -120,6 +120,58 @@ describe("loadConfig", () => {
   });
 
   it.each([
+    {
+      label: "runtime role through the session pooler",
+      databaseUrl: "postgresql://career_mcp_runtime.project:runtime-password@aws-0-us-east-1.pooler.supabase.com:5432/postgres",
+      migrationDatabaseUrl: "postgresql://postgres:owner-password@db.project.supabase.co:5432/postgres"
+    },
+    {
+      label: "runtime role through the direct endpoint",
+      databaseUrl: "postgresql://career_mcp_runtime:runtime-password@db.project.supabase.co:5432/postgres",
+      migrationDatabaseUrl: "postgresql://postgres.project:owner-password@aws-0-us-east-1.pooler.supabase.com:5432/postgres"
+    }
+  ])("normalizes Supabase role aliases for $label", ({ databaseUrl, migrationDatabaseUrl }) => {
+    const config = loadConfig({
+      ...productionConfig,
+      DATABASE_URL: databaseUrl,
+      MIGRATION_DATABASE_URL: migrationDatabaseUrl
+    });
+
+    expect(config.databaseUrl).toBe(databaseUrl);
+    expect(config.migrationDatabaseUrl).toBe(migrationDatabaseUrl);
+  });
+
+  it.each([
+    "postgresql://postgres:runtime-password@db.project.supabase.co:5432/postgres",
+    "postgresql://postgres.project:runtime-password@aws-0-us-east-1.pooler.supabase.com:5432/postgres",
+    "postgresql://other_role.project:runtime-password@aws-0-us-east-1.pooler.supabase.com:5432/postgres"
+  ])("requires the production runtime underlying role to be career_mcp_runtime: %s", (databaseUrl) => {
+    expect(() => loadConfig({ ...productionConfig, DATABASE_URL: databaseUrl }))
+      .toThrow(/DATABASE_URL.*career_mcp_runtime/i);
+  });
+
+  it("rejects direct and pooler aliases of the same underlying role", () => {
+    expect(() => loadConfig({
+      ...productionConfig,
+      DATABASE_URL: "postgresql://career_mcp_runtime:runtime-password@db.project.supabase.co:5432/postgres",
+      MIGRATION_DATABASE_URL: "postgresql://career_mcp_runtime.project:owner-password@aws-0-us-east-1.pooler.supabase.com:5432/postgres"
+    })).toThrow(/MIGRATION_DATABASE_URL.*different.*role/i);
+  });
+
+  it.each([
+    ["DATABASE_URL", "statement_timeout"],
+    ["DATABASE_URL", "idle_in_transaction_session_timeout"],
+    ["DATABASE_URL", "application_name"],
+    ["MIGRATION_DATABASE_URL", "statement_timeout"],
+    ["MIGRATION_DATABASE_URL", "idle_in_transaction_session_timeout"],
+    ["MIGRATION_DATABASE_URL", "application_name"]
+  ])("rejects a production %s that overrides %s", (key, parameter) => {
+    const value = `${productionConfig[key as "DATABASE_URL" | "MIGRATION_DATABASE_URL"]}?${parameter}=0`;
+    expect(() => loadConfig({ ...productionConfig, [key]: value }))
+      .toThrow(new RegExp(`${key}.*${parameter}`, "i"));
+  });
+
+  it.each([
     ["DATABASE_URL", "postgresql://db.example/postgres"],
     ["MIGRATION_DATABASE_URL", "postgresql://db.example/postgres"]
   ])("requires an explicit production role in %s", (key, value) => {

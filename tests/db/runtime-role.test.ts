@@ -27,4 +27,12 @@ describe("Supabase runtime-role operator template", () => {
     expect(sql).not.toMatch(/grant[\s\S]{0,120}\b(?:public|anon|authenticated)\b/i);
     expect(sql).not.toMatch(/grant\s+(?:create|all)(?:\s+privileges)?\s+on\s+schema/i);
   });
+
+  it("fails closed when a reused runtime role belongs to any parent role", async () => {
+    const sql = await runtimeRoleSql();
+
+    expect(sql).toMatch(/pg_catalog\.pg_auth_members/i);
+    expect(sql).toMatch(/member_role\.rolname\s*=\s*'career_mcp_runtime'/i);
+    expect(sql).toMatch(/raise\s+exception[\s\S]*role membership/i);
+  });
 });

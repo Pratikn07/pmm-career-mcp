@@ -17,7 +17,7 @@ curl --fail http://127.0.0.1:3000/health
 
 The server applies its committed PostgreSQL migrations and verifies database readiness before opening its HTTP listener. For local development, `AUTH_MODE=none` is allowed only outside production; publishing stays off by default.
 
-The copied example connects to `postgresql://postgres:postgres@127.0.0.1:5432/postgres`; start a local PostgreSQL server there, or change only `DATABASE_URL` in your uncommitted `.env` before running the server. The production values remain commented reference entries in the example and must be set in Railway instead.
+The copied example connects both database variables to `postgresql://postgres:postgres@127.0.0.1:5432/postgres`; start a local PostgreSQL server there, or change both `DATABASE_URL` and `MIGRATION_DATABASE_URL` in your uncommitted `.env` before running the server. Local development may use the same role for both. The production values remain commented reference entries in the example and must be set in Railway instead.
 
 `/health` is a public, database-independent liveness endpoint. `/ready` is the database and migration readiness endpoint. The Docker health check calls `/ready`, and it returns only a generic unavailable response when the database is not ready.
 
@@ -25,7 +25,7 @@ The copied example connects to `postgresql://postgres:postgres@127.0.0.1:5432/po
 
 The detailed, no-secret operator runbook is [docs/deployment/supabase-railway-chatgpt.md](docs/deployment/supabase-railway-chatgpt.md). It covers the private Supabase schema and Auth setup, the Railway service configuration, the required OAuth audience validation, failure diagnostics, and the ChatGPT Developer Mode connector.
 
-Production needs an HTTPS hostname, a TLS-enabled Supabase PostgreSQL `DATABASE_URL`, and `AUTH_MODE=oauth`. The container is stateless:
+Production needs an HTTPS hostname, a TLS-enabled least-privilege Supabase PostgreSQL `DATABASE_URL`, a distinct owner-only `MIGRATION_DATABASE_URL`, and `AUTH_MODE=oauth`. The container is stateless:
 
 ```bash
 docker build -t career-mcp:local .
