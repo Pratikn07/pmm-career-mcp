@@ -266,7 +266,12 @@ function requireExplicitDatabaseRole(
   } catch {
     throw new Error(`${name} must include a valid database role username`);
   }
-  if (url.hostname.toLowerCase().endsWith(".pooler.supabase.com")) {
+  const hostname = url.hostname.toLowerCase();
+  const directSupabaseMatch = /^db\.([a-z0-9-]+)\.supabase\.co$/.exec(hostname);
+  if (directSupabaseMatch !== null && directSupabaseMatch[1] !== supabaseProjectRef) {
+    throw new Error(`${name} direct Supabase host must match the SUPABASE_URL project`);
+  }
+  if (hostname.endsWith(".pooler.supabase.com")) {
     const projectSuffix = `.${supabaseProjectRef}`;
     if (!role.endsWith(projectSuffix) || role.length === projectSuffix.length) {
       throw new Error(`${name} Supabase pooler username must end with .${supabaseProjectRef}`);

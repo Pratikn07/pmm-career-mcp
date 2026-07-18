@@ -159,6 +159,20 @@ describe("loadConfig", () => {
   });
 
   it.each([
+    [
+      "DATABASE_URL",
+      "postgresql://career_mcp_runtime:runtime-password@db.other-project.supabase.co:5432/postgres"
+    ],
+    [
+      "MIGRATION_DATABASE_URL",
+      "postgresql://postgres:owner-password@db.other-project.supabase.co:5432/postgres"
+    ]
+  ])("rejects a production %s direct host for a different Supabase project", (key, value) => {
+    expect(() => loadConfig({ ...productionConfig, [key]: value }))
+      .toThrow(new RegExp(`${key}.*SUPABASE_URL|${key}.*project`, "i"));
+  });
+
+  it.each([
     ["DATABASE_URL", "statement_timeout"],
     ["DATABASE_URL", "idle_in_transaction_session_timeout"],
     ["DATABASE_URL", "application_name"],
