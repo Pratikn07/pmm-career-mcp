@@ -6,7 +6,17 @@ async function runtimeRoleSql(): Promise<string> {
   return await readFile(resolve("supabase/runtime-role.sql"), "utf8");
 }
 
+async function initialMigrationSql(): Promise<string> {
+  return await readFile(resolve("drizzle/0000_initial.sql"), "utf8");
+}
+
 describe("Supabase runtime-role operator template", () => {
+  it("allows migrations after the runtime-role template bootstraps the private schema", async () => {
+    const sql = await initialMigrationSql();
+
+    expect(sql).toMatch(/create\s+schema\s+if\s+not\s+exists\s+"career_mcp"/i);
+  });
+
   it("idempotently bootstraps the private schema without taking ownership of an existing schema", async () => {
     const sql = await runtimeRoleSql();
     const createSchema = sql.search(/create\s+schema\s+if\s+not\s+exists\s+career_mcp/i);

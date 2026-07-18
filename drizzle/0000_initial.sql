@@ -1,4 +1,4 @@
-CREATE SCHEMA "career_mcp";
+CREATE SCHEMA IF NOT EXISTS "career_mcp";
 --> statement-breakpoint
 REVOKE ALL PRIVILEGES ON SCHEMA "career_mcp" FROM PUBLIC;
 --> statement-breakpoint
