@@ -179,6 +179,97 @@ describe("pipeline statuses", () => {
     expect(unchanged).toEqual(saved);
   });
 
+  it("allows only one winner when two callers race from the same status", async () => {
+    const saved = await pipeline.saveTarget(await scoreFor("conflicting-race"));
+    const originalGet = db.targets.get.bind(db.targets);
+    let readers = 0;
+    let releaseReaders!: () => void;
+    const bothRead = new Promise<void>((resolve) => { releaseReaders = resolve; });
+    const getSpy = vi.spyOn(db.targets, "get").mockImplementation(async (id) => {
+      const row = await originalGet(id);
+      readers += 1;
+      if (readers === 2) releaseReaders();
+      await bothRead;
+      return row;
+    });
+
+    try {
+      const results = await Promise.allSettled([
+        pipeline.updateStatus(saved.id, "shortlisted"),
+        pipeline.updateStatus(saved.id, "archived")
+      ]);
+      const fulfilled = results.filter(
+        (result): result is PromiseFulfilledResult<Awaited<ReturnType<typeof pipeline.updateStatus>>> =>
+          result.status === "fulfilled"
+      );
+      const rejected = results.filter(
+        (result): result is PromiseRejectedResult => result.status === "rejected"
+      );
+
+      expect(fulfilled).toHaveLength(1);
+      expect(rejected).toHaveLength(1);
+      expect(rejected[0]?.reason).toMatchObject({
+        code: "CONFLICT",
+        message: "Pipeline status changed concurrently",
+        details: { entity: "target", retryable: true }
+      });
+      expect(["shortlisted", "archived"]).toContain((await db.targets.get(saved.id))?.status);
+    } finally {
+      getSpy.mockRestore();
+    }
+  });
+
+  it("returns idempotently when another caller wins the same requested transition", async () => {
+    const saved = await pipeline.saveTarget(await scoreFor("idempotent-race"));
+    const originalGet = db.targets.get.bind(db.targets);
+    let readers = 0;
+    let releaseReaders!: () => void;
+    const bothRead = new Promise<void>((resolve) => { releaseReaders = resolve; });
+    const getSpy = vi.spyOn(db.targets, "get").mockImplementation(async (id) => {
+      const row = await originalGet(id);
+      readers += 1;
+      if (readers === 2) releaseReaders();
+      await bothRead;
+      return row;
+    });
+
+    try {
+      const results = await Promise.all([
+        pipeline.updateStatus(saved.id, "shortlisted"),
+        pipeline.updateStatus(saved.id, "shortlisted")
+      ]);
+
+      expect(results.map((target) => target.status)).toEqual(["shortlisted", "shortlisted"]);
+      expect(results[0]?.id).toBe(saved.id);
+      expect(results[1]?.id).toBe(saved.id);
+    } finally {
+      getSpy.mockRestore();
+    }
+  });
+
+  it("returns not found when a target disappears after the transition read", async () => {
+    const saved = await pipeline.saveTarget(await scoreFor("deleted-race"));
+    const currentRow = await db.targets.get(saved.id);
+    const getSpy = vi.spyOn(db.targets, "get")
+      .mockResolvedValueOnce(currentRow)
+      .mockResolvedValueOnce(undefined);
+    const updateSpy = vi.spyOn(db.targets, "updateStatus").mockResolvedValue(undefined);
+
+    try {
+      const error = await expectDomainError(
+        async () => pipeline.updateStatus(saved.id, "shortlisted"),
+        "NOT_FOUND"
+      );
+      expect(error).toMatchObject({
+        message: "Target was not found",
+        details: { entity: "target" }
+      });
+    } finally {
+      getSpy.mockRestore();
+      updateSpy.mockRestore();
+    }
+  });
+
   it("returns a typed not-found error for an unknown target", async () => {
     const error = (await expectDomainError(
       async () => (await pipeline.updateStatus("missing-target", "shortlisted")),
@@ -282,13 +373,20 @@ describe("saved targets and pipeline listing", () => {
     const input = (await scoreFor("refresh"));
     const first = (await pipeline.saveTarget(input));
     (await pipeline.updateStatus(first.id, "shortlisted"));
+    const statusRead = vi.spyOn(db.targets, "getByPerson");
 
-    const refreshed = (await pipeline.saveTarget({
-      ...input,
-      pmmOpportunity: 35,
-      total: 80,
-      reasons: ["Updated evidence-backed reason"]
-    }));
+    let refreshed: Awaited<ReturnType<typeof pipeline.saveTarget>>;
+    try {
+      refreshed = (await pipeline.saveTarget({
+        ...input,
+        pmmOpportunity: 35,
+        total: 80,
+        reasons: ["Updated evidence-backed reason"]
+      }));
+      expect(statusRead).not.toHaveBeenCalled();
+    } finally {
+      statusRead.mockRestore();
+    }
 
     expect(refreshed).toMatchObject({
       id: first.id,

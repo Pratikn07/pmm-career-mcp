@@ -87,7 +87,6 @@ export type TargetUpsertInput = {
   networkValue: number;
   totalScore: number;
   confidence: number;
-  status: string;
   rationale: string;
 };
 
@@ -677,6 +676,7 @@ export function createRepositories(database: Database) {
         await database.insert(targets).values({
           id: randomUUID(),
           ...input,
+          status: "discovered",
           createdAt: now,
           updatedAt: now
         }).onConflictDoUpdate({
@@ -687,7 +687,6 @@ export function createRepositories(database: Database) {
             networkValue: input.networkValue,
             totalScore: input.totalScore,
             confidence: input.confidence,
-            status: input.status,
             rationale: input.rationale,
             updatedAt: now
           }
@@ -714,12 +713,19 @@ export function createRepositories(database: Database) {
         ));
         return target === undefined ? undefined : normalizeRowTimestamps(target);
       },
-      async updateStatus(id: string, status: string): Promise<Target | undefined> {
+      async updateStatus(
+        id: string,
+        expectedStatus: string,
+        newStatus: string
+      ): Promise<Target | undefined> {
         if (!isUuid(id)) {
           return undefined;
         }
-        const [target] = await database.update(targets).set({ status, updatedAt: nowIso() }).where(
-          eq(targets.id, id)
+        const [target] = await database.update(targets).set({
+          status: newStatus,
+          updatedAt: nowIso()
+        }).where(
+          and(eq(targets.id, id), eq(targets.status, expectedStatus))
         ).returning();
         return target === undefined ? undefined : normalizeRowTimestamps(target);
       },

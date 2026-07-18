@@ -19,7 +19,7 @@ beforeAll(async () => {
 afterEach(async () => (await db.resetForTests()));
 afterAll(async () => (await db?.close()));
 
-async function addTarget(name = "Ada Example", status = "discovered") {
+async function addTarget(name = "Ada Example") {
   const company = (await db.companies.upsert({
     ycId: `acme-${name}`,
     name: `Acme ${name}`,
@@ -41,7 +41,6 @@ async function addTarget(name = "Ada Example", status = "discovered") {
     networkValue: 20,
     totalScore: 75,
     confidence: 0.9,
-    status,
     rationale: "Strong evidence-backed fit"
   }));
   return { company, person, target };
@@ -375,7 +374,7 @@ it("saves targets, filters the pipeline, and appends notes", async () => {
   const { company, target } = (await addTarget());
   (await db.notes.add({ targetId: target.id, text: "Met at a PMM event" }));
   (await db.notes.add({ targetId: target.id, text: "Follow up next week" }));
-  (await db.targets.updateStatus(target.id, "shortlisted"));
+  (await db.targets.updateStatus(target.id, "discovered", "shortlisted"));
 
   expect((await db.targets.list({ companyId: company.id, status: "shortlisted" }))).toHaveLength(1);
   expect((await db.targets.getByPerson(target.personId))?.id).toBe(target.id);
@@ -384,6 +383,38 @@ it("saves targets, filters the pipeline, and appends notes", async () => {
     "Follow up next week"
   ]);
 });
+
+it("rejects a stale status transition after another caller archives the target", async () => {
+  const { target } = await addTarget("Atomic status target");
+
+  const archived = await db.targets.updateStatus(target.id, "discovered", "archived");
+  const staleShortlist = await db.targets.updateStatus(target.id, "discovered", "shortlisted");
+
+  expect(archived?.status).toBe("archived");
+  expect(staleShortlist).toBeUndefined();
+  expect((await db.targets.get(target.id))?.status).toBe("archived");
+});
+
+it.each(["shortlisted", "archived"])(
+  "keeps %s status while concurrent score refreshes update an existing target",
+  async (status) => {
+    const { target } = await addTarget(`Concurrent score refresh ${status}`);
+    expect(await db.targets.updateStatus(target.id, "discovered", status)).toBeDefined();
+
+    const refresh = (totalScore: number) => db.targets.upsert({
+      personId: target.personId,
+      pmmOpportunity: totalScore - 45,
+      referralPotential: 25,
+      networkValue: 20,
+      totalScore,
+      confidence: 0.95,
+      rationale: `Refreshed rationale ${totalScore}`
+    });
+    await Promise.all([refresh(80), refresh(85)]);
+
+    expect((await db.targets.get(target.id))?.status).toBe(status);
+  }
+);
 
 it("creates immutable outreach draft versions with evidence IDs", async () => {
   const { person, target } = (await addTarget());

@@ -36,7 +36,6 @@ async function addTarget(label: string) {
     networkValue: 20,
     totalScore: 75,
     confidence: 0.9,
-    status: "discovered",
     rationale: JSON.stringify({ version: 1, reasons: ["Verified role"], missingEvidence: [] })
   }));
   return { company, person, evidence, target };

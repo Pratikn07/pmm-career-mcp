@@ -330,8 +330,6 @@ export function createPipelineService(database: CareerDatabase) {
         ) {
           throw validationError("score.companyId", "does_not_match_person");
         }
-        const current = await database.targets.getByPerson(score.personId);
-        const status = current === undefined ? "discovered" : parseTarget(current).status;
         const rationale: StoredRationale = {
           version: 1,
           reasons: [...score.reasons],
@@ -345,7 +343,6 @@ export function createPipelineService(database: CareerDatabase) {
           networkValue: score.networkValue,
           totalScore: score.total,
           confidence: score.confidence,
-          status,
           rationale: JSON.stringify(rationale)
         }));
       });
@@ -375,9 +372,24 @@ export function createPipelineService(database: CareerDatabase) {
             { from: current.status, to: statusInput }
           );
         }
-        const updated = await database.targets.updateStatus(targetId, statusInput);
+        const updated = await database.targets.updateStatus(
+          targetId,
+          current.status,
+          statusInput
+        );
         if (updated === undefined) {
-          throw new DomainError("NOT_FOUND", "Target was not found", { entity: "target" });
+          const latestRow = await database.targets.get(targetId);
+          if (latestRow === undefined) {
+            throw new DomainError("NOT_FOUND", "Target was not found", { entity: "target" });
+          }
+          const latest = parseTarget(latestRow);
+          if (latest.status === statusInput) {
+            return latest;
+          }
+          throw new DomainError("CONFLICT", "Pipeline status changed concurrently", {
+            entity: "target",
+            retryable: true
+          });
         }
         return parseTarget(updated);
       });
