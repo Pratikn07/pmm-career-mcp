@@ -410,8 +410,12 @@ it.each(["shortlisted", "archived"])(
       confidence: 0.95,
       rationale: `Refreshed rationale ${totalScore}`
     });
-    await Promise.all([refresh(80), refresh(85)]);
+    const [firstRefresh, secondRefresh] = await Promise.all([refresh(80), refresh(85)]);
 
+    expect(firstRefresh.totalScore).toBe(80);
+    expect(firstRefresh.pmmOpportunity).toBe(35);
+    expect(secondRefresh.totalScore).toBe(85);
+    expect(secondRefresh.pmmOpportunity).toBe(40);
     expect((await db.targets.get(target.id))?.status).toBe(status);
   }
 );

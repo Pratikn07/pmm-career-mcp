@@ -673,7 +673,7 @@ export function createRepositories(database: Database) {
     targets: {
       async upsert(input: TargetUpsertInput): Promise<Target> {
         const now = nowIso();
-        await database.insert(targets).values({
+        const [target] = await database.insert(targets).values({
           id: randomUUID(),
           ...input,
           status: "discovered",
@@ -690,10 +690,7 @@ export function createRepositories(database: Database) {
             rationale: input.rationale,
             updatedAt: now
           }
-        });
-        const [target] = await database.select().from(targets).where(
-          eq(targets.personId, input.personId)
-        );
+        }).returning();
         return requiredRow(target, "target");
       },
       async get(id: string): Promise<Target | undefined> {
