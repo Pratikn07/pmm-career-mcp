@@ -4,6 +4,7 @@ import { loadConfig } from "../../src/config.js";
 import { createHttpApp } from "../../src/http/app.js";
 
 const validAuthorizationId = "aB09".repeat(8);
+const fakePublishableKey = `sb_publishable_${"a".repeat(22)}_${"b".repeat(8)}`;
 
 function oauthConfig() {
   return loadConfig({
@@ -11,7 +12,7 @@ function oauthConfig() {
     AUTH_MODE: "oauth",
     BASE_URL: "http://127.0.0.1:3000",
     SUPABASE_URL: "http://127.0.0.1:54321",
-    SUPABASE_PUBLISHABLE_KEY: "sb_publishable_example",
+    SUPABASE_PUBLISHABLE_KEY: fakePublishableKey,
     OIDC_ISSUER: "http://127.0.0.1:54321/auth/v1",
     OIDC_AUDIENCE: "http://127.0.0.1:3000",
     ALLOWED_SUBJECT: "123e4567-e89b-12d3-a456-426614174000",
@@ -28,7 +29,7 @@ describe("Supabase OAuth consent page", () => {
 
     expect(response.status).toBe(200);
     expect(response.text).toContain('data-supabase-url="http://127.0.0.1:54321"');
-    expect(response.text).toContain('data-supabase-publishable-key="sb_publishable_example"');
+    expect(response.text).toContain(`data-supabase-publishable-key="${fakePublishableKey}"`);
     expect(response.text).not.toContain("database-password");
     expect(response.text).not.toContain("TOKEN_ENCRYPTION_KEY");
     expect(response.text).not.toContain("ALLOWED_SUBJECT");

@@ -171,7 +171,7 @@ it("passes production TLS intent from injected config instead of global process 
     BASE_URL: "https://career.example",
     AUTH_MODE: "oauth",
     SUPABASE_URL: "https://project.supabase.co",
-    SUPABASE_PUBLISHABLE_KEY: "sb_publishable_example",
+    SUPABASE_PUBLISHABLE_KEY: `sb_publishable_${"a".repeat(22)}_${"b".repeat(8)}`,
     OIDC_ISSUER: "https://project.supabase.co/auth/v1",
     OIDC_AUDIENCE: "https://career.example",
     ALLOWED_SUBJECT: "123e4567-e89b-12d3-a456-426614174000",

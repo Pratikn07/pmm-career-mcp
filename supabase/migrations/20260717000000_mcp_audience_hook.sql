@@ -28,4 +28,5 @@ $$;
 REVOKE ALL ON FUNCTION public.mcp_audience_access_token_hook(jsonb) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.mcp_audience_access_token_hook(jsonb) FROM anon;
 REVOKE ALL ON FUNCTION public.mcp_audience_access_token_hook(jsonb) FROM authenticated;
+GRANT USAGE ON SCHEMA public TO supabase_auth_admin;
 GRANT EXECUTE ON FUNCTION public.mcp_audience_access_token_hook(jsonb) TO supabase_auth_admin;

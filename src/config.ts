@@ -62,10 +62,18 @@ function required(value: string | undefined, name: string): string {
   return value;
 }
 
-function decodeLegacyJwtPart(value: string): Record<string, unknown> | undefined {
+function decodeCanonicalLegacyJwtPart(value: string): Record<string, unknown> | undefined {
   if (!/^[A-Za-z0-9_-]+$/.test(value)) return undefined;
   try {
-    const decoded: unknown = JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
+    const bytes = Buffer.from(value, "base64url");
+    if (bytes.toString("base64url") !== value) return undefined;
+    const json = bytes.toString("utf8");
+    if (!Buffer.from(json, "utf8").equals(bytes)) return undefined;
+    const decoded: unknown = JSON.parse(json);
+    // Supabase generates compact JSON. Requiring a byte-for-byte canonical
+    // round trip also rejects duplicate member names that JSON.parse would
+    // otherwise silently resolve with last-member-wins semantics.
+    if (JSON.stringify(decoded) !== json) return undefined;
     return typeof decoded === "object" && decoded !== null && !Array.isArray(decoded)
       ? decoded as Record<string, unknown>
       : undefined;
@@ -74,15 +82,35 @@ function decodeLegacyJwtPart(value: string): Record<string, unknown> | undefined
   }
 }
 
-function requireBrowserSafeSupabaseKey(value: string): void {
-  if (/^sb_publishable_[A-Za-z0-9_-]+$/.test(value)) return;
+function isCanonicalLegacySignature(value: string): boolean {
+  if (!/^[A-Za-z0-9_-]+$/.test(value)) return false;
+  const bytes = Buffer.from(value, "base64url");
+  return bytes.length === 32 && bytes.toString("base64url") === value;
+}
+
+function isLegacyAnonKey(value: string): boolean {
   const parts = value.split(".");
-  if (parts.length === 3
-    && parts.every((part) => part.length > 0 && /^[A-Za-z0-9_-]+$/.test(part))
-    && decodeLegacyJwtPart(parts[0]!) !== undefined
-    && decodeLegacyJwtPart(parts[1]!)?.role === "anon") {
-    return;
-  }
+  if (parts.length !== 3 || !isCanonicalLegacySignature(parts[2]!)) return false;
+  const header = decodeCanonicalLegacyJwtPart(parts[0]!);
+  const payload = decodeCanonicalLegacyJwtPart(parts[1]!);
+  if (header?.alg !== "HS256" || header.typ !== "JWT" || payload === undefined) return false;
+  return payload.iss === "supabase"
+    && typeof payload.ref === "string"
+    && /^[a-z0-9]{20}$/.test(payload.ref)
+    && payload.role === "anon"
+    && typeof payload.iat === "number"
+    && Number.isSafeInteger(payload.iat)
+    && payload.iat > 0
+    && typeof payload.exp === "number"
+    && Number.isSafeInteger(payload.exp)
+    && payload.exp > payload.iat;
+}
+
+function requireBrowserSafeSupabaseKey(value: string): void {
+  // Supabase's current self-hosted generator emits a 31-character suffix:
+  // 22 URL-safe random characters, an underscore, and an 8-character checksum.
+  if (/^sb_publishable_[A-Za-z0-9_-]{31,}$/.test(value)) return;
+  if (isLegacyAnonKey(value)) return;
   throw new Error("SUPABASE_PUBLISHABLE_KEY must be an sb_publishable_ key or a legacy anon JWT");
 }
 

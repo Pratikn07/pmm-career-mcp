@@ -1,9 +1,27 @@
 import { describe, expect, it } from "vitest";
 import { loadConfig } from "../src/config.js";
 
-function legacySupabaseKey(role: string): string {
-  const encode = (value: Record<string, unknown>) => Buffer.from(JSON.stringify(value)).toString("base64url");
-  return `${encode({ alg: "HS256", typ: "JWT" })}.${encode({ role })}.public-signature`;
+const FAKE_PROJECT_REF = "abcdefghijklmnopqrst";
+const FAKE_PUBLISHABLE_KEY = `sb_publishable_${"a".repeat(22)}_${"b".repeat(8)}`;
+
+function encodeJwtPart(value: Record<string, unknown> | string): string {
+  return Buffer.from(typeof value === "string" ? value : JSON.stringify(value)).toString("base64url");
+}
+
+function legacySupabaseKey(
+  role: string,
+  options: { header?: Record<string, unknown>; rawPayload?: string; signature?: string } = {}
+): string {
+  const header = options.header ?? { alg: "HS256", typ: "JWT" };
+  const payload = options.rawPayload ?? JSON.stringify({
+    iss: "supabase",
+    ref: FAKE_PROJECT_REF,
+    role,
+    iat: 1_700_000_000,
+    exp: 2_000_000_000
+  });
+  const signature = options.signature ?? Buffer.alloc(32, 7).toString("base64url");
+  return `${encodeJwtPart(header)}.${encodeJwtPart(payload)}.${signature}`;
 }
 
 describe("loadConfig", () => {
@@ -13,7 +31,7 @@ describe("loadConfig", () => {
     DATABASE_URL: "postgresql://postgres:postgres@db.example:5432/postgres",
     BASE_URL: "https://career.example/",
     SUPABASE_URL: "https://project.supabase.co",
-    SUPABASE_PUBLISHABLE_KEY: "sb_publishable_example",
+    SUPABASE_PUBLISHABLE_KEY: FAKE_PUBLISHABLE_KEY,
     OIDC_ISSUER: "https://project.supabase.co/auth/v1",
     OIDC_AUDIENCE: "https://career.example",
     ALLOWED_SUBJECT: "123e4567-e89b-12d3-a456-426614174000",
@@ -78,7 +96,7 @@ describe("loadConfig", () => {
   });
 
   it.each([
-    "sb_publishable_example",
+    FAKE_PUBLISHABLE_KEY,
     legacySupabaseKey("anon")
   ])("accepts a browser-safe Supabase publishable key", (key) => {
     expect(loadConfig({ NODE_ENV: "test", SUPABASE_PUBLISHABLE_KEY: key }).supabasePublishableKey).toBe(key);
@@ -86,8 +104,25 @@ describe("loadConfig", () => {
 
   it.each([
     "sb_secret_example",
+    "sb_publishable_x",
+    `sb_publishable_${"x".repeat(30)}`,
     legacySupabaseKey("service_role"),
     legacySupabaseKey("authenticated"),
+    legacySupabaseKey("anon", { header: { alg: "none", typ: "JWT" } }),
+    legacySupabaseKey("anon", { header: {} }),
+    legacySupabaseKey("anon", {
+      rawPayload: `{"iss":"supabase","ref":"${FAKE_PROJECT_REF}","role":"service_role","role":"anon","iat":1700000000,"exp":2000000000}`
+    }),
+    legacySupabaseKey("anon", {
+      rawPayload: `{"iss":"supabase","ref":"${FAKE_PROJECT_REF}","role":"anon","iat":"1700000000","exp":2000000000}`
+    }),
+    legacySupabaseKey("anon", {
+      rawPayload: `{"ref":"${FAKE_PROJECT_REF}","role":"anon","iat":1700000000,"exp":2000000000}`
+    }),
+    legacySupabaseKey("anon", {
+      rawPayload: "{\"iss\":\"supabase\",\"role\":\"anon\",\"iat\":1700000000,\"exp\":2000000000}"
+    }),
+    legacySupabaseKey("anon", { signature: "not/canonical" }),
     "not-a-supported-key",
     "header.invalid-base64.signature",
     "header.payload",
@@ -95,6 +130,12 @@ describe("loadConfig", () => {
   ])("rejects an unsafe or malformed Supabase browser key", (key) => {
     expect(() => loadConfig({ NODE_ENV: "test", SUPABASE_PUBLISHABLE_KEY: key }))
       .toThrow(/SUPABASE_PUBLISHABLE_KEY.*publishable|SUPABASE_PUBLISHABLE_KEY.*anon/);
+  });
+
+  it("accepts the current generated opaque-key shape at the 31-character suffix boundary", () => {
+    const boundaryKey = `sb_publishable_${"x".repeat(31)}`;
+    expect(loadConfig({ NODE_ENV: "test", SUPABASE_PUBLISHABLE_KEY: boundaryKey }).supabasePublishableKey)
+      .toBe(boundaryKey);
   });
 
   it.each(["development", "test", "production"] as const)("rejects Supabase secret keys in %s", (nodeEnv) => {

@@ -30,6 +30,7 @@ describe("MCP audience access-token hook migration", () => {
   });
 
   it("permits execution only for Supabase Auth's admin role", () => {
+    expect(migration).toMatch(/grant\s+usage\s+on\s+schema\s+public\s+to\s+supabase_auth_admin/i);
     expect(migration).toMatch(/revoke\s+all\s+on\s+function[\s\S]*from\s+public/i);
     expect(migration).toMatch(/revoke\s+all\s+on\s+function[\s\S]*from\s+anon/i);
     expect(migration).toMatch(/revoke\s+all\s+on\s+function[\s\S]*from\s+authenticated/i);
