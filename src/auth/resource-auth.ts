@@ -75,19 +75,29 @@ function bearerToken(authorization: string | undefined): string | undefined {
   return match?.[1];
 }
 
-const noRedirectFetch: FetchImplementation = (url, options) => fetch(url, { ...options, redirect: "error" });
+function timedNoRedirectFetch(timeoutMs: number): FetchImplementation {
+  return (url, options) => fetch(url, {
+    ...options,
+    redirect: "error",
+    signal: AbortSignal.timeout(timeoutMs)
+  });
+}
 
-async function jwksFromIssuer(issuer: string, requireHttps: boolean): Promise<JWTVerifyGetKey> {
+async function jwksFromIssuer(issuer: string, requireHttps: boolean, timeoutMs: number): Promise<JWTVerifyGetKey> {
   const issuerUrl = new URL(issuer);
   if (requireHttps && issuerUrl.protocol !== "https:") throw new Error("OIDC issuer must use HTTPS");
   const discoveryUrl = new URL(".well-known/openid-configuration", `${issuerUrl.toString().replace(/\/+$/, "")}/`);
-  const response = await fetch(discoveryUrl, { headers: { accept: "application/json" }, redirect: "error" });
+  const response = await fetch(discoveryUrl, {
+    headers: { accept: "application/json" },
+    redirect: "error",
+    signal: AbortSignal.timeout(timeoutMs)
+  });
   if (!response.ok) throw new Error("OIDC discovery unavailable");
   const metadata = oidcMetadataSchema.parse(await response.json());
   if (metadata.issuer !== issuer) throw new Error("OIDC issuer mismatch");
   const jwksUrl = new URL(metadata.jwks_uri);
   if (requireHttps && jwksUrl.protocol !== "https:") throw new Error("OIDC JWKS must use HTTPS");
-  return createRemoteJWKSet(jwksUrl, { [customFetch]: noRedirectFetch });
+  return createRemoteJWKSet(jwksUrl, { [customFetch]: timedNoRedirectFetch(timeoutMs) });
 }
 
 /**
@@ -101,7 +111,14 @@ export function createResourceAuth(config: AppConfig): RequestHandler {
   const { issuer, audience, subject } = requireOAuthConfig(config);
   let jwksPromise: Promise<JWTVerifyGetKey> | undefined;
   const keyFor = (): Promise<JWTVerifyGetKey> => {
-    jwksPromise ??= jwksFromIssuer(issuer, config.nodeEnv === "production");
+    jwksPromise ??= jwksFromIssuer(
+      issuer,
+      config.nodeEnv === "production",
+      config.oidcDiscoveryTimeoutMs
+    ).catch((error: unknown) => {
+      jwksPromise = undefined;
+      throw error;
+    });
     return jwksPromise;
   };
 

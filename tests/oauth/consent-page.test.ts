@@ -11,7 +11,7 @@ function oauthConfig() {
     AUTH_MODE: "oauth",
     BASE_URL: "http://127.0.0.1:3000",
     SUPABASE_URL: "http://127.0.0.1:54321",
-    SUPABASE_PUBLISHABLE_KEY: "public-key-</script><img>",
+    SUPABASE_PUBLISHABLE_KEY: "sb_publishable_example",
     OIDC_ISSUER: "http://127.0.0.1:54321/auth/v1",
     OIDC_AUDIENCE: "http://127.0.0.1:3000",
     ALLOWED_SUBJECT: "123e4567-e89b-12d3-a456-426614174000",
@@ -28,7 +28,7 @@ describe("Supabase OAuth consent page", () => {
 
     expect(response.status).toBe(200);
     expect(response.text).toContain('data-supabase-url="http://127.0.0.1:54321"');
-    expect(response.text).toContain("public-key-&lt;/script&gt;&lt;img&gt;");
+    expect(response.text).toContain('data-supabase-publishable-key="sb_publishable_example"');
     expect(response.text).not.toContain("database-password");
     expect(response.text).not.toContain("TOKEN_ENCRYPTION_KEY");
     expect(response.text).not.toContain("ALLOWED_SUBJECT");

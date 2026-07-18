@@ -16,7 +16,8 @@ it("ships Postgres migrations and uses the readiness endpoint for Docker deploym
 
   expect(dockerfile).toContain("COPY --from=build --chown=node:node /app/drizzle ./drizzle");
   expect(dockerfile).toContain("USER node");
-  expect(dockerfile).toContain("http://127.0.0.1:3000/ready");
+  expect(dockerfile).toContain("process.env.PORT || 3000");
+  expect(dockerfile).not.toContain("http://127.0.0.1:3000/ready");
   expect(dockerfile).not.toContain("/app/data");
   expect(dockerfile).not.toContain("DATABASE_PATH");
 });

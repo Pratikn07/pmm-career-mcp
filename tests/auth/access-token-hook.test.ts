@@ -19,6 +19,16 @@ describe("MCP audience access-token hook migration", () => {
     expect(migration).not.toMatch(/user_metadata/i);
   });
 
+  it("changes only OAuth tokens carrying a client_id", () => {
+    expect(migration).toMatch(/claims\s*->>\s*'client_id'/i);
+    expect(migration).toMatch(/client_id\s+is\s+null\s+or\s+client_id\s*=\s*''[\s\S]*return\s+jsonb_build_object/i);
+  });
+
+  it("sets the exact supported MCP scope from trusted hook logic", () => {
+    expect(migration).toMatch(/jsonb_set\s*\([\s\S]*'\{scope\}'[\s\S]*to_jsonb\s*\(\s*'openid email'::text\s*\)/i);
+    expect(migration).not.toMatch(/user_metadata|event\s*->>\s*'scope'/i);
+  });
+
   it("permits execution only for Supabase Auth's admin role", () => {
     expect(migration).toMatch(/revoke\s+all\s+on\s+function[\s\S]*from\s+public/i);
     expect(migration).toMatch(/revoke\s+all\s+on\s+function[\s\S]*from\s+anon/i);

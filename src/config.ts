@@ -6,8 +6,9 @@ const environmentSchema = z.object({
   DATABASE_URL: z.string().optional(),
   BASE_URL: z.string().url().default("http://127.0.0.1:3000"),
   SUPABASE_URL: z.string().url().optional(),
-  SUPABASE_PUBLISHABLE_KEY: z.string().min(1).optional(),
+  SUPABASE_PUBLISHABLE_KEY: z.string().optional(),
   AUTH_MODE: z.enum(["none", "oauth"]).default("none"),
+  OIDC_DISCOVERY_TIMEOUT_MS: z.coerce.number().int().min(1).max(30_000).default(5_000),
   OIDC_ISSUER: z.string().url().optional(),
   OIDC_AUDIENCE: z.string().min(1).optional(),
   ALLOWED_SUBJECT: z.string().optional(),
@@ -24,6 +25,7 @@ export type AppConfig = {
   supabaseUrl?: string;
   supabasePublishableKey?: string;
   authMode: "none" | "oauth";
+  oidcDiscoveryTimeoutMs: number;
   oidcIssuer?: string;
   oidcAudience?: string;
   allowedSubject?: string;
@@ -39,6 +41,13 @@ function canonicalUrl(value: string, name: string): string {
   return url.toString().replace(/\/+$/, "");
 }
 
+function canonicalOrigin(value: string, name: string): string {
+  const canonical = canonicalUrl(value, name);
+  const url = new URL(canonical);
+  if (url.pathname !== "/") throw new Error(`${name} must be an origin without a path`);
+  return url.origin;
+}
+
 function canonicalSupabaseUrl(value: string, requirePublicProjectOrigin: boolean): string {
   const canonical = canonicalUrl(value, "SUPABASE_URL");
   const url = new URL(canonical);
@@ -51,6 +60,30 @@ function canonicalSupabaseUrl(value: string, requirePublicProjectOrigin: boolean
 function required(value: string | undefined, name: string): string {
   if (value === undefined || value.length === 0) throw new Error(`${name} is required in production`);
   return value;
+}
+
+function decodeLegacyJwtPart(value: string): Record<string, unknown> | undefined {
+  if (!/^[A-Za-z0-9_-]+$/.test(value)) return undefined;
+  try {
+    const decoded: unknown = JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
+    return typeof decoded === "object" && decoded !== null && !Array.isArray(decoded)
+      ? decoded as Record<string, unknown>
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function requireBrowserSafeSupabaseKey(value: string): void {
+  if (/^sb_publishable_[A-Za-z0-9_-]+$/.test(value)) return;
+  const parts = value.split(".");
+  if (parts.length === 3
+    && parts.every((part) => part.length > 0 && /^[A-Za-z0-9_-]+$/.test(part))
+    && decodeLegacyJwtPart(parts[0]!) !== undefined
+    && decodeLegacyJwtPart(parts[1]!)?.role === "anon") {
+    return;
+  }
+  throw new Error("SUPABASE_PUBLISHABLE_KEY must be an sb_publishable_ key or a legacy anon JWT");
 }
 
 function requirePostgresUrl(value: string): void {
@@ -72,6 +105,9 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
     throw new Error("Supabase service-role keys must not be configured");
   }
   const parsed = environmentSchema.parse(env);
+  if (parsed.SUPABASE_PUBLISHABLE_KEY !== undefined) {
+    requireBrowserSafeSupabaseKey(parsed.SUPABASE_PUBLISHABLE_KEY);
+  }
 
   if (parsed.NODE_ENV === "production" && parsed.AUTH_MODE !== "oauth") {
     throw new Error("AUTH_MODE must be oauth in production");
@@ -81,7 +117,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
     if (env.DATABASE_PATH !== undefined) throw new Error("DATABASE_PATH is not supported; use DATABASE_URL");
 
     requirePostgresUrl(required(parsed.DATABASE_URL, "DATABASE_URL"));
-    const baseUrl = canonicalUrl(parsed.BASE_URL, "BASE_URL");
+    const baseUrl = canonicalOrigin(parsed.BASE_URL, "BASE_URL");
     if (new URL(baseUrl).protocol !== "https:") {
       throw new Error("BASE_URL must use HTTPS in production");
     }
@@ -108,7 +144,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
     }
   }
 
-  const baseUrl = canonicalUrl(parsed.BASE_URL, "BASE_URL");
+  const baseUrl = canonicalOrigin(parsed.BASE_URL, "BASE_URL");
   const supabaseUrl = parsed.SUPABASE_URL === undefined
     ? undefined
     : canonicalSupabaseUrl(parsed.SUPABASE_URL, parsed.NODE_ENV === "production");
@@ -124,6 +160,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
       ? {}
       : { supabasePublishableKey: parsed.SUPABASE_PUBLISHABLE_KEY }),
     authMode: parsed.AUTH_MODE,
+    oidcDiscoveryTimeoutMs: parsed.OIDC_DISCOVERY_TIMEOUT_MS,
     ...(oidcIssuer === undefined ? {} : { oidcIssuer }),
     ...(parsed.OIDC_AUDIENCE === undefined ? {} : { oidcAudience: parsed.OIDC_AUDIENCE }),
     ...(parsed.ALLOWED_SUBJECT === undefined ? {} : { allowedSubject: parsed.ALLOWED_SUBJECT }),

@@ -1,5 +1,5 @@
--- Optional fallback only. Select this function under Authentication > Hooks
--- only if the native OAuth resource indicator does not set the expected aud.
+-- Required for MCP OAuth access tokens. Select this function under
+-- Authentication > Hooks after configuring app_metadata.mcp_audience.
 CREATE OR REPLACE FUNCTION public.mcp_audience_access_token_hook(event jsonb)
 RETURNS jsonb
 LANGUAGE plpgsql
@@ -8,15 +8,19 @@ SET search_path = ''
 AS $$
 DECLARE
   claims jsonb := event -> 'claims';
+  client_id text := claims ->> 'client_id';
   audience text := claims -> 'app_metadata' ->> 'mcp_audience';
 BEGIN
-  IF audience IS NULL OR audience = '' THEN
+  IF client_id IS NULL OR client_id = '' OR audience IS NULL OR audience = '' THEN
     RETURN jsonb_build_object('claims', claims);
   END IF;
 
+  claims := jsonb_set(claims, '{aud}', to_jsonb(audience), true);
+  claims := jsonb_set(claims, '{scope}', to_jsonb('openid email'::text), true);
+
   RETURN jsonb_build_object(
     'claims',
-    jsonb_set(claims, '{aud}', to_jsonb(audience), true)
+    claims
   );
 END;
 $$;

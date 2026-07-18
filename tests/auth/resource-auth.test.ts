@@ -15,7 +15,10 @@ type IssuerFixture = {
   tokenWithoutExpiry(): Promise<string>;
 };
 
-async function startIssuer(discoveryExtras: Record<string, unknown> = {}): Promise<IssuerFixture> {
+async function startIssuer(
+  discoveryExtras: Record<string, unknown> = {},
+  options: { failDiscoveryAttempts?: number; discoveryDelayMs?: number; discoveryTimeoutMs?: number } = {}
+): Promise<IssuerFixture> {
   const { privateKey, publicKey } = await generateKeyPair("RS256");
   const publicJwk = await exportJWK(publicKey);
   publicJwk.kid = "test-key";
@@ -28,8 +31,14 @@ async function startIssuer(discoveryExtras: Record<string, unknown> = {}): Promi
   const address = server.address();
   if (address === null || typeof address === "string") throw new Error("No test issuer address");
   const issuer = `http://127.0.0.1:${address.port}`;
+  let discoveryAttempts = 0;
   issuerApp.get("/.well-known/openid-configuration", (_request, response) => {
-    response.json({
+    discoveryAttempts += 1;
+    if (discoveryAttempts <= (options.failDiscoveryAttempts ?? 0)) {
+      response.sendStatus(503);
+      return;
+    }
+    const sendMetadata = () => response.json({
       issuer,
       jwks_uri: `${issuer}/jwks`,
       authorization_endpoint: `${issuer}/authorize`,
@@ -39,6 +48,8 @@ async function startIssuer(discoveryExtras: Record<string, unknown> = {}): Promi
       id_token_signing_alg_values_supported: ["RS256"],
       ...discoveryExtras
     });
+    if (options.discoveryDelayMs === undefined) sendMetadata();
+    else setTimeout(sendMetadata, options.discoveryDelayMs);
   });
   issuerApp.get("/jwks", (_request, response) => response.json({ keys: [publicJwk] }));
 
@@ -51,7 +62,8 @@ async function startIssuer(discoveryExtras: Record<string, unknown> = {}): Promi
       OIDC_ISSUER: issuer,
       OIDC_AUDIENCE: "http://127.0.0.1:3000",
       ALLOWED_SUBJECT: "123e4567-e89b-12d3-a456-426614174000",
-      TOKEN_ENCRYPTION_KEY: "a".repeat(64)
+      TOKEN_ENCRYPTION_KEY: "a".repeat(64),
+      OIDC_DISCOVERY_TIMEOUT_MS: String(options.discoveryTimeoutMs ?? 5_000)
     }),
     server,
     key: privateKey,
@@ -129,6 +141,39 @@ describe("protected resource authentication", () => {
       expect(response.body).toEqual({ ok: true });
     } finally {
       await new Promise<void>((resolve, reject) => metadataFixture.server.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+
+  it("retries discovery after a prior discovery request failed", async () => {
+    const retryFixture = await startIssuer({}, { failDiscoveryAttempts: 1 });
+    const app = express();
+    app.use(createResourceAuth(retryFixture.config));
+    app.get("/protected", (_request, response) => response.json({ ok: true }));
+
+    try {
+      const token = await retryFixture.token();
+      expect((await request(app).get("/protected").set("authorization", `Bearer ${token}`)).status).toBe(401);
+      const retried = await request(app).get("/protected").set("authorization", `Bearer ${token}`);
+      expect(retried.status).toBe(200);
+      expect(retried.body).toEqual({ ok: true });
+    } finally {
+      await new Promise<void>((resolve, reject) => retryFixture.server.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+
+  it("aborts OIDC discovery at the configured bounded timeout", async () => {
+    const slowFixture = await startIssuer({}, { discoveryDelayMs: 250, discoveryTimeoutMs: 20 });
+    const app = express();
+    app.use(createResourceAuth(slowFixture.config));
+    app.get("/protected", (_request, response) => response.json({ ok: true }));
+
+    try {
+      const startedAt = performance.now();
+      const response = await request(app).get("/protected").set("authorization", `Bearer ${await slowFixture.token()}`);
+      expect(response.status).toBe(401);
+      expect(performance.now() - startedAt).toBeLessThan(200);
+    } finally {
+      await new Promise<void>((resolve, reject) => slowFixture.server.close((error) => error ? reject(error) : resolve()));
     }
   });
 

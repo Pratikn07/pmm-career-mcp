@@ -1,7 +1,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import { createCareerMcpServer, type CareerMcpDependencies } from "../../src/mcp/server.js";
 import { createHttpApp } from "../../src/http/app.js";
 import request from "supertest";
@@ -105,6 +105,18 @@ it("serves MCP initialization through stateless Streamable HTTP", async () => {
   expect(response.status).toBe(200);
   expect(response.text).toContain('"name":"pmm-career-mcp"');
   expect(response.headers["mcp-session-id"]).toBeUndefined();
+});
+
+it("closes the stateless MCP server once after a Streamable HTTP response completes", async () => {
+  const server = createCareerMcpServer(dependencies());
+  const close = vi.spyOn(server, "close");
+  const response = await request(createHttpApp({ mcpServerFactory: () => server }))
+    .post("/mcp")
+    .set("accept", "application/json, text/event-stream")
+    .send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "test", version: "1.0.0" } } });
+
+  expect(response.status).toBe(200);
+  await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
 });
 
 it("reports page-scoped YC coverage even when a filtered search is empty", async () => {

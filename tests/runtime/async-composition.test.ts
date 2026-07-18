@@ -38,6 +38,7 @@ function testConfig() {
     databaseUrl: "postgresql://postgres:postgres@127.0.0.1:5432/postgres",
     baseUrl: "http://127.0.0.1:3000",
     authMode: "none" as const,
+    oidcDiscoveryTimeoutMs: 5_000,
     linkedinPublishEnabled: false,
     linkedinVersion: "202606"
   };

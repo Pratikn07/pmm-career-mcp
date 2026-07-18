@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { loadConfig } from "../src/config.js";
 
+function legacySupabaseKey(role: string): string {
+  const encode = (value: Record<string, unknown>) => Buffer.from(JSON.stringify(value)).toString("base64url");
+  return `${encode({ alg: "HS256", typ: "JWT" })}.${encode({ role })}.public-signature`;
+}
+
 describe("loadConfig", () => {
   const productionConfig = {
     NODE_ENV: "production" as const,
@@ -63,6 +68,33 @@ describe("loadConfig", () => {
 
   it("rejects removed DATABASE_PATH configuration in production", () => {
     expect(() => loadConfig({ ...productionConfig, DATABASE_PATH: "./career.db" })).toThrow(/DATABASE_PATH/);
+  });
+
+  it.each([
+    "https://career.example/mcp",
+    "https://career.example/nested/path/"
+  ])("rejects a BASE_URL with a non-root path: %s", (baseUrl) => {
+    expect(() => loadConfig({ NODE_ENV: "test", BASE_URL: baseUrl })).toThrow(/BASE_URL.*origin/);
+  });
+
+  it.each([
+    "sb_publishable_example",
+    legacySupabaseKey("anon")
+  ])("accepts a browser-safe Supabase publishable key", (key) => {
+    expect(loadConfig({ NODE_ENV: "test", SUPABASE_PUBLISHABLE_KEY: key }).supabasePublishableKey).toBe(key);
+  });
+
+  it.each([
+    "sb_secret_example",
+    legacySupabaseKey("service_role"),
+    legacySupabaseKey("authenticated"),
+    "not-a-supported-key",
+    "header.invalid-base64.signature",
+    "header.payload",
+    ""
+  ])("rejects an unsafe or malformed Supabase browser key", (key) => {
+    expect(() => loadConfig({ NODE_ENV: "test", SUPABASE_PUBLISHABLE_KEY: key }))
+      .toThrow(/SUPABASE_PUBLISHABLE_KEY.*publishable|SUPABASE_PUBLISHABLE_KEY.*anon/);
   });
 
   it.each(["development", "test", "production"] as const)("rejects Supabase secret keys in %s", (nodeEnv) => {

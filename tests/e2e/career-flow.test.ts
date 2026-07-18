@@ -86,6 +86,7 @@ async function startStack(publishEnabled: boolean): Promise<TestStack> {
       databaseUrl: "postgresql://postgres:postgres@127.0.0.1:5432/postgres",
       baseUrl: "http://127.0.0.1:3000",
       authMode: "none",
+      oidcDiscoveryTimeoutMs: 5_000,
       linkedinPublishEnabled: publishEnabled,
       linkedinVersion: "202606",
       tokenEncryptionKey: "a".repeat(64)

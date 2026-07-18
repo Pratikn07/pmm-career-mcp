@@ -66,23 +66,39 @@ const mcpJsonBodyError: ErrorRequestHandler = (error, request, response, next) =
 function streamableMcpHandler(factory: () => McpServer): RequestHandler {
   return async (request, response) => {
     let server: McpServer | undefined;
+    let closeServer: (() => Promise<void>) | undefined;
     try {
       server = factory();
+      closeServer = registerMcpServerCleanup(response, server);
       // SDK 1.29's declaration omits `undefined`, although it is the documented
       // and runtime-supported stateless setting.
       const transport = new StreamableHTTPServerTransport(
         { sessionIdGenerator: undefined } as never
       );
-      response.once("finish", () => { void server?.close(); });
       await server.connect(transport as unknown as Transport);
       await transport.handleRequest(request, response, request.body);
     } catch {
       if (!response.headersSent) {
         response.status(500).json({ error: "MCP request could not be completed" });
       }
-      await server?.close();
+      await closeServer?.();
     }
   };
+}
+
+/** Closes a stateless per-request MCP server once, regardless of response termination order. */
+export function registerMcpServerCleanup(
+  response: Pick<express.Response, "once">,
+  server: Pick<McpServer, "close">
+): () => Promise<void> {
+  let closePromise: Promise<void> | undefined;
+  const closeOnce = (): Promise<void> => {
+    closePromise ??= Promise.resolve(server.close()).catch(() => undefined);
+    return closePromise;
+  };
+  response.once("finish", () => { void closeOnce(); });
+  response.once("close", () => { void closeOnce(); });
+  return closeOnce;
 }
 
 export function createHttpApp(deps: HttpDependencies): Express {

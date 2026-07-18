@@ -35,7 +35,7 @@ describe("MCP HTTP authentication", () => {
   afterAll(async () => { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); });
 
   async function token(): Promise<string> {
-    return new SignJWT({})
+    return new SignJWT({ scope: "openid email" })
       .setProtectedHeader({ alg: "RS256", kid: "http-test-key" })
       .setIssuer(issuer).setAudience("http://127.0.0.1:3000").setSubject("123e4567-e89b-12d3-a456-426614174000").setIssuedAt().setExpirationTime("5m")
       .sign(key);
