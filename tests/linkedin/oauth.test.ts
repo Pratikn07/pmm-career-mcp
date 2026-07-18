@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { createTestDatabase } from "../support/database.js";
 import { decryptJson } from "../../src/security/crypto.js";
@@ -32,7 +31,7 @@ function oauth(fetch = vi.fn()) {
 }
 
 describe("LinkedIn OAuth", () => {
-  it("creates a PKCE authorization URL with the exact registered redirect URI and required scopes", () => {
+  it("creates a confidential web authorization URL with extended login and no native PKCE fields", () => {
     const authorizationUrl = oauth().createAuthorizationUrl();
     const url = new URL(authorizationUrl);
 
@@ -45,11 +44,8 @@ describe("LinkedIn OAuth", () => {
       new Set(["openid", "profile", "w_member_social"])
     );
     expect(url.searchParams.get("state")).toMatch(/^[A-Za-z0-9_-]{43}$/);
-    const verifier = Buffer.alloc(32, 7).toString("base64url");
-    expect(url.searchParams.get("code_challenge_method")).toBe("S256");
-    expect(url.searchParams.get("code_challenge")).toBe(
-      createHash("sha256").update(verifier).digest("base64url")
-    );
+    expect(url.searchParams.get("code_challenge")).toBeNull();
+    expect(url.searchParams.get("code_challenge_method")).toBeNull();
     expect(url.searchParams.get("code_verifier")).toBeNull();
   });
 
@@ -76,14 +72,14 @@ describe("LinkedIn OAuth", () => {
     expect(tokenUrl).toBe("https://www.linkedin.com/oauth/v2/accessToken");
     expect(tokenRequest.method).toBe("POST");
     const form = new URLSearchParams(String(tokenRequest.body));
-    expect(Object.fromEntries(form)).toMatchObject({
+    expect(Object.fromEntries(form)).toEqual({
       grant_type: "authorization_code",
       code: "authorization-code",
       redirect_uri: "https://career.example.com/linkedin/callback",
       client_id: "client-id",
-      client_secret: "client-secret",
-      code_verifier: Buffer.alloc(32, 7).toString("base64url")
+      client_secret: "client-secret"
     });
+    expect(form.has("code_verifier")).toBe(false);
 
     const stored = (await db.oauthTokens.getByProvider("linkedin"))!;
     expect(JSON.stringify(stored)).not.toContain("access-token-that-must-not-leak");
