@@ -39,7 +39,10 @@ export type ConsentController = {
 
 function allowedScopes(scope: string): string[] | undefined {
   const scopes = scope.split(/\s+/).filter(Boolean);
-  return scopes.length > 0 && scopes.every((item) => ALLOWED_SCOPES.has(item)) ? scopes : undefined;
+  return scopes.length === ALLOWED_SCOPES.size
+    && scopes.every((item) => ALLOWED_SCOPES.has(item))
+    ? scopes
+    : undefined;
 }
 
 function safeRedirect(value: string): string | undefined {
@@ -71,6 +74,7 @@ export function createConsentController({
   }
 
   async function loadDetails(): Promise<void> {
+    approvalAllowed = false;
     const result = await auth.getAuthorizationDetails(authorizationId);
     if (result.error !== null || result.data === null) {
       ui.showError(GENERIC_ERROR);

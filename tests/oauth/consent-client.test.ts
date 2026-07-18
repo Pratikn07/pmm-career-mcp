@@ -81,20 +81,52 @@ describe("consent browser controller", () => {
     expect(auth.approveAuthorization).not.toHaveBeenCalled();
   });
 
-  it("rejects scopes beyond openid and email", async () => {
+  it.each([
+    ["partial openid scope", "openid"],
+    ["partial email scope", "email"],
+    ["duplicate scope", "openid email email"],
+    ["unexpected scope", "openid email profile"]
+  ])("rejects %s and cannot approve it", async (_label, scope) => {
     const auth = createAuth({
       getUser: vi.fn().mockResolvedValue({ data: { user: { id: "user" } }, error: null }),
       getAuthorizationDetails: vi.fn().mockResolvedValue({
-        data: { authorization_id: authorizationId, client: { id: "client", name: "ChatGPT" }, scope: "openid email profile" }, error: null
+        data: { authorization_id: authorizationId, client: { id: "client", name: "ChatGPT" }, scope }, error: null
       })
     });
     const ui = createUi();
+    const controller = createConsentController({ authorizationId, auth, ui });
 
-    await createConsentController({ authorizationId, auth, ui }).start();
+    await controller.start();
+    await controller.approve();
 
     expect(ui.showError).toHaveBeenCalledWith("Unable to continue authorization.");
     expect(ui.showConsent).not.toHaveBeenCalled();
     expect(auth.approveAuthorization).not.toHaveBeenCalled();
+  });
+
+  it("clears prior approval when reloading details returns an invalid scope set", async () => {
+    const auth = createAuth({
+      getUser: vi.fn().mockResolvedValue({ data: { user: { id: "user" } }, error: null }),
+      getAuthorizationDetails: vi.fn()
+        .mockResolvedValueOnce({
+          data: { authorization_id: authorizationId, client: { id: "client", name: "ChatGPT" }, scope: "email openid" }, error: null
+        })
+        .mockResolvedValueOnce({
+          data: { authorization_id: authorizationId, client: { id: "client", name: "ChatGPT" }, scope: "openid" }, error: null
+        })
+    });
+    const ui = createUi();
+    const controller = createConsentController({ authorizationId, auth, ui });
+
+    await controller.start();
+    expect(ui.showConsent).toHaveBeenCalledWith({ clientName: "ChatGPT", scopes: ["email", "openid"] });
+
+    await controller.start();
+    await controller.approve();
+
+    expect(auth.getAuthorizationDetails).toHaveBeenCalledTimes(2);
+    expect(auth.approveAuthorization).not.toHaveBeenCalled();
+    expect(ui.showError).toHaveBeenCalledWith("Unable to continue authorization.");
   });
 
   it("approves only after an explicit action and redirects to a safe callback", async () => {
