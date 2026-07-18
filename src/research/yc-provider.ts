@@ -1,6 +1,7 @@
 import { load } from "cheerio";
 import { fetchPublicPage, type FetchedPage } from "./fetch-page.js";
 import { validateSourceTimestamp } from "./source-validation.js";
+import { assertFetchableUrlLocation } from "./url-policy.js";
 import type { CompanyResult, CompanySearchQuery, Evidence, SourceWarning } from "./types.js";
 
 const YC_ORIGINS = new Set(["https://www.ycombinator.com", "https://ycombinator.com"]);
@@ -88,16 +89,12 @@ export function createPublicYcSource(
       return { html: page.html, url: page.url, checkedAt: page.checkedAt };
     },
     fetchCompanyDetail: async (url) => {
+      const requestedUrl = exactYcCompanyDetailUrl(url, "input");
       const page = await fetchPage(url);
-      const finalUrl = new URL(page.url);
-      if (!YC_ORIGINS.has(finalUrl.origin)) {
+      const finalUrl = exactYcCompanyDetailUrl(page.url, "final");
+      if (finalUrl.pathname !== requestedUrl.pathname) {
         throw new SourceChangedError(
-          "The production YC company detail final origin is not approved"
-        );
-      }
-      if (!/^\/companies\/[a-z0-9-]+$/.test(finalUrl.pathname)) {
-        throw new SourceChangedError(
-          "The production YC company detail final pathname is not an approved company detail"
+          "The production YC company detail final response did not remain bound to the same company pathname"
         );
       }
       return { html: page.html, url: page.url, checkedAt: page.checkedAt };
@@ -126,6 +123,38 @@ export class SourceChangedError extends Error {
     super(message);
     this.name = "SourceChangedError";
   }
+}
+
+function exactYcCompanyDetailUrl(value: string, position: "input" | "final"): URL {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new SourceChangedError(
+      `The production YC company detail ${position} URL is invalid`
+    );
+  }
+  if (!YC_ORIGINS.has(url.origin)) {
+    throw new SourceChangedError(
+      `The production YC company detail ${position} origin is not approved`
+    );
+  }
+  if (!/^\/companies\/[a-z0-9-]+$/.test(url.pathname)) {
+    throw new SourceChangedError(
+      `The production YC company detail ${position} pathname is not an approved company detail`
+    );
+  }
+  if (
+    url.username !== ""
+    || url.password !== ""
+    || url.search !== ""
+    || url.hash !== ""
+  ) {
+    throw new SourceChangedError(
+      `The production YC company detail ${position} URL is not an exact approved company detail`
+    );
+  }
+  return url;
 }
 
 function normalizedText(value: string): string {
@@ -160,30 +189,71 @@ function normalizedUrl(value: string, baseUrl: string): string {
   return url.href;
 }
 
-function officialWebsiteFromDetail(page: YcSourcePage): string | undefined {
-  const href = load(page.html)('a[aria-label="Company website"]').first().attr("href");
+type WebsiteEnrichment = {
+  websiteUrl: string;
+  evidence: Evidence;
+  staleWarning?: SourceWarning;
+};
+
+function websiteEnrichmentFromDetail(
+  company: CompanyResult,
+  page: YcSourcePage,
+  now: Date
+): WebsiteEnrichment | undefined {
+  const freshness = validateSourceTimestamp(page.checkedAt, now, "YC company detail source");
+  const $ = load(page.html);
+  const href = $('a[aria-label="Company website"]').first().attr("href");
   if (href === undefined) {
     return undefined;
   }
-  let websiteUrl: string;
+  let website: URL;
   try {
-    websiteUrl = normalizedUrl(href, page.url);
+    website = new URL(href, page.url);
+    assertFetchableUrlLocation(website);
   } catch {
     return undefined;
   }
-  if (!withinFieldLimit(websiteUrl, FIELD_LIMITS.url)) {
+  const websiteUrl = website.href;
+  const title = optionalText($("title").first().text()) ?? `${company.name} | Y Combinator`;
+  const evidence: Evidence = {
+    id: `yc-${company.ycId}-website`,
+    url: websiteUrl,
+    sourceUrl: page.url,
+    title,
+    fact: `Y Combinator lists this link as the company website for ${company.name}`,
+    checkedAt: freshness.checkedAt,
+    confidence: 1
+  };
+  const boundedFields: Array<readonly [string, string, {
+    characters: number;
+    bytes: number;
+  }]> = [
+    ["website evidence ID", evidence.id, FIELD_LIMITS.id],
+    ["company website URL", evidence.url, FIELD_LIMITS.url],
+    ["website evidence source URL", evidence.sourceUrl, FIELD_LIMITS.url],
+    ["website evidence title", evidence.title, FIELD_LIMITS.title],
+    ["website evidence fact", evidence.fact, FIELD_LIMITS.fact]
+  ];
+  if (boundedFields.some(([_label, value, limit]) => !withinFieldLimit(value, limit))) {
     return undefined;
   }
-  const hostname = new URL(websiteUrl).hostname.toLocaleLowerCase("en").replace(/\.$/, "");
-  if (hostname === "linkedin.com" || hostname.endsWith(".linkedin.com")) {
-    return undefined;
-  }
-  return websiteUrl;
+  return {
+    websiteUrl,
+    evidence,
+    ...(freshness.stale ? {
+      staleWarning: {
+        code: "stale-source" as const,
+        sourceUrl: page.url,
+        message: "YC company detail source is older than the 30-day freshness policy"
+      }
+    } : {})
+  };
 }
 
 async function hydrateCompanyWebsites(
   companies: CompanyResult[],
-  fetchCompanyDetail: ((url: string) => Promise<YcSourcePage>) | undefined
+  fetchCompanyDetail: ((url: string) => Promise<YcSourcePage>) | undefined,
+  now: Date
 ): Promise<CompanyResult[]> {
   if (fetchCompanyDetail === undefined) {
     return companies;
@@ -207,9 +277,18 @@ async function hydrateCompanyWebsites(
         continue;
       }
       try {
-        const websiteUrl = officialWebsiteFromDetail(await fetchCompanyDetail(detailUrl));
-        if (websiteUrl !== undefined) {
-          hydrated[targetIndex] = { ...company, websiteUrl };
+        const page = await fetchCompanyDetail(detailUrl);
+        const enrichment = websiteEnrichmentFromDetail(company, page, now);
+        if (enrichment !== undefined) {
+          hydrated[targetIndex] = {
+            ...company,
+            websiteUrl: enrichment.websiteUrl,
+            sources: [...company.sources, enrichment.evidence],
+            warnings: [
+              ...company.warnings,
+              ...(enrichment.staleWarning === undefined ? [] : [enrichment.staleWarning])
+            ]
+          };
         }
       } catch {
         // A detail page is optional enrichment; preserve the selected list result on safe failure.
@@ -507,11 +586,12 @@ export function createYcProvider(source: YcSource, options: { now?: () => Date }
   search(query: CompanySearchQuery): Promise<CompanyResult[]>;
 } {
   const searchYcCompanies = async (query: CompanySearchQuery): Promise<CompanyResult[]> => {
-    const companies = parseCompanies(await source.fetch(query), (options.now ?? (() => new Date()))());
+    const now = (options.now ?? (() => new Date()))();
+    const companies = parseCompanies(await source.fetch(query), now);
     const selected = companies.filter((company) => matches(company, query)).sort((left, right) => {
       return left.name.localeCompare(right.name, "en") || left.ycId.localeCompare(right.ycId, "en");
     });
-    return await hydrateCompanyWebsites(selected, source.fetchCompanyDetail?.bind(source));
+    return await hydrateCompanyWebsites(selected, source.fetchCompanyDetail?.bind(source), now);
   };
   return { searchYcCompanies, search: searchYcCompanies };
 }

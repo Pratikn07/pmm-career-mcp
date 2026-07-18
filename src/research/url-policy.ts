@@ -175,7 +175,7 @@ function assertPublicIp(address: string): void {
   throw new Error(`URL must resolve only to public network addresses; rejected ${address}`);
 }
 
-function assertFetchableUrlLocation(url: URL): void {
+export function assertFetchableUrlLocation(url: URL): void {
   if (url.protocol !== "http:" && url.protocol !== "https:") {
     throw new Error("URL scheme must be HTTP or HTTPS");
   }

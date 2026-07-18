@@ -244,9 +244,16 @@ describe("YC company provider", () => {
   it.each([
     "javascript:alert('not a website')",
     "mailto:founders@example.com",
+    "https://user:secret@example.com",
+    "http://localhost/company",
+    "http://service.localhost/company",
+    "http://127.0.0.1/company",
+    "http://[::1]/company",
     "https://linkedin.com/company/example-company",
     "https://www.linkedin.com/company/example-company",
-    "https://careers.linkedin.com/company/example-company"
+    "https://careers.linkedin.com/company/example-company",
+    "https://linkedin.com../company/example-company",
+    "https://careers.linkedin.com../company/example-company"
   ])("ignores an invalid explicit company website URL: %s", async (websiteHref) => {
     const detailHtml = (await readFile(currentDetailFixturePath, "utf8")).replace(
       "https://example.com",
@@ -264,6 +271,118 @@ describe("YC company provider", () => {
     const [result] = await createYcProvider(source).search({ keyword: "Drip" });
 
     expect(result?.websiteUrl ?? null).toBeNull();
+  });
+
+  it("keeps list and detail provenance when their timestamps differ", async () => {
+    const detailCheckedAt = "2026-07-16T12:01:00.000Z";
+    const detailUrl = "https://www.ycombinator.com/companies/drippay";
+    const source = {
+      fetch: async () => ({
+        html: await readFile(currentListFixturePath, "utf8"),
+        url: "https://www.ycombinator.com/companies/industry/recruiting",
+        checkedAt: CHECKED_AT
+      }),
+      fetchCompanyDetail: async () => ({
+        html: await readFile(currentDetailFixturePath, "utf8"),
+        url: detailUrl,
+        checkedAt: detailCheckedAt
+      })
+    } satisfies YcSource;
+
+    const [result] = await createYcProvider(source, {
+      now: () => new Date("2026-07-16T13:00:00.000Z")
+    }).search({ keyword: "Drip" });
+
+    expect(result?.sources).toHaveLength(2);
+    expect(result?.sources[0]).toMatchObject({
+      sourceUrl: detailUrl,
+      checkedAt: CHECKED_AT
+    });
+    expect(result?.sources[1]).toMatchObject({
+      url: "https://example.com/",
+      sourceUrl: detailUrl,
+      checkedAt: detailCheckedAt,
+      fact: expect.stringMatching(/website/i),
+      confidence: 1
+    });
+  });
+
+  it.each([
+    ["malformed", "yesterday"],
+    ["future-dated", "2026-07-16T12:06:00.000Z"]
+  ])("fails %s detail timestamps as optional enrichment", async (_label, detailCheckedAt) => {
+    const source = {
+      fetch: async () => ({
+        html: await readFile(currentListFixturePath, "utf8"),
+        url: "https://www.ycombinator.com/companies/industry/recruiting",
+        checkedAt: CHECKED_AT
+      }),
+      fetchCompanyDetail: async (url: string) => ({
+        html: await readFile(currentDetailFixturePath, "utf8"),
+        url,
+        checkedAt: detailCheckedAt
+      })
+    } satisfies YcSource;
+
+    const [result] = await createYcProvider(source, {
+      now: () => new Date("2026-07-16T12:00:00.000Z")
+    }).search({ keyword: "Drip" });
+
+    expect(result?.websiteUrl ?? null).toBeNull();
+    expect(result?.sources).toHaveLength(1);
+  });
+
+  it("retains stale detail provenance with an explicit stale-source warning", async () => {
+    const detailUrl = "https://www.ycombinator.com/companies/drippay";
+    const detailCheckedAt = "2026-05-01T00:00:00.000Z";
+    const source = {
+      fetch: async () => ({
+        html: await readFile(currentListFixturePath, "utf8"),
+        url: "https://www.ycombinator.com/companies/industry/recruiting",
+        checkedAt: CHECKED_AT
+      }),
+      fetchCompanyDetail: async () => ({
+        html: await readFile(currentDetailFixturePath, "utf8"),
+        url: detailUrl,
+        checkedAt: detailCheckedAt
+      })
+    } satisfies YcSource;
+
+    const [result] = await createYcProvider(source, {
+      now: () => new Date("2026-07-16T12:00:00.000Z")
+    }).search({ keyword: "Drip" });
+
+    expect(result?.websiteUrl).toBe("https://example.com/");
+    expect(result?.sources[1]?.checkedAt).toBe(detailCheckedAt);
+    expect(result?.warnings).toContainEqual({
+      code: "stale-source",
+      sourceUrl: detailUrl,
+      message: "YC company detail source is older than the 30-day freshness policy"
+    });
+  });
+
+  it("does not retain a website whose detail evidence exceeds field bounds", async () => {
+    const detailHtml = (await readFile(currentDetailFixturePath, "utf8")).replace(
+      "Example Company: Company | Y Combinator",
+      "T".repeat(301)
+    );
+    const source = {
+      fetch: async () => ({
+        html: await readFile(currentListFixturePath, "utf8"),
+        url: "https://www.ycombinator.com/companies/industry/recruiting",
+        checkedAt: CHECKED_AT
+      }),
+      fetchCompanyDetail: async (url: string) => ({
+        html: detailHtml,
+        url,
+        checkedAt: CHECKED_AT
+      })
+    } satisfies YcSource;
+
+    const [result] = await createYcProvider(source).search({ keyword: "Drip" });
+
+    expect(result?.websiteUrl ?? null).toBeNull();
+    expect(result?.sources).toHaveLength(1);
   });
 
   it("caps detail hydration at 50 companies with at most four concurrent requests", async () => {
@@ -447,6 +566,30 @@ describe("YC company provider", () => {
     ).rejects.toThrow(/detail.*final.*origin/i);
   });
 
+  it.each([
+    "https://attacker.example/companies/drippay",
+    "https://www.ycombinator.com/companies/drippay/jobs",
+    "https://www.ycombinator.com/companies/drippay?next=jobs",
+    "https://user@www.ycombinator.com/companies/drippay"
+  ])("rejects an invalid public company detail input before fetching: %s", async (detailUrl) => {
+    const requestedUrls: string[] = [];
+    const source = createPublicYcSource(async (url) => {
+      requestedUrls.push(url);
+      return {
+        url,
+        title: "YC company",
+        text: "YC company",
+        html: await readFile(currentDetailFixturePath, "utf8"),
+        checkedAt: CHECKED_AT,
+        contentType: "text/html",
+        untrusted: true
+      };
+    });
+
+    await expect(source.fetchCompanyDetail?.(detailUrl)).rejects.toThrow(/detail.*input/i);
+    expect(requestedUrls).toEqual([]);
+  });
+
   it("rejects a public company detail redirected to a nested YC path", async () => {
     const source = createPublicYcSource(async () => ({
       url: "https://www.ycombinator.com/companies/drippay/jobs",
@@ -461,6 +604,38 @@ describe("YC company provider", () => {
     await expect(
       source.fetchCompanyDetail?.("https://www.ycombinator.com/companies/drippay")
     ).rejects.toThrow(/detail.*final.*pathname/i);
+  });
+
+  it("rejects a public company detail redirected to another company", async () => {
+    const source = createPublicYcSource(async () => ({
+      url: "https://ycombinator.com/companies/litmus-hiring",
+      title: "Litmus",
+      text: "Litmus",
+      html: await readFile(currentDetailFixturePath, "utf8"),
+      checkedAt: CHECKED_AT,
+      contentType: "text/html",
+      untrusted: true
+    }));
+
+    await expect(
+      source.fetchCompanyDetail?.("https://www.ycombinator.com/companies/drippay")
+    ).rejects.toThrow(/detail.*same.*company/i);
+  });
+
+  it("allows public company detail canonicalization between approved YC origins", async () => {
+    const source = createPublicYcSource(async () => ({
+      url: "https://ycombinator.com/companies/drippay",
+      title: "Drip",
+      text: "Drip",
+      html: await readFile(currentDetailFixturePath, "utf8"),
+      checkedAt: CHECKED_AT,
+      contentType: "text/html",
+      untrusted: true
+    }));
+
+    await expect(
+      source.fetchCompanyDetail?.("https://www.ycombinator.com/companies/drippay")
+    ).resolves.toMatchObject({ url: "https://ycombinator.com/companies/drippay" });
   });
 
   it.each([
