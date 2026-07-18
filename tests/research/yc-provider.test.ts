@@ -12,9 +12,28 @@ const fixturePath = fileURLToPath(new URL("../fixtures/yc-company.html", import.
 const currentListFixturePath = fileURLToPath(
   new URL("../fixtures/yc-company-list-current.html", import.meta.url)
 );
+const currentDetailFixturePath = fileURLToPath(
+  new URL("../fixtures/yc-company-detail-current.html", import.meta.url)
+);
 const CHECKED_AT = "2026-07-16T12:00:00.000Z";
 const YC_DIRECTORY_URL = "https://www.ycombinator.com/companies";
 const YC_DEFAULT_FACET_URL = "https://www.ycombinator.com/companies/industry/marketing";
+
+function currentCompanyListFixture(count: number): string {
+  const cards = Array.from({ length: count }, (_unused, index) => {
+    const suffix = String(index).padStart(2, "0");
+    return `
+      <li class="company-result">
+        <a href="/companies/company-${suffix}">
+          <span class="text-2xl">Company ${suffix}</span>
+          <span>P2026</span>
+          <span class="text-gray-700">Active</span>
+        </a>
+      </li>
+    `;
+  }).join("");
+  return `<html><head><title>YC companies</title></head><body><main><ul>${cards}</ul></main></body></html>`;
+}
 
 async function fixtureSource(overrides: Partial<Awaited<ReturnType<YcSource["fetch"]>>> = {}) {
   return {
@@ -134,6 +153,175 @@ describe("YC company provider", () => {
     expect(results.map((company) => company.ycId)).toEqual(["drippay", "litmus-hiring"]);
   });
 
+  it("hydrates only filtered current-list results from their YC detail pages", async () => {
+    const fetchedDetails: string[] = [];
+    const source = {
+      fetch: async () => ({
+        html: await readFile(currentListFixturePath, "utf8"),
+        url: "https://www.ycombinator.com/companies/industry/recruiting",
+        checkedAt: CHECKED_AT
+      }),
+      fetchCompanyDetail: async (url: string) => {
+        fetchedDetails.push(url);
+        return {
+          html: await readFile(currentDetailFixturePath, "utf8"),
+          url,
+          checkedAt: CHECKED_AT
+        };
+      }
+    } satisfies YcSource;
+
+    const results = await createYcProvider(source).search({ keyword: "Drip" });
+
+    expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({
+      ycId: "drippay",
+      websiteUrl: "https://example.com/"
+    });
+    expect(fetchedDetails).toEqual(["https://www.ycombinator.com/companies/drippay"]);
+  });
+
+  it("does not use a LinkedIn link as a company website", async () => {
+    const detailHtml = (await readFile(currentDetailFixturePath, "utf8")).replace(
+      /\s*<a aria-label="Company website"[^>]*>.*?<\/a>/,
+      ""
+    );
+    const source = {
+      fetch: async () => ({
+        html: await readFile(currentListFixturePath, "utf8"),
+        url: "https://www.ycombinator.com/companies/industry/recruiting",
+        checkedAt: CHECKED_AT
+      }),
+      fetchCompanyDetail: async (url: string) => ({ html: detailHtml, url, checkedAt: CHECKED_AT })
+    } satisfies YcSource;
+
+    const [result] = await createYcProvider(source).search({ keyword: "Drip" });
+
+    expect(result?.websiteUrl ?? null).toBeNull();
+  });
+
+  it("keeps search results when one selected company detail page fails", async () => {
+    const detailHtml = await readFile(currentDetailFixturePath, "utf8");
+    const source = {
+      fetch: async () => ({
+        html: await readFile(currentListFixturePath, "utf8"),
+        url: "https://www.ycombinator.com/companies/industry/recruiting",
+        checkedAt: CHECKED_AT
+      }),
+      fetchCompanyDetail: async (url: string) => {
+        if (url.endsWith("/drippay")) {
+          throw new Error("detail unavailable");
+        }
+        return { html: detailHtml, url, checkedAt: CHECKED_AT };
+      }
+    } satisfies YcSource;
+
+    const results = await createYcProvider(source).search({ industry: "recruiting" });
+
+    expect(results.map((company) => company.name)).toEqual(["Drip", "Litmus"]);
+    expect(results[0]?.websiteUrl ?? null).toBeNull();
+    expect(results[1]?.websiteUrl).toBe("https://example.com/");
+  });
+
+  it("keeps search results when a selected company detail page times out", async () => {
+    const source = {
+      fetch: async () => ({
+        html: await readFile(currentListFixturePath, "utf8"),
+        url: "https://www.ycombinator.com/companies/industry/recruiting",
+        checkedAt: CHECKED_AT
+      }),
+      fetchCompanyDetail: async () => {
+        throw new DOMException("The operation timed out", "TimeoutError");
+      }
+    } satisfies YcSource;
+
+    const results = await createYcProvider(source).search({ keyword: "Drip" });
+
+    expect(results.map((company) => company.name)).toEqual(["Drip"]);
+    expect(results[0]?.websiteUrl ?? null).toBeNull();
+  });
+
+  it.each([
+    "javascript:alert('not a website')",
+    "mailto:founders@example.com",
+    "https://linkedin.com/company/example-company",
+    "https://www.linkedin.com/company/example-company",
+    "https://careers.linkedin.com/company/example-company"
+  ])("ignores an invalid explicit company website URL: %s", async (websiteHref) => {
+    const detailHtml = (await readFile(currentDetailFixturePath, "utf8")).replace(
+      "https://example.com",
+      websiteHref
+    );
+    const source = {
+      fetch: async () => ({
+        html: await readFile(currentListFixturePath, "utf8"),
+        url: "https://www.ycombinator.com/companies/industry/recruiting",
+        checkedAt: CHECKED_AT
+      }),
+      fetchCompanyDetail: async (url: string) => ({ html: detailHtml, url, checkedAt: CHECKED_AT })
+    } satisfies YcSource;
+
+    const [result] = await createYcProvider(source).search({ keyword: "Drip" });
+
+    expect(result?.websiteUrl ?? null).toBeNull();
+  });
+
+  it("caps detail hydration at 50 companies with at most four concurrent requests", async () => {
+    let activeRequests = 0;
+    let maximumActiveRequests = 0;
+    const requestedUrls: string[] = [];
+    const source = {
+      fetch: async () => ({
+        html: currentCompanyListFixture(55),
+        url: "https://www.ycombinator.com/companies/industry/marketing",
+        checkedAt: CHECKED_AT
+      }),
+      fetchCompanyDetail: async (url: string) => {
+        requestedUrls.push(url);
+        activeRequests += 1;
+        maximumActiveRequests = Math.max(maximumActiveRequests, activeRequests);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        activeRequests -= 1;
+        return {
+          html: await readFile(currentDetailFixturePath, "utf8"),
+          url,
+          checkedAt: CHECKED_AT
+        };
+      }
+    } satisfies YcSource;
+
+    const results = await createYcProvider(source).search({});
+
+    expect(results).toHaveLength(55);
+    expect(requestedUrls).toHaveLength(50);
+    expect(requestedUrls[0]).toBe("https://www.ycombinator.com/companies/company-00");
+    expect(requestedUrls.at(-1)).toBe("https://www.ycombinator.com/companies/company-49");
+    expect(maximumActiveRequests).toBe(4);
+    expect(results.filter((company) => company.websiteUrl !== undefined)).toHaveLength(50);
+  });
+
+  it("does not swallow a failed list fetch and retries it on the next search", async () => {
+    let attempts = 0;
+    const source = {
+      fetch: async () => {
+        attempts += 1;
+        if (attempts === 1) {
+          throw new Error("list unavailable");
+        }
+        return {
+          html: await readFile(currentListFixturePath, "utf8"),
+          url: "https://www.ycombinator.com/companies/industry/recruiting",
+          checkedAt: CHECKED_AT
+        };
+      }
+    } satisfies YcSource;
+    const provider = createYcProvider(source);
+
+    await expect(provider.search({ keyword: "Drip" })).rejects.toThrow("list unavailable");
+    await expect(provider.search({ keyword: "Drip" })).resolves.toHaveLength(1);
+    expect(attempts).toBe(2);
+  });
+
   it("keeps a current YC card while omitting an oversized SEO description", async () => {
     const html = (await readFile(currentListFixturePath, "utf8")).replace(
       "Never miss a lead.",
@@ -180,7 +368,7 @@ describe("YC company provider", () => {
     await provider.search({ location: "San Francisco", hiring: true });
     await provider.search({ keyword: "lead" });
 
-    expect(requestedUrls).toEqual([
+    expect(requestedUrls.filter((url) => /\/companies\/(?:industry|location)\//.test(url))).toEqual([
       "https://www.ycombinator.com/companies/industry/recruiting",
       "https://www.ycombinator.com/companies/location/san-francisco-bay-area/hiring",
       "https://www.ycombinator.com/companies/industry/marketing"
@@ -215,6 +403,64 @@ describe("YC company provider", () => {
     }));
 
     await expect(createYcProvider(source).search({})).rejects.toThrow(/final.*pathname/i);
+  });
+
+  it("loads company details through the public source safe-fetch seam", async () => {
+    const requestedUrls: string[] = [];
+    const listHtml = await readFile(currentListFixturePath, "utf8");
+    const detailHtml = await readFile(currentDetailFixturePath, "utf8");
+    const source = createPublicYcSource(async (url) => {
+      requestedUrls.push(url);
+      return {
+        url,
+        title: "YC company page",
+        text: "YC company",
+        html: url.endsWith("/drippay") ? detailHtml : listHtml,
+        checkedAt: CHECKED_AT,
+        contentType: "text/html",
+        untrusted: true
+      };
+    });
+
+    const results = await createYcProvider(source).search({ keyword: "Drip" });
+
+    expect(results[0]?.websiteUrl).toBe("https://example.com/");
+    expect(requestedUrls).toEqual([
+      YC_DEFAULT_FACET_URL,
+      "https://www.ycombinator.com/companies/drippay"
+    ]);
+  });
+
+  it("rejects a public company detail redirected off the approved YC origins", async () => {
+    const source = createPublicYcSource(async () => ({
+      url: "https://attacker.example/companies/drippay",
+      title: "Fake YC company",
+      text: "Fake company",
+      html: await readFile(currentDetailFixturePath, "utf8"),
+      checkedAt: CHECKED_AT,
+      contentType: "text/html",
+      untrusted: true
+    }));
+
+    await expect(
+      source.fetchCompanyDetail?.("https://www.ycombinator.com/companies/drippay")
+    ).rejects.toThrow(/detail.*final.*origin/i);
+  });
+
+  it("rejects a public company detail redirected to a nested YC path", async () => {
+    const source = createPublicYcSource(async () => ({
+      url: "https://www.ycombinator.com/companies/drippay/jobs",
+      title: "YC jobs",
+      text: "Jobs",
+      html: await readFile(currentDetailFixturePath, "utf8"),
+      checkedAt: CHECKED_AT,
+      contentType: "text/html",
+      untrusted: true
+    }));
+
+    await expect(
+      source.fetchCompanyDetail?.("https://www.ycombinator.com/companies/drippay")
+    ).rejects.toThrow(/detail.*final.*pathname/i);
   });
 
   it.each([

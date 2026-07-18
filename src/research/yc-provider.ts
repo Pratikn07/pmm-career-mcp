@@ -6,6 +6,8 @@ import type { CompanyResult, CompanySearchQuery, Evidence, SourceWarning } from 
 const YC_ORIGINS = new Set(["https://www.ycombinator.com", "https://ycombinator.com"]);
 const YC_DIRECTORY_URL = "https://www.ycombinator.com/companies";
 const YC_DEFAULT_FACET_URL = `${YC_DIRECTORY_URL}/industry/marketing`;
+const MAX_DETAIL_HYDRATIONS = 50;
+const MAX_DETAIL_CONCURRENCY = 4;
 const FIELD_LIMITS = {
   id: { characters: 160, bytes: 320 },
   name: { characters: 160, bytes: 320 },
@@ -24,6 +26,7 @@ export type YcSourcePage = {
 
 export interface YcSource {
   fetch(query?: CompanySearchQuery): Promise<YcSourcePage>;
+  fetchCompanyDetail?(url: string): Promise<YcSourcePage>;
 }
 
 function facetSlug(value: string): string {
@@ -83,6 +86,21 @@ export function createPublicYcSource(
         throw new SourceChangedError("The production YC source final pathname is not an approved company list");
       }
       return { html: page.html, url: page.url, checkedAt: page.checkedAt };
+    },
+    fetchCompanyDetail: async (url) => {
+      const page = await fetchPage(url);
+      const finalUrl = new URL(page.url);
+      if (!YC_ORIGINS.has(finalUrl.origin)) {
+        throw new SourceChangedError(
+          "The production YC company detail final origin is not approved"
+        );
+      }
+      if (!/^\/companies\/[a-z0-9-]+$/.test(finalUrl.pathname)) {
+        throw new SourceChangedError(
+          "The production YC company detail final pathname is not an approved company detail"
+        );
+      }
+      return { html: page.html, url: page.url, checkedAt: page.checkedAt };
     }
   };
 }
@@ -140,6 +158,69 @@ function normalizedUrl(value: string, baseUrl: string): string {
     throw new SourceChangedError("The YC directory contains an unsupported public URL");
   }
   return url.href;
+}
+
+function officialWebsiteFromDetail(page: YcSourcePage): string | undefined {
+  const href = load(page.html)('a[aria-label="Company website"]').first().attr("href");
+  if (href === undefined) {
+    return undefined;
+  }
+  let websiteUrl: string;
+  try {
+    websiteUrl = normalizedUrl(href, page.url);
+  } catch {
+    return undefined;
+  }
+  if (!withinFieldLimit(websiteUrl, FIELD_LIMITS.url)) {
+    return undefined;
+  }
+  const hostname = new URL(websiteUrl).hostname.toLocaleLowerCase("en").replace(/\.$/, "");
+  if (hostname === "linkedin.com" || hostname.endsWith(".linkedin.com")) {
+    return undefined;
+  }
+  return websiteUrl;
+}
+
+async function hydrateCompanyWebsites(
+  companies: CompanyResult[],
+  fetchCompanyDetail: ((url: string) => Promise<YcSourcePage>) | undefined
+): Promise<CompanyResult[]> {
+  if (fetchCompanyDetail === undefined) {
+    return companies;
+  }
+  const hydrated = [...companies];
+  const targetIndexes = companies.flatMap((company, index) => {
+    const detailUrl = company.sources[0]?.sourceUrl;
+    return company.websiteUrl === undefined && detailUrl !== undefined ? [index] : [];
+  }).slice(0, MAX_DETAIL_HYDRATIONS);
+  let nextTarget = 0;
+  const hydrateNext = async (): Promise<void> => {
+    while (nextTarget < targetIndexes.length) {
+      const targetIndex = targetIndexes[nextTarget];
+      nextTarget += 1;
+      if (targetIndex === undefined) {
+        return;
+      }
+      const company = companies[targetIndex];
+      const detailUrl = company?.sources[0]?.sourceUrl;
+      if (company === undefined || detailUrl === undefined) {
+        continue;
+      }
+      try {
+        const websiteUrl = officialWebsiteFromDetail(await fetchCompanyDetail(detailUrl));
+        if (websiteUrl !== undefined) {
+          hydrated[targetIndex] = { ...company, websiteUrl };
+        }
+      } catch {
+        // A detail page is optional enrichment; preserve the selected list result on safe failure.
+      }
+    }
+  };
+  await Promise.all(Array.from(
+    { length: Math.min(MAX_DETAIL_CONCURRENCY, targetIndexes.length) },
+    hydrateNext
+  ));
+  return hydrated;
 }
 
 function assertYcCompanyUrl(value: string, baseUrl: string): string {
@@ -427,9 +508,10 @@ export function createYcProvider(source: YcSource, options: { now?: () => Date }
 } {
   const searchYcCompanies = async (query: CompanySearchQuery): Promise<CompanyResult[]> => {
     const companies = parseCompanies(await source.fetch(query), (options.now ?? (() => new Date()))());
-    return companies.filter((company) => matches(company, query)).sort((left, right) => {
+    const selected = companies.filter((company) => matches(company, query)).sort((left, right) => {
       return left.name.localeCompare(right.name, "en") || left.ycId.localeCompare(right.ycId, "en");
     });
+    return await hydrateCompanyWebsites(selected, source.fetchCompanyDetail?.bind(source));
   };
   return { searchYcCompanies, search: searchYcCompanies };
 }
