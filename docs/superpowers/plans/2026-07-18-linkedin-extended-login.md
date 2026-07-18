@@ -151,13 +151,13 @@ Run:
 railway deployment list --service pmm-career-mcp --environment production --json
 ```
 
-If Railway has not created a deployment for the new GitHub commit, run:
+If Railway has not created a deployment for the new GitHub commit after the push, upload the verified checkout explicitly and attach the commit hash to the deployment message:
 
 ```bash
-railway redeploy --service pmm-career-mcp --environment production --yes --json
+railway up --service pmm-career-mcp --environment production --detach --json --message "deploy $(git rev-parse HEAD)"
 ```
 
-Expected: the newest deployment reaches `SUCCESS`, names branch `codex/supabase-migration`, and reports the exact implementation commit hash.
+Expected: a GitHub-triggered deployment names branch `codex/supabase-migration` and reports the exact implementation commit hash; a CLI fallback deployment carries that exact hash in its deployment message. In either case, the newest deployment reaches `SUCCESS`.
 
 - [ ] **Step 4: Verify live health and readiness**
 
