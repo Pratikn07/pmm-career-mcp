@@ -84,6 +84,7 @@ async function startStack(publishEnabled: boolean): Promise<TestStack> {
       nodeEnv: "test",
       port: 0,
       databaseUrl: "postgresql://postgres:postgres@127.0.0.1:5432/postgres",
+      migrationDatabaseUrl: "postgresql://postgres:postgres@127.0.0.1:5432/postgres",
       baseUrl: "http://127.0.0.1:3000",
       authMode: "none",
       oidcDiscoveryTimeoutMs: 5_000,

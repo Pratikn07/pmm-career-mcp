@@ -45,7 +45,8 @@ describe("loadConfig", () => {
   const productionConfig = {
     NODE_ENV: "production" as const,
     AUTH_MODE: "oauth" as const,
-    DATABASE_URL: "postgresql://postgres:postgres@db.example:5432/postgres",
+    DATABASE_URL: "postgresql://career_mcp_runtime:runtime-password@db.example:5432/postgres",
+    MIGRATION_DATABASE_URL: "postgresql://migration_owner:owner-password@db.example:5432/postgres",
     BASE_URL: "https://career.example/",
     SUPABASE_URL: "https://project.supabase.co",
     SUPABASE_PUBLISHABLE_KEY: FAKE_PUBLISHABLE_KEY,
@@ -69,7 +70,7 @@ describe("loadConfig", () => {
   });
 
   it.each([
-    "DATABASE_URL", "SUPABASE_URL", "SUPABASE_PUBLISHABLE_KEY", "OIDC_ISSUER", "OIDC_AUDIENCE", "ALLOWED_SUBJECT", "TOKEN_ENCRYPTION_KEY"
+    "DATABASE_URL", "MIGRATION_DATABASE_URL", "SUPABASE_URL", "SUPABASE_PUBLISHABLE_KEY", "OIDC_ISSUER", "OIDC_AUDIENCE", "ALLOWED_SUBJECT", "TOKEN_ENCRYPTION_KEY"
   ])("fails closed in production without %s", (missing) => {
     const values = { ...productionConfig } as Record<string, string>;
     delete values[missing];
@@ -90,6 +91,7 @@ describe("loadConfig", () => {
 
   it.each([
     ["DATABASE_URL", "mysql://db.example/career", /DATABASE_URL.*PostgreSQL/],
+    ["MIGRATION_DATABASE_URL", "mysql://db.example/career", /MIGRATION_DATABASE_URL.*PostgreSQL/],
     ["SUPABASE_URL", "http://project.supabase.co", /SUPABASE_URL.*HTTPS/],
     ["BASE_URL", "https://mcp-user:mcp-password@career.example", /BASE_URL.*credentials/],
     ["SUPABASE_URL", "https://project-user:project-password@project.supabase.co", /SUPABASE_URL.*credentials/],
@@ -103,6 +105,39 @@ describe("loadConfig", () => {
 
   it("rejects removed DATABASE_PATH configuration in production", () => {
     expect(() => loadConfig({ ...productionConfig, DATABASE_PATH: "./career.db" })).toThrow(/DATABASE_PATH/);
+  });
+
+  it("requires separate production migration and runtime database roles", () => {
+    expect(() => loadConfig({
+      ...productionConfig,
+      MIGRATION_DATABASE_URL: productionConfig.DATABASE_URL
+    })).toThrow(/MIGRATION_DATABASE_URL.*different.*role/i);
+
+    expect(() => loadConfig({
+      ...productionConfig,
+      MIGRATION_DATABASE_URL: "postgresql://career_mcp_runtime:different-password@migration.example/postgres"
+    })).toThrow(/MIGRATION_DATABASE_URL.*different.*role/i);
+  });
+
+  it.each([
+    ["DATABASE_URL", "postgresql://db.example/postgres"],
+    ["MIGRATION_DATABASE_URL", "postgresql://db.example/postgres"]
+  ])("requires an explicit production role in %s", (key, value) => {
+    expect(() => loadConfig({ ...productionConfig, [key]: value })).toThrow(new RegExp(`${key}.*username|${key}.*role`, "i"));
+  });
+
+  it("returns distinct production migration and runtime database URLs", () => {
+    const config = loadConfig(productionConfig);
+
+    expect(config.databaseUrl).toBe(productionConfig.DATABASE_URL);
+    expect(config.migrationDatabaseUrl).toBe(productionConfig.MIGRATION_DATABASE_URL);
+  });
+
+  it("defaults migration access to the runtime URL only outside production", () => {
+    const databaseUrl = "postgresql://postgres:postgres@127.0.0.1:5432/postgres";
+
+    expect(loadConfig({ NODE_ENV: "test", DATABASE_URL: databaseUrl }).migrationDatabaseUrl)
+      .toBe(databaseUrl);
   });
 
   it.each([

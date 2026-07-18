@@ -36,6 +36,7 @@ function testConfig() {
     nodeEnv: "test" as const,
     port: 0,
     databaseUrl: "postgresql://postgres:postgres@127.0.0.1:5432/postgres",
+    migrationDatabaseUrl: "postgresql://postgres:postgres@127.0.0.1:5432/postgres",
     baseUrl: "http://127.0.0.1:3000",
     authMode: "none" as const,
     oidcDiscoveryTimeoutMs: 5_000,
@@ -128,7 +129,10 @@ it("waits for database migration and readiness before opening the HTTP listener"
     await Promise.resolve();
     expect(createDatabase).toHaveBeenCalledWith(
       "postgresql://postgres:postgres@127.0.0.1:5432/postgres",
-      { requireTls: false }
+      {
+        migrationDatabaseUrl: "postgresql://postgres:postgres@127.0.0.1:5432/postgres",
+        requireTls: false
+      }
     );
     expect(listen).not.toHaveBeenCalled();
 
@@ -141,6 +145,7 @@ it("waits for database migration and readiness before opening the HTTP listener"
     expect(listen).toHaveBeenCalledOnce();
   } finally {
     databaseCreation.resolve(database);
+    readiness.resolve();
     runtime ??= await startup.catch(() => undefined);
     await closeUnexpectedRuntime(runtime);
   }
@@ -167,7 +172,8 @@ it("passes production TLS intent from injected config instead of global process 
   const productionEnvironment: NodeJS.ProcessEnv = {
     NODE_ENV: "production",
     PORT: "46873",
-    DATABASE_URL: "postgresql://app@database.example/postgres",
+    DATABASE_URL: "postgresql://career_mcp_runtime@database.example/postgres",
+    MIGRATION_DATABASE_URL: "postgresql://migration_owner@database.example/postgres",
     BASE_URL: "https://career.example",
     AUTH_MODE: "oauth",
     SUPABASE_URL: "https://project.supabase.co",
@@ -185,8 +191,11 @@ it("passes production TLS intent from injected config instead of global process 
   );
 
   expect(createDatabase).toHaveBeenCalledWith(
-    "postgresql://app@database.example/postgres",
-    { requireTls: true }
+    "postgresql://career_mcp_runtime@database.example/postgres",
+    {
+      migrationDatabaseUrl: "postgresql://migration_owner@database.example/postgres",
+      requireTls: true
+    }
   );
 });
 

@@ -4,14 +4,40 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => {
-  const end = vi.fn(async () => undefined);
-  const sql = Object.assign(vi.fn(async () => []), { end });
+  let clientIndex = 0;
+  const migrationEnd = vi.fn(async () => undefined);
+  const runtimeEnd = vi.fn(async () => undefined);
+  const migrationTransactionSql = vi.fn(async (_queryParts: TemplateStringsArray, ..._values: unknown[]) => []);
+  const migrationSavepoint = vi.fn(async (callback: (sql: typeof migrationTransactionSql) => Promise<void>) => {
+    await callback(migrationTransactionSql);
+  });
+  Object.assign(migrationTransactionSql, { savepoint: migrationSavepoint });
+  const migrationBegin = vi.fn(async (callback: (sql: typeof migrationTransactionSql) => Promise<void>) => {
+    await callback(migrationTransactionSql);
+  });
+  const migrationSql = Object.assign(vi.fn(async () => []), {
+    begin: migrationBegin,
+    end: migrationEnd,
+    options: { parsers: {}, serializers: {} }
+  });
+  const runtimeSql = Object.assign(vi.fn(async () => []), { end: runtimeEnd });
+  const postgres = vi.fn(() => {
+    const client = clientIndex === 0 ? migrationSql : runtimeSql;
+    clientIndex += 1;
+    return client;
+  });
   return {
-    drizzle: vi.fn(() => ({})),
-    end,
-    migrate: vi.fn(async () => undefined),
-    postgres: vi.fn(() => sql),
-    sql
+    drizzle: vi.fn((_client: unknown, _config?: unknown) => ({})),
+    migrationBegin,
+    migrationEnd,
+    migrationSavepoint,
+    migrationSql,
+    migrationTransactionSql,
+    migrate: vi.fn(async (_database: unknown, _config?: unknown) => undefined),
+    postgres,
+    resetClientOrder: () => { clientIndex = 0; },
+    runtimeEnd,
+    runtimeSql
   };
 });
 
@@ -22,11 +48,14 @@ vi.mock("drizzle-orm/postgres-js/migrator", () => ({ migrate: mocks.migrate }));
 import { createDatabase } from "../../src/db/client.js";
 
 const DATABASE_URL = "postgresql://app:secret@database.example/postgres";
+const MIGRATION_DATABASE_URL = "postgresql://migration:secret@database.example/postgres";
 const originalNodeEnv = process.env.NODE_ENV;
 
 afterEach(() => {
   vi.clearAllMocks();
-  mocks.end.mockResolvedValue(undefined);
+  mocks.resetClientOrder();
+  mocks.migrationEnd.mockResolvedValue(undefined);
+  mocks.runtimeEnd.mockResolvedValue(undefined);
   mocks.migrate.mockResolvedValue(undefined);
   if (originalNodeEnv === undefined) {
     delete process.env.NODE_ENV;
@@ -46,15 +75,71 @@ describe("production PostgreSQL client", () => {
     }
   );
 
-  it("uses a small pool and requires TLS from explicit production configuration", async () => {
+  it("uses separate migration and runtime pools with verified TLS and finite timeouts", async () => {
     process.env.NODE_ENV = "development";
 
-    const database = await createDatabase(DATABASE_URL, { requireTls: true });
-
-    expect(mocks.postgres).toHaveBeenCalledWith(DATABASE_URL, {
-      max: 5,
-      ssl: "require"
+    const database = await createDatabase(DATABASE_URL, {
+      migrationDatabaseUrl: MIGRATION_DATABASE_URL,
+      requireTls: true
     });
+
+    expect(mocks.postgres).toHaveBeenNthCalledWith(1, MIGRATION_DATABASE_URL, {
+      connect_timeout: 10,
+      connection: {
+        application_name: "pmm-career-mcp-migration",
+        idle_in_transaction_session_timeout: 30_000,
+        statement_timeout: 30_000
+      },
+      idle_timeout: 30,
+      max: 1,
+      ssl: { rejectUnauthorized: true, servername: "database.example" }
+    });
+    expect(mocks.postgres).toHaveBeenNthCalledWith(2, DATABASE_URL, {
+      connect_timeout: 10,
+      connection: {
+        application_name: "pmm-career-mcp-runtime",
+        idle_in_transaction_session_timeout: 30_000,
+        statement_timeout: 30_000
+      },
+      idle_timeout: 30,
+      max: 5,
+      ssl: { rejectUnauthorized: true, servername: "database.example" }
+    });
+    expect(mocks.migrationEnd).toHaveBeenCalledWith({ timeout: 5 });
+    expect(mocks.runtimeEnd).not.toHaveBeenCalled();
+    await database.close();
+  });
+
+  it("runs committed migrations under a transaction-scoped advisory lock", async () => {
+    const database = await createDatabase(DATABASE_URL, {
+      migrationDatabaseUrl: MIGRATION_DATABASE_URL,
+      requireTls: false
+    });
+
+    expect(mocks.migrationBegin).toHaveBeenCalledOnce();
+    expect(mocks.migrationTransactionSql).toHaveBeenCalledOnce();
+    const [queryParts] = mocks.migrationTransactionSql.mock.calls[0]!;
+    expect(queryParts.join(" ")).toMatch(/pg_advisory_xact_lock.*pmm-career-mcp:migrations/i);
+    expect(mocks.drizzle).toHaveBeenNthCalledWith(1, mocks.migrationTransactionSql, expect.anything());
+    expect(mocks.migrate).toHaveBeenCalledOnce();
+
+    await database.close();
+  });
+
+  it("adapts the locked postgres.js transaction for Drizzle's nested migration transaction", async () => {
+    mocks.drizzle.mockImplementationOnce((client) => ({ client }));
+    mocks.migrate.mockImplementationOnce(async (database) => {
+      const client = (database as { client: {
+        begin(callback: (sql: unknown) => Promise<void>): Promise<void>;
+        options?: unknown;
+      } }).client;
+      expect(client.options).toBe(mocks.migrationSql.options);
+      await client.begin(async () => undefined);
+    });
+
+    const database = await createDatabase(DATABASE_URL, { requireTls: false });
+
+    expect(mocks.migrationSavepoint).toHaveBeenCalledOnce();
     await database.close();
   });
 
@@ -85,17 +170,31 @@ describe("production PostgreSQL client", () => {
       "migration failed"
     );
 
-    expect(mocks.end).toHaveBeenCalledWith({ timeout: 5 });
+    expect(mocks.migrationEnd).toHaveBeenCalledWith({ timeout: 5 });
+    expect(mocks.runtimeEnd).toHaveBeenCalledWith({ timeout: 5 });
+  });
+
+  it("closes the runtime pool when repository composition fails after migration", async () => {
+    mocks.drizzle
+      .mockReturnValueOnce({})
+      .mockImplementationOnce(() => { throw new Error("runtime composition failed"); });
+
+    await expect(createDatabase(DATABASE_URL, { requireTls: false })).rejects.toThrow(
+      "runtime composition failed"
+    );
+
+    expect(mocks.migrationEnd).toHaveBeenCalledWith({ timeout: 5 });
+    expect(mocks.runtimeEnd).toHaveBeenCalledWith({ timeout: 5 });
   });
 
   it("uses an awaited harmless readiness query and async shutdown", async () => {
     const database = await createDatabase(DATABASE_URL, { requireTls: false });
 
     await database.checkReady();
-    expect(mocks.sql).toHaveBeenCalledOnce();
+    expect(mocks.runtimeSql).toHaveBeenCalledOnce();
 
     await database.close();
-    expect(mocks.end).toHaveBeenCalledWith({ timeout: 5 });
+    expect(mocks.runtimeEnd).toHaveBeenCalledWith({ timeout: 5 });
   });
 
   it("discovers committed migrations independently of the current working directory", async () => {

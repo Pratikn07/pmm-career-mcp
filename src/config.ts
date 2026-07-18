@@ -4,6 +4,7 @@ const environmentSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   PORT: z.coerce.number().int().positive().default(3000),
   DATABASE_URL: z.string().optional(),
+  MIGRATION_DATABASE_URL: z.string().optional(),
   BASE_URL: z.string().url().default("http://127.0.0.1:3000"),
   SUPABASE_URL: z.string().url().optional(),
   SUPABASE_PUBLISHABLE_KEY: z.string().optional(),
@@ -21,6 +22,7 @@ export type AppConfig = {
   nodeEnv: "development" | "test" | "production";
   port: number;
   databaseUrl: string;
+  migrationDatabaseUrl: string;
   baseUrl: string;
   supabaseUrl?: string;
   supabasePublishableKey?: string;
@@ -228,15 +230,25 @@ function requireBrowserSafeSupabaseKey(
   throw new Error("SUPABASE_PUBLISHABLE_KEY must be an sb_publishable_ key or a legacy anon JWT");
 }
 
-function requirePostgresUrl(value: string): void {
+function requirePostgresUrl(value: string, name: "DATABASE_URL" | "MIGRATION_DATABASE_URL"): URL {
   let url: URL;
   try {
     url = new URL(value);
   } catch {
-    throw new Error("DATABASE_URL must be a PostgreSQL URL in production");
+    throw new Error(`${name} must be a PostgreSQL URL in production`);
   }
   if (url.protocol !== "postgres:" && url.protocol !== "postgresql:") {
-    throw new Error("DATABASE_URL must be a PostgreSQL URL in production");
+    throw new Error(`${name} must be a PostgreSQL URL in production`);
+  }
+  return url;
+}
+
+function requireExplicitDatabaseRole(url: URL, name: "DATABASE_URL" | "MIGRATION_DATABASE_URL"): string {
+  if (url.username === "") throw new Error(`${name} must include an explicit database role username`);
+  try {
+    return decodeURIComponent(url.username);
+  } catch {
+    throw new Error(`${name} must include a valid database role username`);
   }
 }
 
@@ -261,7 +273,16 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
   if (parsed.NODE_ENV === "production") {
     if (env.DATABASE_PATH !== undefined) throw new Error("DATABASE_PATH is not supported; use DATABASE_URL");
 
-    requirePostgresUrl(required(parsed.DATABASE_URL, "DATABASE_URL"));
+    const runtimeDatabase = requirePostgresUrl(required(parsed.DATABASE_URL, "DATABASE_URL"), "DATABASE_URL");
+    const migrationDatabase = requirePostgresUrl(
+      required(parsed.MIGRATION_DATABASE_URL, "MIGRATION_DATABASE_URL"),
+      "MIGRATION_DATABASE_URL"
+    );
+    const runtimeRole = requireExplicitDatabaseRole(runtimeDatabase, "DATABASE_URL");
+    const migrationRole = requireExplicitDatabaseRole(migrationDatabase, "MIGRATION_DATABASE_URL");
+    if (runtimeRole === migrationRole) {
+      throw new Error("MIGRATION_DATABASE_URL must use a different database role from DATABASE_URL");
+    }
     const baseUrl = canonicalOrigin(parsed.BASE_URL, "BASE_URL");
     if (new URL(baseUrl).protocol !== "https:") {
       throw new Error("BASE_URL must use HTTPS in production");
@@ -295,10 +316,13 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
     : canonicalSupabaseUrl(parsed.SUPABASE_URL, parsed.NODE_ENV === "production");
   const oidcIssuer = parsed.OIDC_ISSUER === undefined ? undefined : canonicalUrl(parsed.OIDC_ISSUER, "OIDC_ISSUER");
 
+  const databaseUrl = parsed.DATABASE_URL ?? "postgresql://postgres:postgres@127.0.0.1:5432/postgres";
+
   return {
     nodeEnv: parsed.NODE_ENV,
     port: parsed.PORT,
-    databaseUrl: parsed.DATABASE_URL ?? "postgresql://postgres:postgres@127.0.0.1:5432/postgres",
+    databaseUrl,
+    migrationDatabaseUrl: parsed.MIGRATION_DATABASE_URL ?? databaseUrl,
     baseUrl,
     ...(supabaseUrl === undefined ? {} : { supabaseUrl }),
     ...(parsed.SUPABASE_PUBLISHABLE_KEY === undefined

@@ -118,6 +118,7 @@ export async function createCareerApplication(
   options: ApplicationOptions
 ): Promise<CareerApplication> {
   const database = options.database ?? await createDatabase(options.config.databaseUrl, {
+    migrationDatabaseUrl: options.config.migrationDatabaseUrl,
     requireTls: options.config.nodeEnv === "production"
   });
   const now = options.now ?? (() => new Date());
@@ -206,6 +207,7 @@ export async function startServer(
 ): Promise<RunningCareerApplication> {
   const config = loadConfig(env);
   const database = await (dependencies.createDatabase ?? createDatabase)(config.databaseUrl, {
+    migrationDatabaseUrl: config.migrationDatabaseUrl,
     requireTls: config.nodeEnv === "production"
   });
   let runtime: CareerApplication;
