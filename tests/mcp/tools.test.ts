@@ -4,6 +4,11 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { expect, it, vi } from "vitest";
 import { createCareerMcpServer, type CareerMcpDependencies } from "../../src/mcp/server.js";
 import { createHttpApp } from "../../src/http/app.js";
+import {
+  rankNetworkingTargetsInput,
+  saveTargetInput
+} from "../../src/mcp/schemas.js";
+import { scoreTarget, type ScoreTargetInput } from "../../src/ranking/score-target.js";
 import request from "supertest";
 
 function deferred<T>() {
@@ -37,6 +42,63 @@ const expectedTools = [
   "publish_linkedin_post"
 ] as const;
 
+const FIXED_NOW = new Date("2026-07-17T00:00:00.000Z");
+
+function scoringTarget(overrides: Partial<ScoreTargetInput> = {}): ScoreTargetInput {
+  return {
+    companyName: "Acme",
+    person: {
+      id: "person-1",
+      companyId: "company-1",
+      name: "Ada Lovelace",
+      role: "VP Marketing",
+      checkedAt: FIXED_NOW.toISOString(),
+      confidence: 0.9,
+      evidence: [{
+        id: "evidence-1",
+        url: "https://acme.example/team",
+        sourceUrl: "https://acme.example/team",
+        title: "Leadership",
+        fact: "Ada is VP Marketing",
+        checkedAt: FIXED_NOW.toISOString(),
+        confidence: 0.9
+      }]
+    },
+    opportunities: [{
+      id: "opportunity-1",
+      companyId: "company-1",
+      title: "Product Marketing Manager",
+      location: "San Francisco",
+      sourceUrl: "https://acme.example/careers/pmm",
+      checkedAt: FIXED_NOW.toISOString(),
+      active: true
+    }],
+    preferences: {
+      roleKeywords: ["product marketing"],
+      preferredLocations: ["San Francisco"],
+      industries: ["SaaS"]
+    },
+    weights: { pmmOpportunity: 0.4, referralPotential: 0.3, networkValue: 0.3 },
+    evidence: {
+      activePmmRole: true,
+      companyHiring: true,
+      roleSeniority: true,
+      sharedDomain: true,
+      locationMatch: true,
+      recentFundingSignal: false,
+      companyCheckedAt: FIXED_NOW.toISOString()
+    },
+    ...overrides
+  };
+}
+
+function createServerWithClock(
+  deps: CareerMcpDependencies,
+  now: () => Date
+) {
+  return createCareerMcpServer(deps, { now });
+}
+
 function dependencies(): CareerMcpDependencies {
   return {
     ycProvider: { searchYcCompanies: async () => [] },
@@ -66,6 +128,120 @@ function dependencies(): CareerMcpDependencies {
   };
 }
 
+function successfulDependencies(): CareerMcpDependencies {
+  const timestamp = FIXED_NOW.toISOString();
+  const score = scoreTarget(scoringTarget(), FIXED_NOW);
+  const pipelineTarget = {
+    id: "target-1",
+    personId: score.personId,
+    pmmOpportunity: score.pmmOpportunity,
+    referralPotential: score.referralPotential,
+    networkValue: score.networkValue,
+    totalScore: score.total,
+    confidence: score.confidence,
+    status: "discovered" as const,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    reasons: score.reasons,
+    missingEvidence: score.missingEvidence
+  };
+  const post = {
+    id: "post-1",
+    versionId: "post-version-1",
+    text: "A safe test post",
+    visibility: "PUBLIC" as const,
+    version: 1,
+    checksum: "a".repeat(64),
+    state: "draft",
+    createdAt: timestamp,
+    updatedAt: timestamp
+  };
+  return {
+    ycProvider: {
+      searchYcCompanies: async () => [{
+        id: "company-1",
+        ycId: "acme-yc",
+        name: "Acme",
+        checkedAt: timestamp,
+        sources: scoringTarget().person.evidence,
+        warnings: []
+      }]
+    },
+    peopleDiscovery: {
+      discoverPublicPeople: async () => ({
+        people: [scoringTarget().person],
+        evidence: scoringTarget().person.evidence,
+        checkedAt: timestamp,
+        coverage: "authoritative-pages-only",
+        warnings: []
+      })
+    },
+    jobDiscovery: {
+      findPmmOpportunities: async () => ({
+        opportunities: [...scoringTarget().opportunities],
+        checkedAt: timestamp,
+        warnings: []
+      })
+    },
+    pipeline: {
+      saveTarget: async () => pipelineTarget,
+      updateStatus: async () => ({ ...pipelineTarget, status: "shortlisted" }),
+      recordNote: async () => ({
+        id: "note-1",
+        targetId: "target-1",
+        text: "Private note",
+        createdAt: timestamp,
+        updatedAt: timestamp
+      }),
+      listPipeline: async () => [pipelineTarget],
+      createShortlist: async () => ({
+        id: "shortlist-1",
+        name: "This week",
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        entries: [{
+          id: "shortlist-entry-1",
+          shortlistId: "shortlist-1",
+          targetId: "target-1",
+          position: 0,
+          createdAt: timestamp
+        }]
+      })
+    },
+    drafts: {
+      createOutreach: async () => ({
+        id: "outreach-1",
+        targetId: "target-1",
+        purpose: "networking",
+        text: "Hello",
+        version: 1,
+        evidenceIds: ["evidence-1"],
+        createdAt: timestamp,
+        updatedAt: timestamp
+      }),
+      createPost: async () => post,
+      revisePost: async () => ({ ...post, versionId: "post-version-2", version: 2 }),
+      getPostHistory: async () => [post]
+    },
+    previews: {
+      create: async () => ({
+        postId: post.id,
+        versionId: post.versionId,
+        text: post.text,
+        version: post.version,
+        checksum: post.checksum,
+        visibility: post.visibility,
+        characterCount: [...post.text].length,
+        previewToken: "A".repeat(43),
+        expiresAt: "2026-07-17T00:15:00.000Z"
+      })
+    },
+    publish: { publish: async () => ({ state: "published", postUrn: "urn:li:share:12345" }) },
+    linkedin: { createAuthorizationUrl: () => "https://www.linkedin.com/oauth/v2/authorization" },
+    getLinkedInConnectionStatus: async () => ({ connected: true, valid: true, publishingEnabled: false })
+  };
+}
+
 async function listTools() {
   const server = createCareerMcpServer(dependencies());
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -82,6 +258,178 @@ it("registers exactly the approved Career MCP tools", async () => {
   expect(tools.map((tool) => tool.name).some((name) => /scrape|message|profile|schedule|batch/.test(name))).toBe(false);
   expect(tools.every((tool) => tool.inputSchema.additionalProperties === false)).toBe(true);
   expect(tools.every((tool) => tool.outputSchema !== undefined)).toBe(true);
+});
+
+it("publishes an explicit success and safe-error output contract for every tool", async () => {
+  const tools = await listTools();
+  const successKeys: Record<(typeof expectedTools)[number], string> = {
+    search_yc_companies: "companies",
+    discover_public_people: "people",
+    find_pmm_opportunities: "opportunities",
+    rank_networking_targets: "targets",
+    explain_target_match: "score",
+    draft_outreach: "draft",
+    draft_linkedin_post: "post",
+    revise_post: "post",
+    preview_post: "preview",
+    create_weekly_shortlist: "shortlist",
+    save_target: "target",
+    update_outreach_status: "target",
+    list_pipeline: "targets",
+    record_note: "note",
+    list_post_history: "posts",
+    get_linkedin_connection_status: "connection",
+    create_linkedin_authorization_url: "authorizationUrl",
+    publish_linkedin_post: "result"
+  };
+
+  for (const tool of tools) {
+    const serialized = JSON.stringify(tool.outputSchema);
+    expect(serialized, `${tool.name} success schema`).toContain(`\"${successKeys[tool.name as keyof typeof successKeys]}\"`);
+    expect(serialized, `${tool.name} safe error schema`).toContain("\"error\"");
+    expect(serialized, `${tool.name} safe error code`).toContain("\"code\"");
+    expect(serialized, `${tool.name} does not expose an untyped record`).not.toContain("additionalProperties\":{}");
+  }
+});
+
+it("rejects caller-authored numeric networking scores", () => {
+  const legacyScore = {
+    personId: "person-1",
+    companyId: "company-1",
+    companyName: "Acme",
+    name: "Ada Lovelace",
+    pmmOpportunity: 100,
+    referralPotential: 100,
+    networkValue: 100,
+    total: 100,
+    confidence: 1,
+    reasons: [],
+    missingEvidence: []
+  };
+  expect(rankNetworkingTargetsInput.safeParse({ scores: [legacyScore] }).success).toBe(false);
+  expect(saveTargetInput.safeParse({ score: legacyScore }).success).toBe(false);
+});
+
+it("calculates and ranks networking scores on the server", async () => {
+  const target = scoringTarget();
+  const server = createServerWithClock(dependencies(), () => new Date(FIXED_NOW));
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "test", version: "1.0.0" });
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+
+  const result = await client.callTool({
+    name: "rank_networking_targets",
+    arguments: { targets: [target] }
+  });
+  await Promise.all([client.close(), server.close()]);
+
+  expect(result.structuredContent).toEqual({
+    data: { targets: [scoreTarget(target, FIXED_NOW)] }
+  });
+});
+
+it("recalculates a networking score immediately before persistence", async () => {
+  const target = scoringTarget();
+  const expectedScore = scoreTarget(target, FIXED_NOW);
+  const persistence = deferred<Record<string, unknown>>();
+  const captured: unknown[] = [];
+  const saveDependencies = dependencies();
+  saveDependencies.pipeline.saveTarget = (async (score) => {
+    captured.push(score);
+    return await persistence.promise;
+  }) as CareerMcpDependencies["pipeline"]["saveTarget"];
+  const server = createServerWithClock(saveDependencies, () => new Date(FIXED_NOW));
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "test", version: "1.0.0" });
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+
+  const resultPromise = client.callTool({ name: "save_target", arguments: { target } });
+  await vi.waitFor(() => expect(captured).toHaveLength(1));
+  expect(captured[0]).toEqual(expectedScore);
+  persistence.resolve({
+    id: "target-1",
+    personId: expectedScore.personId,
+    pmmOpportunity: expectedScore.pmmOpportunity,
+    referralPotential: expectedScore.referralPotential,
+    networkValue: expectedScore.networkValue,
+    totalScore: expectedScore.total,
+    confidence: expectedScore.confidence,
+    status: "discovered",
+    createdAt: FIXED_NOW.toISOString(),
+    updatedAt: FIXED_NOW.toISOString(),
+    reasons: expectedScore.reasons,
+    missingEvidence: expectedScore.missingEvidence
+  });
+  const result = await resultPromise;
+  await Promise.all([client.close(), server.close()]);
+
+  expect(result.isError).not.toBe(true);
+});
+
+it("returns bounded useful text instead of the generic Done response", async () => {
+  const server = createCareerMcpServer(dependencies());
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "test", version: "1.0.0" });
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  const result = await client.callTool({ name: "search_yc_companies", arguments: {} });
+  await Promise.all([client.close(), server.close()]);
+
+  const content = result.content as Array<{ type: string; text?: string }>;
+  const text = content.find((item) => item.type === "text")?.text ?? "";
+  expect(text).not.toBe("Done.");
+  expect(text.length).toBeGreaterThan(0);
+  expect(text.length).toBeLessThanOrEqual(240);
+  expect(text).toContain("0");
+});
+
+it("returns schema-valid structured data and bounded summaries from all 18 tools", async () => {
+  const target = scoringTarget();
+  const server = createServerWithClock(successfulDependencies(), () => new Date(FIXED_NOW));
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "test", version: "1.0.0" });
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  const calls: Array<{ name: (typeof expectedTools)[number]; arguments: Record<string, unknown> }> = [
+    { name: "search_yc_companies", arguments: {} },
+    { name: "discover_public_people", arguments: { companyId: "company-1" } },
+    { name: "find_pmm_opportunities", arguments: { companyIds: ["company-1"], preferences: target.preferences } },
+    { name: "rank_networking_targets", arguments: { targets: [target] } },
+    { name: "explain_target_match", arguments: { target } },
+    { name: "draft_outreach", arguments: { targetId: "target-1", purpose: "networking", text: "Hello", evidenceIds: ["evidence-1"] } },
+    { name: "draft_linkedin_post", arguments: { text: "A safe test post", visibility: "PUBLIC" } },
+    { name: "revise_post", arguments: { postId: "post-1", text: "A safe revised post" } },
+    { name: "preview_post", arguments: { postId: "post-1", version: 1 } },
+    { name: "create_weekly_shortlist", arguments: { name: "This week", targetIds: ["target-1"] } },
+    { name: "save_target", arguments: { target } },
+    { name: "update_outreach_status", arguments: { targetId: "target-1", status: "shortlisted" } },
+    { name: "list_pipeline", arguments: {} },
+    { name: "record_note", arguments: { targetId: "target-1", text: "Private note" } },
+    { name: "list_post_history", arguments: { postId: "post-1" } },
+    { name: "get_linkedin_connection_status", arguments: {} },
+    { name: "create_linkedin_authorization_url", arguments: {} },
+    {
+      name: "publish_linkedin_post",
+      arguments: {
+        postId: "post-1",
+        versionId: "post-version-1",
+        version: 1,
+        checksum: "a".repeat(64),
+        previewToken: "A".repeat(43),
+        visibility: "PUBLIC"
+      }
+    }
+  ];
+
+  for (const call of calls) {
+    const result = await client.callTool(call);
+    expect(result.isError, call.name).not.toBe(true);
+    expect(result.structuredContent, call.name).toHaveProperty("data");
+    const textContent = result.content as Array<{ type: string; text?: string }>;
+    const summary = textContent.find((item) => item.type === "text")?.text ?? "";
+    expect(summary, call.name).not.toBe("Done.");
+    expect(summary.length, call.name).toBeGreaterThan(0);
+    expect(summary.length, call.name).toBeLessThanOrEqual(240);
+  }
+  await Promise.all([client.close(), server.close()]);
 });
 
 it("makes the four publishing and research safety rules prominent in instructions", async () => {
@@ -161,7 +509,17 @@ it("returns a safe tool error without exposing an implementation message", async
 });
 
 it("waits for a database-backed service promise before returning a tool result", async () => {
-  const post = deferred<{ id: string }>();
+  const post = deferred<{
+    id: string;
+    versionId: string;
+    text: string;
+    visibility: "PUBLIC";
+    version: number;
+    checksum: string;
+    state: string;
+    createdAt: string;
+    updatedAt: string;
+  }>();
   const started = deferred<void>();
   const asyncDependencies = dependencies();
   asyncDependencies.drafts.createPost = (() => {
@@ -185,7 +543,17 @@ it("waits for a database-backed service promise before returning a tool result",
   await new Promise<void>((resolve) => setImmediate(resolve));
   expect(settled).toBe(false);
 
-  post.resolve({ id: "saved-post" });
+  post.resolve({
+    id: "saved-post",
+    versionId: "saved-post-version",
+    text: "An asynchronously saved post",
+    visibility: "PUBLIC",
+    version: 1,
+    checksum: "a".repeat(64),
+    state: "draft",
+    createdAt: FIXED_NOW.toISOString(),
+    updatedAt: FIXED_NOW.toISOString()
+  });
   const result = await resultPromise;
   await Promise.all([client.close(), server.close()]);
   expect(result.structuredContent).toMatchObject({ data: { post: { id: "saved-post" } } });

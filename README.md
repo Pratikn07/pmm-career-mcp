@@ -55,6 +55,8 @@ Every real post still requires the exact immutable draft version, checksum, visi
 - Never paste client secrets, access tokens, refresh tokens, encryption keys, OAuth states, database URLs, or `.env` contents into ChatGPT.
 - Research is limited to YC companies and allowed public company sources; people coverage is best-effort, never a complete directory.
 - YC company discovery uses an official server-rendered YC industry or location facet page selected from the query. Every MCP response includes a page-scoped coverage summary—even when no company matches—so an empty result is never presented as proof of complete YC-wide coverage.
+- Networking scores are calculated on the server from bounded person, source-evidence, opportunity, preference, and weight inputs. Ranking, explanation, and persistence never accept caller-authored numeric scores, and saving recalculates the score immediately before the private database write.
+- Every tool returns a typed success payload or a safe error code plus a short non-secret summary. Preview tokens and authorization URLs remain in structured results and are not copied into summary text.
 - Drafts, previews, shortlists, targets, and notes stay private in the managed database.
 - A failed or unknown publish attempt is not permission to retry automatically. Resolve it deliberately and create a fresh preview when needed.
 

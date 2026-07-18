@@ -170,7 +170,7 @@ export async function createCareerApplication(
           publishingEnabled: options.config.linkedinPublishEnabled
         };
       }
-    })
+    }, { now })
   });
   app.get("/linkedin/callback", async (request, response) => {
     const code = typeof request.query.code === "string" ? request.query.code : undefined;

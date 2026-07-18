@@ -151,23 +151,30 @@ it("runs the private career flow and only publishes one exact enabled preview", 
   expect(people).toHaveLength(1);
   const person = people[0];
   expect(person).toBeDefined();
-  const score = {
-    personId: text(person!.id),
-    companyId: text(company!.id),
+  const scoringTarget = {
     companyName: text(company!.name),
-    name: text(person!.name),
-    pmmOpportunity: 40,
-    referralPotential: 30,
-    networkValue: 30,
-    total: 100,
-    confidence: 0.9,
-    reasons: ["PMM role and marketing leader are public"],
-    missingEvidence: []
+    person,
+    opportunities: [],
+    preferences: {
+      roleKeywords: ["product marketing"],
+      preferredLocations: ["San Francisco"],
+      industries: ["SaaS"]
+    },
+    weights: { pmmOpportunity: 0.4, referralPotential: 0.3, networkValue: 0.3 },
+    evidence: {
+      activePmmRole: true,
+      companyHiring: true,
+      roleSeniority: true,
+      sharedDomain: true,
+      locationMatch: true,
+      recentFundingSignal: false,
+      companyCheckedAt: text(company!.checkedAt)
+    }
   };
-  const ranked = records(data(await disabled.client.callTool({ name: "rank_networking_targets", arguments: { scores: [score] } })).targets);
+  const ranked = records(data(await disabled.client.callTool({ name: "rank_networking_targets", arguments: { targets: [scoringTarget] } })).targets);
   expect(ranked[0]).toBeDefined();
   expect(ranked[0]!.personId).toBe(text(person!.id));
-  const target = object(data(await disabled.client.callTool({ name: "save_target", arguments: { score } })).target);
+  const target = object(data(await disabled.client.callTool({ name: "save_target", arguments: { target: scoringTarget } })).target);
   const shortlist = object(data(await disabled.client.callTool({ name: "create_weekly_shortlist", arguments: { name: "This week", targetIds: [text(target.id)] } })).shortlist);
   expect(records(shortlist.entries)).toHaveLength(1);
   const post = object(data(await disabled.client.callTool({ name: "draft_linkedin_post", arguments: { text: "I am exploring PMM roles.", visibility: "PUBLIC" } })).post);
