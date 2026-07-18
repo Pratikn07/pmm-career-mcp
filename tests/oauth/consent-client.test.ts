@@ -84,6 +84,8 @@ describe("consent browser controller", () => {
   it.each([
     ["partial openid scope", "openid"],
     ["partial email scope", "email"],
+    ["duplicate openid without email", "openid openid"],
+    ["duplicate email without openid", "email email"],
     ["duplicate scope", "openid email email"],
     ["unexpected scope", "openid email profile"]
   ])("rejects %s and cannot approve it", async (_label, scope) => {

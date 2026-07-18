@@ -39,8 +39,10 @@ export type ConsentController = {
 
 function allowedScopes(scope: string): string[] | undefined {
   const scopes = scope.split(/\s+/).filter(Boolean);
+  const requestedScopes = new Set(scopes);
   return scopes.length === ALLOWED_SCOPES.size
-    && scopes.every((item) => ALLOWED_SCOPES.has(item))
+    && requestedScopes.size === ALLOWED_SCOPES.size
+    && [...ALLOWED_SCOPES].every((item) => requestedScopes.has(item))
     ? scopes
     : undefined;
 }
