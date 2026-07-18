@@ -69,6 +69,9 @@ it("provides a no-secret Supabase, Railway, and ChatGPT operator runbook", async
   expect(runbook).toMatch(/percent-encode/i);
   expect(runbook).toMatch(/`MIGRATION_DATABASE_URL`[^\n]*migrat/i);
   expect(runbook).toMatch(/`DATABASE_URL`[^\n]*(?:read|write|DML|runtime)/i);
+  expect(runbook).toMatch(/run `supabase\/runtime-role\.sql`[^\n]*before[^\n]*(?:smoke|deploy|migration)/i);
+  expect(runbook).toMatch(/CREATE SCHEMA IF NOT EXISTS/i);
+  expect(runbook).toMatch(/default privileges[^\n]*migrations/i);
   expect(runbook).toContain("/oauth/consent");
   expect(runbook).toContain("/health");
   expect(runbook).toContain("/ready");

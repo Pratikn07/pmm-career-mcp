@@ -7,6 +7,19 @@ async function runtimeRoleSql(): Promise<string> {
 }
 
 describe("Supabase runtime-role operator template", () => {
+  it("idempotently bootstraps the private schema without taking ownership of an existing schema", async () => {
+    const sql = await runtimeRoleSql();
+    const createSchema = sql.search(/create\s+schema\s+if\s+not\s+exists\s+career_mcp/i);
+    const firstGrant = sql.search(/grant\s+usage\s+on\s+schema\s+career_mcp/i);
+    const defaultPrivileges = sql.search(/alter\s+default\s+privileges\s+in\s+schema\s+career_mcp/i);
+
+    expect(createSchema).toBeGreaterThan(-1);
+    expect(createSchema).toBeLessThan(firstGrant);
+    expect(createSchema).toBeLessThan(defaultPrivileges);
+    expect(sql).not.toMatch(/alter\s+schema\s+career_mcp\s+owner/i);
+    expect(sql).not.toMatch(/drop\s+schema\s+career_mcp/i);
+  });
+
   it("creates an idempotent least-privilege NOINHERIT login and prompts privately for its password", async () => {
     const sql = await runtimeRoleSql();
 

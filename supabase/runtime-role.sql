@@ -6,6 +6,8 @@
 
 begin;
 
+create schema if not exists career_mcp;
+
 do $operator$
 begin
   if not exists (
