@@ -1,7 +1,10 @@
+import { sql } from "drizzle-orm";
 import {
   boolean,
+  check,
   doublePrecision,
   foreignKey,
+  index,
   integer,
   jsonb,
   pgSchema,
@@ -65,7 +68,13 @@ export const evidence = careerMcp.table("evidence", {
   checkedAt: timestamptz("checked_at").notNull(),
   confidence: doublePrecision("confidence").notNull(),
   createdAt: timestamptz("created_at").notNull()
-});
+}, (table) => [
+  index("evidence_person_id_idx").on(table.personId),
+  check(
+    "evidence_confidence_range_check",
+    sql`${table.confidence} >= 0 and ${table.confidence} <= 1`
+  )
+]);
 
 export const targets = careerMcp.table("targets", {
   id: uuid("id").primaryKey(),
@@ -79,14 +88,49 @@ export const targets = careerMcp.table("targets", {
   rationale: text("rationale").notNull(),
   createdAt: timestamptz("created_at").notNull(),
   updatedAt: timestamptz("updated_at").notNull()
-});
+}, (table) => [
+  check(
+    "targets_pmm_opportunity_range_check",
+    sql`${table.pmmOpportunity} >= 0 and ${table.pmmOpportunity} <= 100`
+  ),
+  check(
+    "targets_referral_potential_range_check",
+    sql`${table.referralPotential} >= 0 and ${table.referralPotential} <= 100`
+  ),
+  check(
+    "targets_network_value_range_check",
+    sql`${table.networkValue} >= 0 and ${table.networkValue} <= 100`
+  ),
+  check(
+    "targets_total_score_range_check",
+    sql`${table.totalScore} >= 0 and ${table.totalScore} <= 100`
+  ),
+  check(
+    "targets_confidence_range_check",
+    sql`${table.confidence} >= 0 and ${table.confidence} <= 1`
+  ),
+  check(
+    "targets_status_check",
+    sql`${table.status} in (
+      'discovered',
+      'shortlisted',
+      'connect_planned',
+      'connected',
+      'contacted',
+      'replied',
+      'archived'
+    )`
+  )
+]);
 
 export const targetNotes = careerMcp.table("target_notes", {
   id: uuid("id").primaryKey(),
   targetId: uuid("target_id").notNull().references(() => targets.id),
   text: text("text").notNull(),
   createdAt: timestamptz("created_at").notNull()
-});
+}, (table) => [
+  index("target_notes_target_id_idx").on(table.targetId)
+]);
 
 export const outreachDrafts = careerMcp.table("outreach_drafts", {
   id: uuid("id").primaryKey(),
@@ -102,7 +146,8 @@ export const outreachDrafts = careerMcp.table("outreach_drafts", {
     table.targetId,
     table.purpose,
     table.version
-  )
+  ),
+  check("outreach_drafts_version_check", sql`${table.version} >= 1`)
 ]);
 
 export const shortlists = careerMcp.table("shortlists", {
@@ -120,7 +165,9 @@ export const shortlistEntries = careerMcp.table("shortlist_entries", {
   createdAt: timestamptz("created_at").notNull()
 }, (table) => [
   uniqueIndex("shortlist_target_unique").on(table.shortlistId, table.targetId),
-  uniqueIndex("shortlist_position_unique").on(table.shortlistId, table.position)
+  uniqueIndex("shortlist_position_unique").on(table.shortlistId, table.position),
+  index("shortlist_entries_target_id_idx").on(table.targetId),
+  check("shortlist_entries_position_check", sql`${table.position} >= 0`)
 ]);
 
 export const postDrafts = careerMcp.table("post_drafts", {
@@ -135,12 +182,28 @@ export const postDrafts = careerMcp.table("post_drafts", {
   updatedAt: timestamptz("updated_at").notNull()
 }, (table) => [
   unique("post_draft_version_unique").on(table.draftId, table.version),
-  unique("post_draft_row_version_unique").on(table.id, table.version)
+  unique("post_draft_row_version_unique").on(table.id, table.version),
+  check("post_drafts_version_check", sql`${table.version} >= 1`),
+  check(
+    "post_drafts_visibility_check",
+    sql`${table.visibility} in ('PUBLIC', 'CONNECTIONS')`
+  ),
+  check(
+    "post_drafts_state_check",
+    sql`${table.state} in (
+      'draft',
+      'ready_for_preview',
+      'publishing',
+      'published',
+      'publish_failed',
+      'publish_unknown'
+    )`
+  )
 ]);
 
 export const postPreviews = careerMcp.table("post_previews", {
   id: uuid("id").primaryKey(),
-  postDraftId: uuid("post_draft_id").notNull().references(() => postDrafts.id),
+  postDraftId: uuid("post_draft_id").notNull(),
   version: integer("version").notNull(),
   tokenHash: text("token_hash").notNull().unique(),
   expiresAt: timestamptz("expires_at").notNull(),
@@ -150,12 +213,13 @@ export const postPreviews = careerMcp.table("post_previews", {
     name: "post_previews_exact_version_fk",
     columns: [table.postDraftId, table.version],
     foreignColumns: [postDrafts.id, postDrafts.version]
-  })
+  }),
+  index("post_previews_post_draft_version_idx").on(table.postDraftId, table.version)
 ]);
 
 export const publishAttempts = careerMcp.table("publish_attempts", {
   id: uuid("id").primaryKey(),
-  postDraftId: uuid("post_draft_id").notNull().references(() => postDrafts.id),
+  postDraftId: uuid("post_draft_id").notNull(),
   version: integer("version").notNull(),
   requestedAt: timestamptz("requested_at").notNull(),
   responseCategory: text("response_category").notNull(),
@@ -167,7 +231,17 @@ export const publishAttempts = careerMcp.table("publish_attempts", {
     name: "publish_attempts_exact_version_fk",
     columns: [table.postDraftId, table.version],
     foreignColumns: [postDrafts.id, postDrafts.version]
-  })
+  }),
+  index("publish_attempts_post_draft_version_idx").on(table.postDraftId, table.version),
+  check(
+    "publish_attempts_response_category_check",
+    sql`${table.responseCategory} in (
+      'pending',
+      'published',
+      'definite_rejection',
+      'ambiguous'
+    )`
+  )
 ]);
 
 export const oauthTokens = careerMcp.table("oauth_tokens", {
