@@ -6,6 +6,7 @@ import { migrate } from "drizzle-orm/postgres-js/migrator";
 import postgres from "postgres";
 import { createRepositories } from "./repositories.js";
 import { schema } from "./schema.js";
+import { validateDatabaseCaCertificate } from "./tls.js";
 
 export type CareerDatabase = ReturnType<typeof createRepositories> & {
   checkReady(): Promise<void>;
@@ -15,6 +16,7 @@ export type CareerDatabase = ReturnType<typeof createRepositories> & {
 export type DatabaseConnectionOptions = {
   migrationDatabaseUrl?: string;
   requireTls: boolean;
+  tlsCaCertificate?: string;
 };
 
 type DatabaseClientPurpose = "migration" | "runtime";
@@ -54,7 +56,8 @@ function validateDatabaseUrl(
 function connectionOptions(
   databaseUrl: URL,
   purpose: DatabaseClientPurpose,
-  requireTls: boolean
+  requireTls: boolean,
+  tlsCaCertificate?: string
 ) {
   return {
     max: purpose === "migration" ? 1 : 5,
@@ -66,7 +69,13 @@ function connectionOptions(
       idle_in_transaction_session_timeout: SESSION_TIMEOUT_MILLISECONDS
     },
     ...(requireTls
-      ? { ssl: { rejectUnauthorized: true, servername: databaseUrl.hostname } }
+      ? {
+          ssl: {
+            ca: validateDatabaseCaCertificate(tlsCaCertificate ?? "", "TLS CA certificate"),
+            rejectUnauthorized: true,
+            servername: databaseUrl.hostname
+          }
+        }
       : {})
   };
 }
@@ -98,9 +107,12 @@ export async function createDatabase(
   const runtimeUrl = validateDatabaseUrl(databaseUrl, "DATABASE_URL");
   const migrationDatabaseUrl = options.migrationDatabaseUrl ?? databaseUrl;
   const migrationUrl = validateDatabaseUrl(migrationDatabaseUrl, "MIGRATION_DATABASE_URL");
+  const tlsCaCertificate = options.requireTls
+    ? validateDatabaseCaCertificate(options.tlsCaCertificate ?? "", "TLS CA certificate")
+    : undefined;
   const migrationClient = postgres(
     migrationDatabaseUrl,
-    connectionOptions(migrationUrl, "migration", options.requireTls)
+    connectionOptions(migrationUrl, "migration", options.requireTls, tlsCaCertificate)
   );
   let runtimeClient: ReturnType<typeof postgres> | undefined;
   let migrationClosed = false;
@@ -126,7 +138,7 @@ export async function createDatabase(
   try {
     runtimeClient = postgres(
       databaseUrl,
-      connectionOptions(runtimeUrl, "runtime", options.requireTls)
+      connectionOptions(runtimeUrl, "runtime", options.requireTls, tlsCaCertificate)
     );
     await migrationClient.begin(async (transactionClient) => {
       await transactionClient`select pg_advisory_xact_lock(hashtext('pmm-career-mcp:migrations'))`;

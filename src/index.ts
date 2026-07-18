@@ -119,7 +119,10 @@ export async function createCareerApplication(
 ): Promise<CareerApplication> {
   const database = options.database ?? await createDatabase(options.config.databaseUrl, {
     migrationDatabaseUrl: options.config.migrationDatabaseUrl,
-    requireTls: options.config.nodeEnv === "production"
+    requireTls: options.config.nodeEnv === "production",
+    ...(options.config.databaseCaCertificate === undefined
+      ? {}
+      : { tlsCaCertificate: options.config.databaseCaCertificate })
   });
   const now = options.now ?? (() => new Date());
   const ycProvider = persistedYcProvider(database, options.ycSource ?? createPublicYcSource(), now);
@@ -208,7 +211,10 @@ export async function startServer(
   const config = loadConfig(env);
   const database = await (dependencies.createDatabase ?? createDatabase)(config.databaseUrl, {
     migrationDatabaseUrl: config.migrationDatabaseUrl,
-    requireTls: config.nodeEnv === "production"
+    requireTls: config.nodeEnv === "production",
+    ...(config.databaseCaCertificate === undefined
+      ? {}
+      : { tlsCaCertificate: config.databaseCaCertificate })
   });
   let runtime: CareerApplication;
   try {

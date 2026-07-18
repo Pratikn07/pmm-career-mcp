@@ -25,7 +25,7 @@ The copied example connects both database variables to `postgresql://postgres:po
 
 The detailed, no-secret operator runbook is [docs/deployment/supabase-railway-chatgpt.md](docs/deployment/supabase-railway-chatgpt.md). It covers the private Supabase schema and Auth setup, the Railway service configuration, the required OAuth audience validation, failure diagnostics, and the ChatGPT Developer Mode connector.
 
-Production needs an HTTPS hostname, a TLS-enabled least-privilege Supabase PostgreSQL `DATABASE_URL`, a distinct owner-only `MIGRATION_DATABASE_URL`, and `AUTH_MODE=oauth`. The container is stateless:
+Production needs an HTTPS hostname, a TLS-enabled least-privilege Supabase PostgreSQL `DATABASE_URL`, a distinct owner-only `MIGRATION_DATABASE_URL`, the project CA PEM in `DATABASE_CA_CERT`, and `AUTH_MODE=oauth`. The CA enables full certificate and hostname verification for both migration and runtime pools. The container is stateless:
 
 ```bash
 docker build -t career-mcp:local .

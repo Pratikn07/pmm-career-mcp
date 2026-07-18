@@ -3,6 +3,7 @@ import { loadConfig } from "../src/config.js";
 
 const FAKE_PROJECT_REF = "abcdefghijklmnopqrst";
 const FAKE_PUBLISHABLE_KEY = `sb_publishable_${"a".repeat(22)}_${"b".repeat(8)}`;
+const FAKE_DATABASE_CA_CERT = "-----BEGIN CERTIFICATE-----\nZmFrZS1jYQ==\n-----END CERTIFICATE-----";
 
 function encodeJwtPart(value: Record<string, unknown> | string): string {
   return Buffer.from(typeof value === "string" ? value : JSON.stringify(value)).toString("base64url");
@@ -47,6 +48,7 @@ describe("loadConfig", () => {
     AUTH_MODE: "oauth" as const,
     DATABASE_URL: "postgresql://career_mcp_runtime:runtime-password@db.example:5432/postgres",
     MIGRATION_DATABASE_URL: "postgresql://migration_owner:owner-password@db.example:5432/postgres",
+    DATABASE_CA_CERT: FAKE_DATABASE_CA_CERT,
     BASE_URL: "https://career.example/",
     SUPABASE_URL: "https://project.supabase.co",
     SUPABASE_PUBLISHABLE_KEY: FAKE_PUBLISHABLE_KEY,
@@ -70,7 +72,7 @@ describe("loadConfig", () => {
   });
 
   it.each([
-    "DATABASE_URL", "MIGRATION_DATABASE_URL", "SUPABASE_URL", "SUPABASE_PUBLISHABLE_KEY", "OIDC_ISSUER", "OIDC_AUDIENCE", "ALLOWED_SUBJECT", "TOKEN_ENCRYPTION_KEY"
+    "DATABASE_URL", "MIGRATION_DATABASE_URL", "DATABASE_CA_CERT", "SUPABASE_URL", "SUPABASE_PUBLISHABLE_KEY", "OIDC_ISSUER", "OIDC_AUDIENCE", "ALLOWED_SUBJECT", "TOKEN_ENCRYPTION_KEY"
   ])("fails closed in production without %s", (missing) => {
     const values = { ...productionConfig } as Record<string, string>;
     delete values[missing];
@@ -106,6 +108,14 @@ describe("loadConfig", () => {
   it("rejects removed DATABASE_PATH configuration in production", () => {
     expect(() => loadConfig({ ...productionConfig, DATABASE_PATH: "./career.db" })).toThrow(/DATABASE_PATH/);
   });
+
+  it.each(["not-a-certificate", "-----BEGIN CERTIFICATE-----\n-----END CERTIFICATE-----"])(
+    "rejects a malformed production database CA certificate",
+    (databaseCaCertificate) => {
+      expect(() => loadConfig({ ...productionConfig, DATABASE_CA_CERT: databaseCaCertificate }))
+        .toThrow(/DATABASE_CA_CERT.*certificate/i);
+    }
+  );
 
   it("requires separate production migration and runtime database roles", () => {
     expect(() => loadConfig({
@@ -197,6 +207,7 @@ describe("loadConfig", () => {
 
     expect(config.databaseUrl).toBe(productionConfig.DATABASE_URL);
     expect(config.migrationDatabaseUrl).toBe(productionConfig.MIGRATION_DATABASE_URL);
+    expect(config.databaseCaCertificate).toBe(FAKE_DATABASE_CA_CERT);
   });
 
   it("defaults migration access to the runtime URL only outside production", () => {

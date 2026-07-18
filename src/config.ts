@@ -1,10 +1,12 @@
 import { z } from "zod";
+import { validateDatabaseCaCertificate } from "./db/tls.js";
 
 const environmentSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   PORT: z.coerce.number().int().positive().default(3000),
   DATABASE_URL: z.string().optional(),
   MIGRATION_DATABASE_URL: z.string().optional(),
+  DATABASE_CA_CERT: z.string().optional(),
   BASE_URL: z.string().url().default("http://127.0.0.1:3000"),
   SUPABASE_URL: z.string().url().optional(),
   SUPABASE_PUBLISHABLE_KEY: z.string().optional(),
@@ -23,6 +25,7 @@ export type AppConfig = {
   port: number;
   databaseUrl: string;
   migrationDatabaseUrl: string;
+  databaseCaCertificate?: string;
   baseUrl: string;
   supabaseUrl?: string;
   supabasePublishableKey?: string;
@@ -309,6 +312,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
       required(parsed.MIGRATION_DATABASE_URL, "MIGRATION_DATABASE_URL"),
       "MIGRATION_DATABASE_URL"
     );
+    validateDatabaseCaCertificate(required(parsed.DATABASE_CA_CERT, "DATABASE_CA_CERT"));
     const runtimeRole = requireExplicitDatabaseRole(runtimeDatabase, "DATABASE_URL", supabaseProjectRef);
     const migrationRole = requireExplicitDatabaseRole(migrationDatabase, "MIGRATION_DATABASE_URL", supabaseProjectRef);
     if (runtimeRole !== "career_mcp_runtime") {
@@ -356,6 +360,9 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
     port: parsed.PORT,
     databaseUrl,
     migrationDatabaseUrl: parsed.MIGRATION_DATABASE_URL ?? databaseUrl,
+    ...(parsed.DATABASE_CA_CERT === undefined
+      ? {}
+      : { databaseCaCertificate: validateDatabaseCaCertificate(parsed.DATABASE_CA_CERT) }),
     baseUrl,
     ...(supabaseUrl === undefined ? {} : { supabaseUrl }),
     ...(parsed.SUPABASE_PUBLISHABLE_KEY === undefined

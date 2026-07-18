@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { drizzle } from "drizzle-orm/postgres-js";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
 import postgres from "postgres";
+import { validateDatabaseCaCertificate } from "../src/db/tls.js";
 
 const REQUIRED_TABLES = [
   "settings", "companies", "people", "evidence", "targets", "target_notes",
@@ -39,8 +40,14 @@ export type PinnedSupabaseDatabaseTarget = { databaseUrl: string; tlsServerName:
 
 export type LiveSupabaseSmokeDependencies = {
   lookup?: DnsResolver;
-  createMigrationOperations?: (target: PinnedSupabaseDatabaseTarget) => Promise<SupabaseMigrationOperations>;
-  createRuntimeOperations?: (target: PinnedSupabaseDatabaseTarget) => Promise<SupabaseSmokeOperations>;
+  createMigrationOperations?: (
+    target: PinnedSupabaseDatabaseTarget,
+    tlsCaCertificate: string
+  ) => Promise<SupabaseMigrationOperations>;
+  createRuntimeOperations?: (
+    target: PinnedSupabaseDatabaseTarget,
+    tlsCaCertificate: string
+  ) => Promise<SupabaseSmokeOperations>;
 };
 
 function smokeFailure(): Error {
@@ -191,17 +198,22 @@ function findMigrationsFolder(): string {
   }
 }
 
-function securePostgres(target: PinnedSupabaseDatabaseTarget) {
+function securePostgres(target: PinnedSupabaseDatabaseTarget, tlsCaCertificate: string) {
   return postgres(target.databaseUrl, {
     max: 1,
-    ssl: { rejectUnauthorized: true, servername: target.tlsServerName }
+    ssl: {
+      ca: tlsCaCertificate,
+      rejectUnauthorized: true,
+      servername: target.tlsServerName
+    }
   });
 }
 
 async function createLiveMigrationOperations(
-  target: PinnedSupabaseDatabaseTarget
+  target: PinnedSupabaseDatabaseTarget,
+  tlsCaCertificate: string
 ): Promise<SupabaseMigrationOperations> {
-  const migrationClient = securePostgres(target);
+  const migrationClient = securePostgres(target, tlsCaCertificate);
   return {
     migrate: async () => {
       await migrate(drizzle(migrationClient), { migrationsFolder: findMigrationsFolder() });
@@ -213,16 +225,17 @@ async function createLiveMigrationOperations(
 }
 
 async function createLiveRuntimeOperations(
-  target: PinnedSupabaseDatabaseTarget
+  target: PinnedSupabaseDatabaseTarget,
+  tlsCaCertificate: string
 ): Promise<SupabaseSmokeOperations> {
-  const transactionClient = securePostgres(target);
+  const transactionClient = securePostgres(target, tlsCaCertificate);
   try {
     await transactionClient`select 1`;
   } catch {
     await transactionClient.end({ timeout: 5 }).catch(() => undefined);
     throw smokeFailure();
   }
-  const verificationClient = securePostgres(target);
+  const verificationClient = securePostgres(target, tlsCaCertificate);
   const markerYcId = (marker: string) => `mcp-supabase-smoke-${marker}`;
 
   return {
@@ -302,6 +315,11 @@ export async function runLiveSupabaseSmoke(
   if (migrationDatabaseUrl === undefined || migrationDatabaseUrl.length === 0) {
     throw new Error("MIGRATION_DATABASE_URL is required for the live Supabase smoke");
   }
+  const databaseCaCertificate = env.DATABASE_CA_CERT;
+  if (databaseCaCertificate === undefined || databaseCaCertificate.length === 0) {
+    throw new Error("DATABASE_CA_CERT is required for the live Supabase smoke");
+  }
+  const tlsCaCertificate = validateDatabaseCaCertificate(databaseCaCertificate);
 
   // Reject either target before DNS or client creation so an invalid runtime
   // URL cannot cause the migration owner to connect first.
@@ -314,12 +332,12 @@ export async function runLiveSupabaseSmoke(
 
   const migrationOperations = await (
     dependencies.createMigrationOperations ?? createLiveMigrationOperations
-  )(migrationTarget);
+  )(migrationTarget, tlsCaCertificate);
   await runSupabaseMigration(migrationOperations);
 
   const runtimeOperations = await (
     dependencies.createRuntimeOperations ?? createLiveRuntimeOperations
-  )(runtimeTarget);
+  )(runtimeTarget, tlsCaCertificate);
   await runSupabaseSmoke(runtimeOperations, randomUUID());
 }
 

@@ -49,6 +49,7 @@ import { createDatabase } from "../../src/db/client.js";
 
 const DATABASE_URL = "postgresql://app:secret@database.example/postgres";
 const MIGRATION_DATABASE_URL = "postgresql://migration:secret@database.example/postgres";
+const DATABASE_CA_CERT = "-----BEGIN CERTIFICATE-----\nZmFrZS1jYQ==\n-----END CERTIFICATE-----";
 const originalNodeEnv = process.env.NODE_ENV;
 
 afterEach(() => {
@@ -96,7 +97,8 @@ describe("production PostgreSQL client", () => {
 
     const database = await createDatabase(DATABASE_URL, {
       migrationDatabaseUrl: MIGRATION_DATABASE_URL,
-      requireTls: true
+      requireTls: true,
+      tlsCaCertificate: DATABASE_CA_CERT
     });
 
     expect(mocks.postgres).toHaveBeenNthCalledWith(1, MIGRATION_DATABASE_URL, {
@@ -108,7 +110,7 @@ describe("production PostgreSQL client", () => {
       },
       idle_timeout: 30,
       max: 1,
-      ssl: { rejectUnauthorized: true, servername: "database.example" }
+      ssl: { ca: DATABASE_CA_CERT, rejectUnauthorized: true, servername: "database.example" }
     });
     expect(mocks.postgres).toHaveBeenNthCalledWith(2, DATABASE_URL, {
       connect_timeout: 10,
@@ -119,11 +121,20 @@ describe("production PostgreSQL client", () => {
       },
       idle_timeout: 30,
       max: 5,
-      ssl: { rejectUnauthorized: true, servername: "database.example" }
+      ssl: { ca: DATABASE_CA_CERT, rejectUnauthorized: true, servername: "database.example" }
     });
     expect(mocks.migrationEnd).toHaveBeenCalledWith({ timeout: 5 });
     expect(mocks.runtimeEnd).not.toHaveBeenCalled();
     await database.close();
+  });
+
+  it("rejects verified TLS without a CA certificate before opening a pool", async () => {
+    await expect(createDatabase(DATABASE_URL, {
+      migrationDatabaseUrl: MIGRATION_DATABASE_URL,
+      requireTls: true
+    })).rejects.toThrow(/CA certificate/i);
+
+    expect(mocks.postgres).not.toHaveBeenCalled();
   });
 
   it("runs committed migrations under a transaction-scoped advisory lock", async () => {

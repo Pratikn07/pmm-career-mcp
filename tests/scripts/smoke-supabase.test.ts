@@ -35,6 +35,7 @@ function operations(overrides: Partial<SupabaseSmokeOperations> = {}): SupabaseS
 }
 
 const canonicalUrl = "postgresql://db.project-ref.supabase.co:5432/postgres";
+const databaseCaCertificate = "-----BEGIN CERTIFICATE-----\nZmFrZS1jYQ==\n-----END CERTIFICATE-----";
 
 describe("Supabase live target guard", () => {
   it.each([
@@ -115,6 +116,7 @@ describe("Supabase live target guard", () => {
 
     await expect(runLiveSupabaseSmoke({
       CONFIRM_LIVE_SUPABASE_SMOKE: "yes",
+      DATABASE_CA_CERT: databaseCaCertificate,
       DATABASE_URL: "postgresql://db.example.com:5432/postgres",
       MIGRATION_DATABASE_URL: canonicalUrl
     }, { lookup, createMigrationOperations, createRuntimeOperations })).rejects.toThrow(/live Supabase PostgreSQL/i);
@@ -125,12 +127,19 @@ describe("Supabase live target guard", () => {
   });
 
   it("passes a credential-bearing pooler URL privately to the pinned client factory", async () => {
-    const createMigrationOperations = vi.fn(async (_target: PinnedSupabaseDatabaseTarget) => migrationOperations());
-    const createRuntimeOperations = vi.fn(async (_target: PinnedSupabaseDatabaseTarget) => operations());
+    const createMigrationOperations = vi.fn(async (
+      _target: PinnedSupabaseDatabaseTarget,
+      _tlsCaCertificate: string
+    ) => migrationOperations());
+    const createRuntimeOperations = vi.fn(async (
+      _target: PinnedSupabaseDatabaseTarget,
+      _tlsCaCertificate: string
+    ) => operations());
     const databaseUrl = "postgresql://postgres.project-ref:fake-password@aws-0-us-east-1.pooler.supabase.com:5432/postgres";
 
     await runLiveSupabaseSmoke({
       CONFIRM_LIVE_SUPABASE_SMOKE: "yes",
+      DATABASE_CA_CERT: databaseCaCertificate,
       DATABASE_URL: databaseUrl,
       MIGRATION_DATABASE_URL: databaseUrl
     }, {
@@ -145,18 +154,26 @@ describe("Supabase live target guard", () => {
     expect(pinnedUrl.hostname).toBe("1.1.1.1");
     expect(pinnedUrl.username).toBe("postgres.project-ref");
     expect(pinnedUrl.password).toBe("fake-password");
+    expect(createRuntimeOperations.mock.calls[0]?.[1]).toBe(databaseCaCertificate);
   });
 
   it("uses the migration URL only for migrations and the runtime URL only for DML verification", async () => {
     const migration = migrationOperations();
     const runtime = operations();
-    const createMigrationOperations = vi.fn(async (_target: PinnedSupabaseDatabaseTarget) => migration);
-    const createRuntimeOperations = vi.fn(async (_target: PinnedSupabaseDatabaseTarget) => runtime);
+    const createMigrationOperations = vi.fn(async (
+      _target: PinnedSupabaseDatabaseTarget,
+      _tlsCaCertificate: string
+    ) => migration);
+    const createRuntimeOperations = vi.fn(async (
+      _target: PinnedSupabaseDatabaseTarget,
+      _tlsCaCertificate: string
+    ) => runtime);
     const migrationUrl = "postgresql://postgres.project-ref:owner-password@aws-0-us-east-1.pooler.supabase.com:5432/postgres";
     const runtimeUrl = "postgresql://career_mcp_runtime.project-ref:runtime-password@aws-0-us-east-1.pooler.supabase.com:5432/postgres";
 
     await runLiveSupabaseSmoke({
       CONFIRM_LIVE_SUPABASE_SMOKE: "yes",
+      DATABASE_CA_CERT: databaseCaCertificate,
       DATABASE_URL: runtimeUrl,
       MIGRATION_DATABASE_URL: migrationUrl
     }, {
@@ -167,11 +184,30 @@ describe("Supabase live target guard", () => {
 
     expect(new URL(createMigrationOperations.mock.calls[0]![0].databaseUrl).username).toBe("postgres.project-ref");
     expect(new URL(createRuntimeOperations.mock.calls[0]![0].databaseUrl).username).toBe("career_mcp_runtime.project-ref");
+    expect(createMigrationOperations.mock.calls[0]![1]).toBe(databaseCaCertificate);
+    expect(createRuntimeOperations.mock.calls[0]![1]).toBe(databaseCaCertificate);
     expect(migration.migrate).toHaveBeenCalledOnce();
     expect(migration.close).toHaveBeenCalledOnce();
     expect(runtime.runRollbackTransaction).toHaveBeenCalledOnce();
     expect(runtime.closeTransactionConnection).toHaveBeenCalledOnce();
     expect(runtime.closeVerificationConnection).toHaveBeenCalledOnce();
+  });
+
+  it("requires a CA certificate before DNS lookup or connection creation", async () => {
+    const lookup = vi.fn(async () => [{ address: "1.1.1.1", family: 4 }]);
+    const createMigrationOperations = vi.fn();
+    const createRuntimeOperations = vi.fn();
+
+    await expect(runLiveSupabaseSmoke({
+      CONFIRM_LIVE_SUPABASE_SMOKE: "yes",
+      DATABASE_URL: canonicalUrl,
+      MIGRATION_DATABASE_URL: canonicalUrl
+    }, { lookup, createMigrationOperations, createRuntimeOperations }))
+      .rejects.toThrow(/DATABASE_CA_CERT/);
+
+    expect(lookup).not.toHaveBeenCalled();
+    expect(createMigrationOperations).not.toHaveBeenCalled();
+    expect(createRuntimeOperations).not.toHaveBeenCalled();
   });
 });
 

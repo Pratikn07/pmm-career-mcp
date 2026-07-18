@@ -166,6 +166,7 @@ it("does not open an HTTP listener when the database readiness probe fails", asy
 
 it("passes production TLS intent from injected config instead of global process state", async () => {
   vi.stubEnv("NODE_ENV", "test");
+  const databaseCaCertificate = "-----BEGIN CERTIFICATE-----\nZmFrZS1jYQ==\n-----END CERTIFICATE-----";
   const createDatabase = vi.fn(async () => {
     throw new Error("stop after configuration capture");
   });
@@ -174,6 +175,7 @@ it("passes production TLS intent from injected config instead of global process 
     PORT: "46873",
     DATABASE_URL: "postgresql://career_mcp_runtime@database.example/postgres",
     MIGRATION_DATABASE_URL: "postgresql://migration_owner@database.example/postgres",
+    DATABASE_CA_CERT: databaseCaCertificate,
     BASE_URL: "https://career.example",
     AUTH_MODE: "oauth",
     SUPABASE_URL: "https://project.supabase.co",
@@ -194,7 +196,8 @@ it("passes production TLS intent from injected config instead of global process 
     "postgresql://career_mcp_runtime@database.example/postgres",
     {
       migrationDatabaseUrl: "postgresql://migration_owner@database.example/postgres",
-      requireTls: true
+      requireTls: true,
+      tlsCaCertificate: databaseCaCertificate
     }
   );
 });
