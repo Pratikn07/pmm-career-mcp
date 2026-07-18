@@ -24,6 +24,14 @@ function legacySupabaseKey(
   return `${encodeJwtPart(header)}.${encodeJwtPart(payload)}.${signature}`;
 }
 
+function localCliAnonKey(rawPayload = `{
+  "role": "anon",
+  "exp": 2035091493,
+  "iss": "supabase-demo"
+}`): string {
+  return legacySupabaseKey("anon", { rawPayload });
+}
+
 describe("loadConfig", () => {
   const productionConfig = {
     NODE_ENV: "production" as const,
@@ -136,6 +144,48 @@ describe("loadConfig", () => {
     const boundaryKey = `sb_publishable_${"x".repeat(31)}`;
     expect(loadConfig({ NODE_ENV: "test", SUPABASE_PUBLISHABLE_KEY: boundaryKey }).supabasePublishableKey)
       .toBe(boundaryKey);
+  });
+
+  it.each([
+    "http://127.0.0.1:54321",
+    "http://localhost:54321/",
+    "http://[::1]:54321"
+  ])("accepts the official formatted CLI local anon profile only with a loopback Supabase origin: %s", (supabaseUrl) => {
+    const key = localCliAnonKey();
+    expect(loadConfig({
+      NODE_ENV: "development",
+      SUPABASE_URL: supabaseUrl,
+      SUPABASE_PUBLISHABLE_KEY: key
+    }).supabasePublishableKey).toBe(key);
+  });
+
+  it.each([
+    { label: "remote URL", env: { NODE_ENV: "test", SUPABASE_URL: "https://project.supabase.co" } },
+    { label: "non-loopback IP", env: { NODE_ENV: "test", SUPABASE_URL: "http://127.0.0.2:54321" } },
+    { label: "production", env: productionConfig }
+  ])("rejects the CLI local anon profile with $label", ({ env }) => {
+    expect(() => loadConfig({ ...env, SUPABASE_PUBLISHABLE_KEY: localCliAnonKey() }))
+      .toThrow(/SUPABASE_PUBLISHABLE_KEY.*anon/);
+  });
+
+  it.each([
+    localCliAnonKey(`{"iss":"supabase-demo","role":"service_role","exp":2035091493}`),
+    localCliAnonKey(`{"iss":"supabase-demo","role":"anon","exp":1}`),
+    localCliAnonKey(`{"iss":"supabase-demo","role":"service_role","role":"anon","exp":2035091493}`),
+    localCliAnonKey(`{"iss":"supabase-demo","role":"service_role","r\\u006fle":"anon","exp":2035091493}`),
+    localCliAnonKey(`{"iss":"supabase-demo","role":"anon","exp":2035091493,"iat":1700000000}`),
+    localCliAnonKey(`{"iss":"supabase-demo","role":"anon","exp":2035091493,"ref":"${FAKE_PROJECT_REF}"}`)
+  ])("rejects a malformed or ambiguous CLI local anon profile", (key) => {
+    expect(() => loadConfig({
+      NODE_ENV: "test",
+      SUPABASE_URL: "http://127.0.0.1:54321",
+      SUPABASE_PUBLISHABLE_KEY: key
+    })).toThrow(/SUPABASE_PUBLISHABLE_KEY.*anon/);
+  });
+
+  it("retains strict hosted legacy anon compatibility in production", () => {
+    const key = legacySupabaseKey("anon");
+    expect(loadConfig({ ...productionConfig, SUPABASE_PUBLISHABLE_KEY: key }).supabasePublishableKey).toBe(key);
   });
 
   it.each(["development", "test", "production"] as const)("rejects Supabase secret keys in %s", (nodeEnv) => {

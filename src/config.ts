@@ -62,18 +62,87 @@ function required(value: string | undefined, name: string): string {
   return value;
 }
 
-function decodeCanonicalLegacyJwtPart(value: string): Record<string, unknown> | undefined {
+function skipJsonWhitespace(json: string, start: number): number {
+  let index = start;
+  while (index < json.length && /[\t\n\r ]/.test(json[index]!)) index += 1;
+  return index;
+}
+
+function readJsonString(json: string, start: number): { end: number; value: string } | undefined {
+  if (json[start] !== '"') return undefined;
+  for (let index = start + 1; index < json.length; index += 1) {
+    const character = json[index]!;
+    if (character === "\\") {
+      index += 1;
+      if (index >= json.length) return undefined;
+      continue;
+    }
+    if (character === '"') {
+      const token = json.slice(start, index + 1);
+      try {
+        const value: unknown = JSON.parse(token);
+        return typeof value === "string" ? { end: index + 1, value } : undefined;
+      } catch {
+        return undefined;
+      }
+    }
+    if (character.charCodeAt(0) <= 0x1f) return undefined;
+  }
+  return undefined;
+}
+
+/** Validates the flat JWT objects Supabase uses and rejects duplicate decoded member names. */
+function isUnambiguousFlatJsonObject(json: string): boolean {
+  let index = skipJsonWhitespace(json, 0);
+  if (json[index] !== "{") return false;
+  index = skipJsonWhitespace(json, index + 1);
+  if (json[index] === "}") return skipJsonWhitespace(json, index + 1) === json.length;
+
+  const names = new Set<string>();
+  while (index < json.length) {
+    const member = readJsonString(json, index);
+    if (member === undefined || names.has(member.value)) return false;
+    names.add(member.value);
+    index = skipJsonWhitespace(json, member.end);
+    if (json[index] !== ":") return false;
+    index = skipJsonWhitespace(json, index + 1);
+
+    if (json[index] === '"') {
+      const stringValue = readJsonString(json, index);
+      if (stringValue === undefined) return false;
+      index = stringValue.end;
+    } else {
+      const valueStart = index;
+      while (index < json.length && !/[\t\n\r ,}]/.test(json[index]!)) index += 1;
+      if (valueStart === index) return false;
+      try {
+        const value: unknown = JSON.parse(json.slice(valueStart, index));
+        if (typeof value === "object") return false;
+      } catch {
+        return false;
+      }
+    }
+
+    index = skipJsonWhitespace(json, index);
+    if (json[index] === ",") {
+      index = skipJsonWhitespace(json, index + 1);
+      continue;
+    }
+    if (json[index] === "}") return skipJsonWhitespace(json, index + 1) === json.length;
+    return false;
+  }
+  return false;
+}
+
+function decodeUnambiguousLegacyJwtPart(value: string): Record<string, unknown> | undefined {
   if (!/^[A-Za-z0-9_-]+$/.test(value)) return undefined;
   try {
     const bytes = Buffer.from(value, "base64url");
     if (bytes.toString("base64url") !== value) return undefined;
     const json = bytes.toString("utf8");
     if (!Buffer.from(json, "utf8").equals(bytes)) return undefined;
+    if (!isUnambiguousFlatJsonObject(json)) return undefined;
     const decoded: unknown = JSON.parse(json);
-    // Supabase generates compact JSON. Requiring a byte-for-byte canonical
-    // round trip also rejects duplicate member names that JSON.parse would
-    // otherwise silently resolve with last-member-wins semantics.
-    if (JSON.stringify(decoded) !== json) return undefined;
     return typeof decoded === "object" && decoded !== null && !Array.isArray(decoded)
       ? decoded as Record<string, unknown>
       : undefined;
@@ -91,8 +160,8 @@ function isCanonicalLegacySignature(value: string): boolean {
 function isLegacyAnonKey(value: string): boolean {
   const parts = value.split(".");
   if (parts.length !== 3 || !isCanonicalLegacySignature(parts[2]!)) return false;
-  const header = decodeCanonicalLegacyJwtPart(parts[0]!);
-  const payload = decodeCanonicalLegacyJwtPart(parts[1]!);
+  const header = decodeUnambiguousLegacyJwtPart(parts[0]!);
+  const payload = decodeUnambiguousLegacyJwtPart(parts[1]!);
   if (header?.alg !== "HS256" || header.typ !== "JWT" || payload === undefined) return false;
   return payload.iss === "supabase"
     && typeof payload.ref === "string"
@@ -106,11 +175,49 @@ function isLegacyAnonKey(value: string): boolean {
     && payload.exp > payload.iat;
 }
 
-function requireBrowserSafeSupabaseKey(value: string): void {
+function isLoopbackSupabaseOrigin(value: string | undefined): boolean {
+  if (value === undefined) return false;
+  try {
+    const url = new URL(canonicalSupabaseUrl(value, false));
+    return (url.protocol === "http:" || url.protocol === "https:")
+      && url.pathname === "/"
+      && (url.hostname === "127.0.0.1"
+        || url.hostname === "localhost"
+        || url.hostname === "[::1]"
+        || url.hostname === "::1");
+  } catch {
+    return false;
+  }
+}
+
+function isLocalCliAnonKey(value: string): boolean {
+  const parts = value.split(".");
+  if (parts.length !== 3 || !isCanonicalLegacySignature(parts[2]!)) return false;
+  const header = decodeUnambiguousLegacyJwtPart(parts[0]!);
+  const payload = decodeUnambiguousLegacyJwtPart(parts[1]!);
+  if (header?.alg !== "HS256" || header.typ !== "JWT" || payload === undefined) return false;
+  const keys = Object.keys(payload);
+  return keys.length === 3
+    && keys.every((key) => key === "iss" || key === "role" || key === "exp")
+    && payload.iss === "supabase-demo"
+    && payload.role === "anon"
+    && typeof payload.exp === "number"
+    && Number.isSafeInteger(payload.exp)
+    && payload.exp > Math.floor(Date.now() / 1_000)
+    && payload.exp <= 4_102_444_800;
+}
+
+function requireBrowserSafeSupabaseKey(
+  value: string,
+  context: { nodeEnv: "development" | "test" | "production"; supabaseUrl?: string }
+): void {
   // Supabase's current self-hosted generator emits a 31-character suffix:
   // 22 URL-safe random characters, an underscore, and an 8-character checksum.
   if (/^sb_publishable_[A-Za-z0-9_-]{31,}$/.test(value)) return;
   if (isLegacyAnonKey(value)) return;
+  if (context.nodeEnv !== "production"
+    && isLoopbackSupabaseOrigin(context.supabaseUrl)
+    && isLocalCliAnonKey(value)) return;
   throw new Error("SUPABASE_PUBLISHABLE_KEY must be an sb_publishable_ key or a legacy anon JWT");
 }
 
@@ -134,7 +241,10 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
   }
   const parsed = environmentSchema.parse(env);
   if (parsed.SUPABASE_PUBLISHABLE_KEY !== undefined) {
-    requireBrowserSafeSupabaseKey(parsed.SUPABASE_PUBLISHABLE_KEY);
+    requireBrowserSafeSupabaseKey(parsed.SUPABASE_PUBLISHABLE_KEY, {
+      nodeEnv: parsed.NODE_ENV,
+      ...(parsed.SUPABASE_URL === undefined ? {} : { supabaseUrl: parsed.SUPABASE_URL })
+    });
   }
 
   if (parsed.NODE_ENV === "production" && parsed.AUTH_MODE !== "oauth") {
