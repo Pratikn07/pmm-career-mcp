@@ -1,8 +1,8 @@
 import { createClient } from "@supabase/supabase-js";
+import { isSupabaseAuthorizationId } from "./authorization-id.js";
 
 const GENERIC_ERROR = "Unable to continue authorization.";
 const ALLOWED_SCOPES = new Set(["openid", "email"]);
-const AUTHORIZATION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 type AuthorizationDetails = {
   authorization_id: string;
@@ -99,7 +99,7 @@ export function createConsentController({
   }
 
   async function decide(action: "approve" | "deny"): Promise<void> {
-    if (!AUTHORIZATION_ID_PATTERN.test(authorizationId) || (action === "approve" && !approvalAllowed)) {
+    if (!isSupabaseAuthorizationId(authorizationId) || (action === "approve" && !approvalAllowed)) {
       ui.showError(GENERIC_ERROR);
       return;
     }
@@ -118,7 +118,7 @@ export function createConsentController({
   return {
     async start() {
       try {
-        if (!AUTHORIZATION_ID_PATTERN.test(authorizationId)) {
+        if (!isSupabaseAuthorizationId(authorizationId)) {
           ui.showError(GENERIC_ERROR);
           return;
         }
@@ -130,7 +130,7 @@ export function createConsentController({
     async signIn(email, password) {
       ui.setBusy(true);
       try {
-        if (!AUTHORIZATION_ID_PATTERN.test(authorizationId)) {
+        if (!isSupabaseAuthorizationId(authorizationId)) {
           ui.showError(GENERIC_ERROR);
           return;
         }

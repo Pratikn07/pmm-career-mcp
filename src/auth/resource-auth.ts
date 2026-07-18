@@ -15,7 +15,7 @@ export const SUPABASE_OAUTH_SCOPES = ["openid", "email"] as const;
 const oidcMetadataSchema = z.object({
   issuer: z.string().url(),
   jwks_uri: z.string().url()
-}).strict();
+});
 
 function canonicalBaseUrl(baseUrl: string): string {
   const url = new URL(baseUrl);
@@ -115,7 +115,13 @@ export function createResourceAuth(config: AppConfig): RequestHandler {
 
     try {
       const { payload } = await jwtVerify(token, await keyFor(), { issuer, audience, requiredClaims: ["exp"] });
-      if (payload.sub !== subject) {
+      const grantedScopes = typeof payload.scope === "string"
+        ? new Set(payload.scope.split(/\s+/).filter(Boolean))
+        : undefined;
+      if (payload.aud !== audience
+        || payload.sub !== subject
+        || grantedScopes === undefined
+        || !SUPABASE_OAUTH_SCOPES.every((scope) => grantedScopes.has(scope))) {
         response.setHeader("WWW-Authenticate", authenticationChallenge(config));
         response.status(401).json({ error: "Access to this MCP resource is denied" });
         return;

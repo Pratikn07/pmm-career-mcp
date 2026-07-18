@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { loadConfig } from "../../src/config.js";
 import { createHttpApp } from "../../src/http/app.js";
 
-const validAuthorizationId = "123e4567-e89b-42d3-a456-426614174000";
+const validAuthorizationId = "aB09".repeat(8);
 
 function oauthConfig() {
   return loadConfig({
@@ -39,7 +39,14 @@ describe("Supabase OAuth consent page", () => {
   it("returns a generic safe page for a missing or malformed authorization id", async () => {
     const app = createHttpApp({ config: oauthConfig(), mcpHandler: (_request, response) => response.sendStatus(204) });
 
-    for (const path of ["/oauth/consent", "/oauth/consent?authorization_id=not-an-id"]) {
+    for (const path of [
+      "/oauth/consent",
+      "/oauth/consent?authorization_id=not-an-id",
+      "/oauth/consent?authorization_id=123e4567-e89b-42d3-a456-426614174000",
+      `/oauth/consent?authorization_id=${"a".repeat(31)}`,
+      `/oauth/consent?authorization_id=${"a".repeat(33)}`,
+      `/oauth/consent?authorization_id=${"a".repeat(31)}%C3%A9`
+    ]) {
       const response = await request(app).get(path);
       expect(response.status).toBe(400);
       expect(response.text).toContain("Unable to continue authorization.");

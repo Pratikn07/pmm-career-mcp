@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { createConsentController, type ConsentAuthApi, type ConsentUi } from "../../src/oauth/consent-client.js";
 
-const authorizationId = "123e4567-e89b-42d3-a456-426614174000";
+const authorizationId = "aB09".repeat(8);
 
 function createAuth(overrides: Partial<ConsentAuthApi> = {}): ConsentAuthApi {
   return {
@@ -36,6 +36,21 @@ describe("consent browser controller", () => {
 
     await createConsentController({ authorizationId: "not-an-id", auth, ui }).start();
 
+    expect(auth.getAuthorizationDetails).not.toHaveBeenCalled();
+    expect(ui.showError).toHaveBeenCalledWith("Unable to continue authorization.");
+  });
+
+  it("rejects UUID-shaped ids because Supabase authorization ids are opaque 32-character values", async () => {
+    const auth = createAuth({ getUser: vi.fn().mockResolvedValue({ data: { user: { id: "user" } }, error: null }) });
+    const ui = createUi();
+
+    await createConsentController({
+      authorizationId: "123e4567-e89b-42d3-a456-426614174000",
+      auth,
+      ui
+    }).start();
+
+    expect(auth.getUser).not.toHaveBeenCalled();
     expect(auth.getAuthorizationDetails).not.toHaveBeenCalled();
     expect(ui.showError).toHaveBeenCalledWith("Unable to continue authorization.");
   });

@@ -11,11 +11,11 @@ type IssuerFixture = {
   config: AppConfig;
   server: Server;
   key: Awaited<ReturnType<typeof generateKeyPair>>["privateKey"];
-  token(overrides?: { audience?: string; subject?: string; expiresIn?: string }): Promise<string>;
+  token(overrides?: { audience?: string | string[]; subject?: string; expiresIn?: string; scope?: string | null }): Promise<string>;
   tokenWithoutExpiry(): Promise<string>;
 };
 
-async function startIssuer(): Promise<IssuerFixture> {
+async function startIssuer(discoveryExtras: Record<string, unknown> = {}): Promise<IssuerFixture> {
   const { privateKey, publicKey } = await generateKeyPair("RS256");
   const publicJwk = await exportJWK(publicKey);
   publicJwk.kid = "test-key";
@@ -29,7 +29,16 @@ async function startIssuer(): Promise<IssuerFixture> {
   if (address === null || typeof address === "string") throw new Error("No test issuer address");
   const issuer = `http://127.0.0.1:${address.port}`;
   issuerApp.get("/.well-known/openid-configuration", (_request, response) => {
-    response.json({ issuer, jwks_uri: `${issuer}/jwks` });
+    response.json({
+      issuer,
+      jwks_uri: `${issuer}/jwks`,
+      authorization_endpoint: `${issuer}/authorize`,
+      token_endpoint: `${issuer}/token`,
+      response_types_supported: ["code"],
+      subject_types_supported: ["public"],
+      id_token_signing_alg_values_supported: ["RS256"],
+      ...discoveryExtras
+    });
   });
   issuerApp.get("/jwks", (_request, response) => response.json({ keys: [publicJwk] }));
 
@@ -46,15 +55,17 @@ async function startIssuer(): Promise<IssuerFixture> {
     }),
     server,
     key: privateKey,
-    token: async (overrides = {}) => new SignJWT({})
-      .setProtectedHeader({ alg: "RS256", kid: "test-key" })
-      .setIssuer(issuer)
-      .setAudience(overrides.audience ?? "http://127.0.0.1:3000")
-      .setSubject(overrides.subject ?? "123e4567-e89b-12d3-a456-426614174000")
-      .setIssuedAt()
-      .setExpirationTime(overrides.expiresIn ?? "5m")
-      .sign(privateKey),
-    tokenWithoutExpiry: async () => new SignJWT({})
+    token: async (overrides = {}) => {
+      const token = new SignJWT(overrides.scope === null ? {} : { scope: overrides.scope ?? "openid email" })
+        .setProtectedHeader({ alg: "RS256", kid: "test-key" })
+        .setIssuer(issuer)
+        .setAudience(overrides.audience ?? "http://127.0.0.1:3000")
+        .setSubject(overrides.subject ?? "123e4567-e89b-12d3-a456-426614174000")
+        .setIssuedAt()
+        .setExpirationTime(overrides.expiresIn ?? "5m");
+      return token.sign(privateKey);
+    },
+    tokenWithoutExpiry: async () => new SignJWT({ scope: "openid email" })
       .setProtectedHeader({ alg: "RS256", kid: "test-key" })
       .setIssuer(issuer)
       .setAudience("http://127.0.0.1:3000")
@@ -103,6 +114,24 @@ describe("protected resource authentication", () => {
     expect(response.body).toEqual({ ok: true });
   });
 
+  it("accepts real-world OIDC discovery metadata with additional standard fields", async () => {
+    const metadataFixture = await startIssuer({
+      scopes_supported: ["openid", "email"],
+      claims_supported: ["iss", "aud", "sub", "exp"]
+    });
+    const app = express();
+    app.use(createResourceAuth(metadataFixture.config));
+    app.get("/protected", (_request, response) => response.json({ ok: true }));
+
+    try {
+      const response = await request(app).get("/protected").set("authorization", `Bearer ${await metadataFixture.token()}`);
+      expect(response.status).toBe(200);
+      expect(response.body).toEqual({ ok: true });
+    } finally {
+      await new Promise<void>((resolve, reject) => metadataFixture.server.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+
   it("returns generic responses for missing, invalid, expired, and unauthorized-subject tokens", async () => {
     const app = express();
     app.use(createResourceAuth(fixture.config));
@@ -111,9 +140,13 @@ describe("protected resource authentication", () => {
     const cases = [
       { label: "missing", token: undefined, status: 401 },
       { label: "wrong audience", token: await fixture.token({ audience: "other" }), status: 401 },
+      { label: "array audience", token: await fixture.token({ audience: ["http://127.0.0.1:3000"] }), status: 401 },
       { label: "expired", token: await fixture.token({ expiresIn: "-1s" }), status: 401 },
       { label: "missing expiry", token: await fixture.tokenWithoutExpiry(), status: 401 },
-      { label: "wrong subject", token: await fixture.token({ subject: "someone-else" }), status: 401 }
+      { label: "wrong subject", token: await fixture.token({ subject: "someone-else" }), status: 401 },
+      { label: "missing scope", token: await fixture.token({ scope: null }), status: 401 },
+      { label: "missing email scope", token: await fixture.token({ scope: "openid" }), status: 401 },
+      { label: "missing openid scope", token: await fixture.token({ scope: "email" }), status: 401 }
     ] as const;
 
     for (const candidate of cases) {

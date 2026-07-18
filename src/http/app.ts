@@ -6,7 +6,8 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { AppConfig } from "../config.js";
 import { createResourceAuth, protectedResourceMetadata } from "../auth/resource-auth.js";
-import { AUTHORIZATION_ID_PATTERN, applyConsentSecurityHeaders, hasConsentPageConfiguration, invalidConsentPage, renderConsentPage } from "../oauth/consent-page.js";
+import { applyConsentSecurityHeaders, hasConsentPageConfiguration, invalidConsentPage, renderConsentPage } from "../oauth/consent-page.js";
+import { isSupabaseAuthorizationId } from "../oauth/authorization-id.js";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 
@@ -116,7 +117,7 @@ export function createHttpApp(deps: HttpDependencies): Express {
   if (consentConfig !== undefined && hasConsentPageConfiguration(consentConfig)) {
     app.get("/oauth/consent", (request, response) => {
       const authorizationId = typeof request.query.authorization_id === "string" ? request.query.authorization_id : undefined;
-      if (authorizationId === undefined || !AUTHORIZATION_ID_PATTERN.test(authorizationId)) {
+      if (authorizationId === undefined || !isSupabaseAuthorizationId(authorizationId)) {
         applyConsentSecurityHeaders(response);
         response.status(400).type("html").send(invalidConsentPage());
         return;
