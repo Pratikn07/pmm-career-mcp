@@ -1,5 +1,5 @@
 import { randomUUID, timingSafeEqual } from "node:crypto";
-import { and, asc, desc, eq, isNull, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
 import {
   companies,
@@ -7,8 +7,11 @@ import {
   oauthTokens,
   outreachDrafts,
   people,
+  postDraftMedia,
   postDrafts,
+  postMedia,
   postPreviews,
+  publishAttemptMedia,
   publishAttempts,
   schema,
   settings,
@@ -31,9 +34,13 @@ export type OutreachDraft = Omit<OutreachDraftRow, "evidenceIdsJson"> & { eviden
 export type Shortlist = typeof shortlists.$inferSelect;
 export type ShortlistEntry = typeof shortlistEntries.$inferSelect;
 export type ShortlistWithEntries = Shortlist & { entries: ShortlistEntry[] };
+export type PostMedia = typeof postMedia.$inferSelect;
 export type PostDraft = typeof postDrafts.$inferSelect;
+export type PostDraftMedia = typeof postDraftMedia.$inferSelect;
+export type PostDraftMediaWithMetadata = PostDraftMedia & Omit<PostMedia, "id">;
 export type PostPreview = typeof postPreviews.$inferSelect;
 export type PublishAttempt = typeof publishAttempts.$inferSelect;
+export type PublishAttemptMedia = typeof publishAttemptMedia.$inferSelect;
 export type OAuthToken = typeof oauthTokens.$inferSelect;
 export type PersonWithEvidence = Person & { evidence: Evidence[] };
 
@@ -108,6 +115,22 @@ export type PostDraftVersionInput = {
   visibility: string;
   checksum: string | ((version: number) => string);
   state: string;
+};
+
+export type PostMediaCreateInput = Omit<typeof postMedia.$inferInsert, "createdAt"> & {
+  createdAt?: string;
+};
+
+export type PostDraftVersionWithMediaInput = PostDraftVersionInput & {
+  ownerSubject: string;
+  media: readonly { mediaId: string; altText: string }[];
+};
+
+export type PublishAttemptMediaUpdateInput = {
+  id: string;
+  expectedState?: string;
+  state: string;
+  linkedinImageUrn?: string | null;
 };
 
 export type PreviewExpectedRow = {
@@ -218,6 +241,7 @@ function assertIsoTimestamp(field: string, value: string): string {
 }
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 
 function isUuid(value: string): boolean {
   return UUID_PATTERN.test(value);
@@ -262,6 +286,37 @@ function timingSafeTextEqual(left: string, right: string): boolean {
 }
 
 export function createRepositories(database: Database) {
+  async function listPostDraftMediaForVersion(
+    queryDatabase: Database,
+    postDraftId: string,
+    version: number
+  ): Promise<PostDraftMediaWithMetadata[]> {
+    const rows = await queryDatabase.select({
+      postDraftId: postDraftMedia.postDraftId,
+      version: postDraftMedia.version,
+      position: postDraftMedia.position,
+      mediaId: postDraftMedia.mediaId,
+      altText: postDraftMedia.altText,
+      ownerSubject: postMedia.ownerSubject,
+      objectPath: postMedia.objectPath,
+      sha256: postMedia.sha256,
+      mimeType: postMedia.mimeType,
+      byteSize: postMedia.byteSize,
+      width: postMedia.width,
+      height: postMedia.height,
+      frameCount: postMedia.frameCount,
+      originalFilename: postMedia.originalFilename,
+      createdAt: postMedia.createdAt
+    }).from(postDraftMedia).innerJoin(
+      postMedia,
+      eq(postDraftMedia.mediaId, postMedia.id)
+    ).where(and(
+      eq(postDraftMedia.postDraftId, postDraftId),
+      eq(postDraftMedia.version, version)
+    )).orderBy(asc(postDraftMedia.position));
+    return normalizeRows(rows);
+  }
+
   async function consumePreviewExact(
     transaction: Database,
     input: PreviewConsumptionInput
@@ -865,6 +920,50 @@ export function createRepositories(database: Database) {
         return normalizeRows(rows);
       }
     },
+    postMedia: {
+      async create(input: PostMediaCreateInput): Promise<PostMedia> {
+        const { createdAt: requestedCreatedAt, ...values } = input;
+        const createdAt = requestedCreatedAt === undefined
+          ? nowIso()
+          : assertIsoTimestamp("postMedia.createdAt", requestedCreatedAt);
+        const [media] = await database.insert(postMedia).values({
+          ...values,
+          createdAt
+        }).returning();
+        return requiredRow(media, "post media");
+      },
+      async get(id: string): Promise<PostMedia | undefined> {
+        if (!isUuid(id)) {
+          return undefined;
+        }
+        const [media] = await database.select().from(postMedia).where(eq(postMedia.id, id));
+        return media === undefined ? undefined : normalizeRowTimestamps(media);
+      },
+      async getByOwnerAndSha(
+        ownerSubject: string,
+        sha256: string
+      ): Promise<PostMedia | undefined> {
+        if (!isUuid(ownerSubject) || !SHA256_PATTERN.test(sha256)) {
+          return undefined;
+        }
+        const [media] = await database.select().from(postMedia).where(and(
+          eq(postMedia.ownerSubject, ownerSubject),
+          eq(postMedia.sha256, sha256)
+        ));
+        return media === undefined ? undefined : normalizeRowTimestamps(media);
+      }
+    },
+    postDraftMedia: {
+      async listForVersion(
+        postDraftId: string,
+        version: number
+      ): Promise<PostDraftMediaWithMetadata[]> {
+        if (!isUuid(postDraftId) || !Number.isInteger(version)) {
+          return [];
+        }
+        return listPostDraftMediaForVersion(database, postDraftId, version);
+      }
+    },
     postDrafts: {
       async createVersion(input: PostDraftVersionInput): Promise<PostDraft> {
         const draftId = input.draftId ?? randomUUID();
@@ -888,6 +987,75 @@ export function createRepositories(database: Database) {
             updatedAt: now
           }).returning();
           return requiredRow(post, "post draft");
+        }, "post_draft_version_unique");
+      },
+      async createVersionWithMedia(
+        input: PostDraftVersionWithMediaInput
+      ): Promise<{ post: PostDraft; media: PostDraftMediaWithMetadata[] }> {
+        if (!isUuid(input.ownerSubject)) {
+          throw new Error("ownerSubject must be a valid UUID");
+        }
+        if (input.media.length > 4) {
+          throw new Error("A post draft version can contain at most four media items");
+        }
+        if (input.media.some(({ mediaId }) => !isUuid(mediaId))) {
+          throw new Error("Every mediaId must be a valid UUID");
+        }
+        const normalizedMediaIds = input.media.map(({ mediaId }) => mediaId.toLowerCase());
+        if (new Set(normalizedMediaIds).size !== normalizedMediaIds.length) {
+          throw new Error("A post draft version cannot contain duplicate media items");
+        }
+        const draftId = input.draftId ?? randomUUID();
+        const sortedMediaIds = [...normalizedMediaIds].sort();
+        return serializableTransaction(database, async (transaction) => {
+          const [latest] = await transaction.select().from(postDrafts).where(
+            eq(postDrafts.draftId, draftId)
+          ).orderBy(desc(postDrafts.version)).limit(1).for("update");
+          const lockedMedia = sortedMediaIds.length === 0
+            ? []
+            : await transaction.select({
+                id: postMedia.id,
+                ownerSubject: postMedia.ownerSubject
+              }).from(postMedia).where(
+                inArray(postMedia.id, sortedMediaIds)
+              ).orderBy(asc(postMedia.id)).for("update");
+          if (
+            lockedMedia.length !== sortedMediaIds.length
+            || lockedMedia.some(({ ownerSubject }) => (
+              ownerSubject.toLowerCase() !== input.ownerSubject.toLowerCase()
+            ))
+          ) {
+            throw new Error("Every media item must exist and be owned by the request subject");
+          }
+          const version = (latest?.version ?? 0) + 1;
+          const now = nowIso();
+          const [postRow] = await transaction.insert(postDrafts).values({
+            id: randomUUID(),
+            draftId,
+            text: input.text,
+            visibility: input.visibility,
+            version,
+            checksum: typeof input.checksum === "function"
+              ? input.checksum(version)
+              : input.checksum,
+            state: input.state,
+            createdAt: now,
+            updatedAt: now
+          }).returning();
+          const post = requiredRow(postRow, "post draft");
+          if (input.media.length > 0) {
+            await transaction.insert(postDraftMedia).values(input.media.map((media, position) => ({
+              postDraftId: post.id,
+              version: post.version,
+              position,
+              mediaId: media.mediaId,
+              altText: media.altText
+            })));
+          }
+          return {
+            post,
+            media: await listPostDraftMediaForVersion(transaction, post.id, post.version)
+          };
         }, "post_draft_version_unique");
       },
       async getVersion(draftId: string, version: number): Promise<PostDraft | undefined> {
@@ -1022,6 +1190,35 @@ export function createRepositories(database: Database) {
           )).returning();
           return preview === undefined ? undefined : normalizeRowTimestamps(preview);
         });
+      }
+    },
+    publishAttemptMedia: {
+      async listForAttempt(attemptId: string): Promise<PublishAttemptMedia[]> {
+        if (!isUuid(attemptId)) {
+          return [];
+        }
+        const rows = await database.select().from(publishAttemptMedia).where(
+          eq(publishAttemptMedia.publishAttemptId, attemptId)
+        ).orderBy(asc(publishAttemptMedia.position), asc(publishAttemptMedia.id));
+        return normalizeRows(rows);
+      },
+      async updateState(
+        input: PublishAttemptMediaUpdateInput
+      ): Promise<PublishAttemptMedia | undefined> {
+        if (!isUuid(input.id)) {
+          return undefined;
+        }
+        const conditions = [eq(publishAttemptMedia.id, input.id)];
+        if (input.expectedState !== undefined) {
+          conditions.push(eq(publishAttemptMedia.state, input.expectedState));
+        }
+        const [row] = await database.update(publishAttemptMedia).set({
+          state: input.state,
+          ...(input.linkedinImageUrn === undefined
+            ? {}
+            : { linkedinImageUrn: input.linkedinImageUrn })
+        }).where(and(...conditions)).returning();
+        return row === undefined ? undefined : normalizeRowTimestamps(row);
       }
     },
     publishAttempts: {

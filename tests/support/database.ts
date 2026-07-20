@@ -58,8 +58,11 @@ export async function createTestDatabase(): Promise<TestCareerDatabase> {
     resetForTests: async () => {
       await client.exec(`
         truncate table
+          career_mcp.publish_attempt_media,
           career_mcp.publish_attempts,
           career_mcp.post_previews,
+          career_mcp.post_draft_media,
+          career_mcp.post_media,
           career_mcp.post_drafts,
           career_mcp.shortlist_entries,
           career_mcp.shortlists,

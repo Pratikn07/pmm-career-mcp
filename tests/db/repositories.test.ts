@@ -55,6 +55,29 @@ async function addPost() {
   }));
 }
 
+async function addMedia(input: {
+  ownerSubject: string;
+  sha256?: string;
+  originalFilename?: string;
+}) {
+  const id = randomUUID();
+  const sha256 = input.sha256 ?? randomUUID().replaceAll("-", "").padEnd(64, "0");
+  return await db.postMedia.create({
+    id,
+    ownerSubject: input.ownerSubject,
+    objectPath: `${input.ownerSubject}/${sha256.slice(0, 2)}/${id}.png`,
+    sha256,
+    mimeType: "image/png",
+    byteSize: 1024,
+    width: 1200,
+    height: 627,
+    frameCount: 1,
+    ...(input.originalFilename === undefined
+      ? {}
+      : { originalFilename: input.originalFilename })
+  });
+}
+
 it("persists a target with evidence provenance", async () => {
   const company = (await db.companies.upsert({ ycId: "acme-w24", name: "Acme", batch: "W24" }));
   const person = (await db.people.upsert({ companyId: company.id, name: "Ada Example", role: "Founder" }));
@@ -69,7 +92,7 @@ it("persists a target with evidence provenance", async () => {
 });
 
 describe("database lifecycle", () => {
-  it("migrates exactly the thirteen application tables into the private schema", async () => {
+  it("migrates exactly the sixteen application tables into the private schema", async () => {
     const tables = await queryTestDatabase<{ table_name: string }>(db, `
       select table_name
       from information_schema.tables
@@ -84,8 +107,11 @@ describe("database lifecycle", () => {
       "oauth_tokens",
       "outreach_drafts",
       "people",
+      "post_draft_media",
       "post_drafts",
+      "post_media",
       "post_previews",
+      "publish_attempt_media",
       "publish_attempts",
       "settings",
       "shortlist_entries",
@@ -130,6 +156,8 @@ describe("database lifecycle", () => {
           or (table_name = 'evidence' and column_name = 'confidence')
           or (table_name = 'outreach_drafts' and column_name = 'version')
           or (table_name = 'post_drafts' and column_name = 'version')
+          or (table_name = 'post_media' and column_name in ('owner_subject', 'byte_size', 'created_at'))
+          or (table_name = 'publish_attempts' and column_name in ('phase', 'media_count'))
         )
       order by table_name, column_name
     `);
@@ -139,6 +167,11 @@ describe("database lifecycle", () => {
       { table_name: "evidence", column_name: "confidence", data_type: "double precision" },
       { table_name: "outreach_drafts", column_name: "version", data_type: "integer" },
       { table_name: "post_drafts", column_name: "version", data_type: "integer" },
+      { table_name: "post_media", column_name: "byte_size", data_type: "bigint" },
+      { table_name: "post_media", column_name: "created_at", data_type: "timestamp with time zone" },
+      { table_name: "post_media", column_name: "owner_subject", data_type: "uuid" },
+      { table_name: "publish_attempts", column_name: "media_count", data_type: "integer" },
+      { table_name: "publish_attempts", column_name: "phase", data_type: "text" },
       { table_name: "settings", column_name: "id", data_type: "uuid" },
       { table_name: "settings", column_name: "updated_at", data_type: "timestamp with time zone" },
       { table_name: "settings", column_name: "value_json", data_type: "jsonb" }
@@ -180,6 +213,7 @@ describe("database lifecycle", () => {
         and tc.constraint_name in (
           'post_draft_version_unique',
           'post_draft_row_version_unique',
+          'post_draft_media_exact_version_fk',
           'post_previews_exact_version_fk',
           'publish_attempts_exact_version_fk'
         )
@@ -188,6 +222,11 @@ describe("database lifecycle", () => {
     `);
 
     expect(constraints).toEqual([
+      {
+        constraint_name: "post_draft_media_exact_version_fk",
+        constraint_type: "FOREIGN KEY",
+        columns: "post_draft_id,version"
+      },
       {
         constraint_name: "post_draft_row_version_unique",
         constraint_type: "UNIQUE",
@@ -219,7 +258,8 @@ describe("database lifecycle", () => {
         and table_name in (
           'settings', 'companies', 'people', 'evidence', 'targets', 'target_notes',
           'outreach_drafts', 'shortlists', 'shortlist_entries', 'post_drafts',
-          'post_previews', 'publish_attempts', 'oauth_tokens'
+          'post_draft_media', 'post_media', 'post_previews', 'publish_attempt_media',
+          'publish_attempts', 'oauth_tokens'
         )
     `);
     expect(tables).toEqual([{ count: 0 }]);
@@ -255,8 +295,12 @@ describe("database lifecycle", () => {
     expect(await db.outreachDrafts.getVersion("not-a-uuid", "connection_note", 1)).toBeUndefined();
     expect(await db.shortlists.getWithEntries("not-a-uuid")).toBeUndefined();
     expect(await db.postDrafts.getVersion("not-a-uuid", 1)).toBeUndefined();
+    expect(await db.postMedia.get("not-a-uuid")).toBeUndefined();
+    expect(await db.postMedia.getByOwnerAndSha("not-a-uuid", "a".repeat(64))).toBeUndefined();
     expect(await db.people.listByCompany("not-a-uuid")).toEqual([]);
+    expect(await db.postDraftMedia.listForVersion("not-a-uuid", 1)).toEqual([]);
     expect(await db.previews.listForPostDraft("not-a-uuid")).toEqual([]);
+    expect(await db.publishAttemptMedia.listForAttempt("not-a-uuid")).toEqual([]);
     expect(await db.publishAttempts.listForPostDraft("not-a-uuid")).toEqual([]);
   });
 });
@@ -535,6 +579,96 @@ it("creates immutable post draft versions", async () => {
   expect((await db.postDrafts.listVersions(first.draftId)).map((draft) => draft.version)).toEqual([1, 2]);
 });
 
+it("deduplicates media SHA values within an owner while allowing the same bytes for another owner", async () => {
+  const owner = randomUUID();
+  const otherOwner = randomUUID();
+  const sha = "a".repeat(64);
+  const media = await addMedia({ ownerSubject: owner, sha256: sha, originalFilename: "hero.png" });
+  const otherMedia = await addMedia({ ownerSubject: otherOwner, sha256: sha });
+
+  expect(await db.postMedia.get(media.id)).toEqual(media);
+  expect(await db.postMedia.getByOwnerAndSha(owner, sha)).toMatchObject({
+    ownerSubject: owner,
+    sha256: sha
+  });
+  expect(await db.postMedia.getByOwnerAndSha(otherOwner, sha)).toMatchObject({
+    id: otherMedia.id,
+    ownerSubject: otherOwner
+  });
+  const duplicateError = await addMedia({ ownerSubject: owner, sha256: sha }).then(
+    () => undefined,
+    (error: unknown) => error
+  );
+  expect(postgresErrorKind(duplicateError)).toBe("unique");
+});
+
+it("preserves immutable four-image ordering across exact post versions", async () => {
+  const ownerSubject = randomUUID();
+  const storedMedia = await Promise.all(Array.from({ length: 4 }, async (_, index) => (
+    addMedia({
+      ownerSubject,
+      sha256: index.toString(16).padStart(64, "0")
+    })
+  )));
+  const first = await db.postDrafts.createVersionWithMedia({
+    ownerSubject,
+    text: "Four ordered images",
+    visibility: "PUBLIC",
+    checksum: "ordered-v1",
+    state: "ready_for_review",
+    media: storedMedia.map((media, index) => ({
+      mediaId: media.id,
+      altText: `Image ${index + 1}`
+    }))
+  });
+  const reversed = [...storedMedia].reverse();
+  const second = await db.postDrafts.createVersionWithMedia({
+    draftId: first.post.draftId,
+    ownerSubject,
+    text: "Four ordered images, reversed",
+    visibility: "PUBLIC",
+    checksum: "ordered-v2",
+    state: "ready_for_review",
+    media: reversed.map((media, index) => ({
+      mediaId: media.id,
+      altText: `Reversed image ${index + 1}`
+    }))
+  });
+
+  expect(first.media.map(({ position, mediaId }) => ({ position, mediaId }))).toEqual(
+    storedMedia.map((media, position) => ({ position, mediaId: media.id }))
+  );
+  expect(await db.postDraftMedia.listForVersion(second.post.id, 2)).toHaveLength(4);
+  expect((await db.postDraftMedia.listForVersion(second.post.id, 2)).map((row) => row.mediaId)).toEqual(
+    reversed.map((media) => media.id)
+  );
+  expect((await db.postDraftMedia.listForVersion(first.post.id, 1)).map((row) => row.mediaId)).toEqual(
+    storedMedia.map((media) => media.id)
+  );
+});
+
+it("rolls back media draft creation when any media belongs to another owner", async () => {
+  const ownerSubject = randomUUID();
+  const allowed = await addMedia({ ownerSubject });
+  const forbidden = await addMedia({ ownerSubject: randomUUID() });
+  const draftId = randomUUID();
+
+  await expect(db.postDrafts.createVersionWithMedia({
+    draftId,
+    ownerSubject,
+    text: "Owner mismatch",
+    visibility: "PUBLIC",
+    checksum: "owner-mismatch",
+    state: "draft",
+    media: [
+      { mediaId: allowed.id, altText: "Allowed" },
+      { mediaId: forbidden.id, altText: "Forbidden" }
+    ]
+  })).rejects.toThrow(/owned by the request subject/i);
+
+  expect(await db.postDrafts.listVersions(draftId)).toEqual([]);
+});
+
 it.each([0, 1])(
   "allocates concurrent post versions and checksums from a sequence containing %i rows",
   async (existingVersionCount) => {
@@ -668,6 +802,56 @@ it("records publish attempts against an exact post version", async () => {
   }));
 
   expect((await db.publishAttempts.listForPostDraft(post.id))).toEqual([completed]);
+});
+
+it("lists ordered publish-attempt media and conditionally advances durable upload state", async () => {
+  const ownerSubject = randomUUID();
+  const media = await Promise.all([
+    addMedia({ ownerSubject, sha256: "b".repeat(64) }),
+    addMedia({ ownerSubject, sha256: "c".repeat(64) })
+  ]);
+  const post = await db.postDrafts.createVersionWithMedia({
+    ownerSubject,
+    text: "Publish with images",
+    visibility: "PUBLIC",
+    checksum: "publish-images",
+    state: "uploading_media",
+    media: media.map((item, index) => ({ mediaId: item.id, altText: `Media ${index + 1}` }))
+  });
+  const attempt = await db.publishAttempts.record({
+    postDraftId: post.post.id,
+    version: post.post.version,
+    requestedAt: "2026-07-16T00:00:00.000Z",
+    responseCategory: "pending",
+    phase: "uploading_media",
+    mediaCount: 2
+  });
+  const attemptMediaIds = [randomUUID(), randomUUID()] as const;
+  await queryTestDatabase(db, `
+    insert into career_mcp.publish_attempt_media (
+      id, publish_attempt_id, media_id, position, state
+    ) values
+      ('${attemptMediaIds[1]}', '${attempt.id}', '${media[1].id}', 1, 'pending'),
+      ('${attemptMediaIds[0]}', '${attempt.id}', '${media[0].id}', 0, 'pending')
+  `);
+
+  expect((await db.publishAttemptMedia.listForAttempt(attempt.id)).map((row) => row.position)).toEqual([0, 1]);
+  const initialized = await db.publishAttemptMedia.updateState({
+    id: attemptMediaIds[0],
+    expectedState: "pending",
+    state: "initialized",
+    linkedinImageUrn: "urn:li:image:123"
+  });
+  expect(initialized).toMatchObject({
+    id: attemptMediaIds[0],
+    state: "initialized",
+    linkedinImageUrn: "urn:li:image:123"
+  });
+  expect(await db.publishAttemptMedia.updateState({
+    id: attemptMediaIds[0],
+    expectedState: "pending",
+    state: "uploaded"
+  })).toBeUndefined();
 });
 
 it("rolls back a publish claim whose attempt names a different exact post version", async () => {

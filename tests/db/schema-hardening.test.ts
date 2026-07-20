@@ -66,6 +66,18 @@ async function seedConstraintGraph() {
     checksum: "constraint-checksum",
     state: "draft"
   });
+  const mediaOwner = randomUUID();
+  const media = await db.postMedia.create({
+    id: randomUUID(),
+    ownerSubject: mediaOwner,
+    objectPath: `${mediaOwner}/aa/${randomUUID()}.png`,
+    sha256: randomUUID().replaceAll("-", "").padEnd(64, "0"),
+    mimeType: "image/png",
+    byteSize: 1024,
+    width: 1200,
+    height: 627,
+    frameCount: 1
+  });
   const preview = await db.previews.create({
     postDraftId: post.id,
     version: post.version,
@@ -87,6 +99,8 @@ async function seedConstraintGraph() {
     outreach,
     shortlistEntry,
     post,
+    media,
+    mediaOwner,
     preview,
     attempt
   };
@@ -137,7 +151,7 @@ describe("foreign-key indexing", () => {
     expect(missing).toEqual([]);
   });
 
-  it("uses only the exact-version composite foreign keys for preview and publish rows", async () => {
+  it("uses exact-version composite foreign keys for immutable draft, preview, and publish rows", async () => {
     const foreignKeys = await queryTestDatabase<{
       table_name: string;
       constraint_name: string;
@@ -156,6 +170,7 @@ describe("foreign-key indexing", () => {
       where constraint_row.contype = 'f'
         and constraint_row.connamespace = 'career_mcp'::regnamespace
         and constraint_row.conrelid in (
+          'career_mcp.post_draft_media'::regclass,
           'career_mcp.post_previews'::regclass,
           'career_mcp.publish_attempts'::regclass
         )
@@ -164,6 +179,16 @@ describe("foreign-key indexing", () => {
     `);
 
     expect(foreignKeys).toEqual([
+      {
+        table_name: "career_mcp.post_draft_media",
+        constraint_name: "post_draft_media_exact_version_fk",
+        columns: "post_draft_id,version"
+      },
+      {
+        table_name: "career_mcp.post_draft_media",
+        constraint_name: "post_draft_media_media_id_fk",
+        columns: "media_id"
+      },
       {
         table_name: "career_mcp.post_previews",
         constraint_name: "post_previews_exact_version_fk",
@@ -378,6 +403,71 @@ describe("database domain constraints", () => {
     `);
   });
 
+  it("rejects draft-media position four", async () => {
+    const { post, media } = await seedConstraintGraph();
+    const insertWithPositionFour = `
+      insert into career_mcp.post_draft_media (
+        post_draft_id, version, position, media_id, alt_text
+      ) values (
+        '${post.id}', ${post.version}, 4, '${media.id}', 'Out-of-range position'
+      )
+    `;
+    await expectCheckViolation(insertWithPositionFour);
+  });
+
+  it("rejects draft-media alt text longer than 120 characters", async () => {
+    const { post, media } = await seedConstraintGraph();
+    const insertWith121CharacterAltText = `
+      insert into career_mcp.post_draft_media (
+        post_draft_id, version, position, media_id, alt_text
+      ) values (
+        '${post.id}', ${post.version}, 0, '${media.id}', '${"a".repeat(121)}'
+      )
+    `;
+    await expectCheckViolation(insertWith121CharacterAltText);
+  });
+
+  it("rejects draft media that does not reference the exact immutable version", async () => {
+    const { post, media } = await seedConstraintGraph();
+    await expect(queryTestDatabase(db, `
+      insert into career_mcp.post_draft_media (
+        post_draft_id, version, position, media_id, alt_text
+      ) values (
+        '${post.id}', ${post.version + 1}, 0, '${media.id}', 'Wrong version'
+      )
+    `)).rejects.toMatchObject({ code: "23503" });
+  });
+
+  it.each([
+    ["sha256", `'${"A".repeat(64)}'`],
+    ["mime_type", "'image/webp'"],
+    ["byte_size", "0"],
+    ["width", "0"],
+    ["height", "0"],
+    ["frame_count", "251"]
+  ])("rejects invalid post-media %s values", async (column, value) => {
+    const owner = randomUUID();
+    const values = {
+      sha256: `'${"d".repeat(64)}'`,
+      mime_type: "'image/png'",
+      byte_size: "1024",
+      width: "1200",
+      height: "627",
+      frame_count: "1",
+      [column]: value
+    };
+    await expectCheckViolation(`
+      insert into career_mcp.post_media (
+        id, owner_subject, object_path, sha256, mime_type, byte_size,
+        width, height, frame_count, created_at
+      ) values (
+        '${randomUUID()}', '${owner}', '${owner}/invalid/${randomUUID()}.png',
+        ${values.sha256}, ${values.mime_type}, ${values.byte_size}, ${values.width},
+        ${values.height}, ${values.frame_count}, '2026-07-18T00:00:00.000Z'
+      )
+    `);
+  });
+
   it("rejects an unknown publish response category", async () => {
     const { post } = await seedConstraintGraph();
     await expectCheckViolation(`
@@ -389,6 +479,30 @@ describe("database domain constraints", () => {
         ${post.version},
         '2026-07-18T00:00:00.000Z',
         'unknown_category'
+      )
+    `);
+  });
+
+  it("rejects an unknown publish phase and media counts outside zero through four", async () => {
+    const { attempt } = await seedConstraintGraph();
+    await expectCheckViolation(`
+      update career_mcp.publish_attempts set phase = 'network_call' where id = '${attempt.id}'
+    `);
+    await expectCheckViolation(`
+      update career_mcp.publish_attempts set media_count = 5 where id = '${attempt.id}'
+    `);
+    await expectCheckViolation(`
+      update career_mcp.publish_attempts set media_count = -1 where id = '${attempt.id}'
+    `);
+  });
+
+  it("rejects an unknown per-media publish state", async () => {
+    const { attempt, media } = await seedConstraintGraph();
+    await expectCheckViolation(`
+      insert into career_mcp.publish_attempt_media (
+        id, publish_attempt_id, media_id, position, state
+      ) values (
+        '${randomUUID()}', '${attempt.id}', '${media.id}', 0, 'retrying'
       )
     `);
   });
@@ -439,8 +553,13 @@ describe("database domain constraints", () => {
     for (const state of [
       "draft",
       "ready_for_preview",
+      "ready_for_review",
+      "previewed",
+      "uploading_media",
       "publishing",
       "published",
+      "media_upload_failed",
+      "media_upload_unknown",
       "publish_failed",
       "publish_unknown"
     ]) {
@@ -453,12 +572,25 @@ describe("database domain constraints", () => {
       "pending",
       "published",
       "definite_rejection",
-      "ambiguous"
+      "ambiguous",
+      "media_definite_rejection",
+      "media_ambiguous"
     ]) {
       await queryTestDatabase(db, `
         update career_mcp.publish_attempts
         set response_category = '${responseCategory}'
         where id = '${attempt.id}'
+      `);
+    }
+
+    for (const phase of ["preflight", "uploading_media", "creating_post", "complete"]) {
+      await queryTestDatabase(db, `
+        update career_mcp.publish_attempts set phase = '${phase}' where id = '${attempt.id}'
+      `);
+    }
+    for (const mediaCount of [0, 4]) {
+      await queryTestDatabase(db, `
+        update career_mcp.publish_attempts set media_count = ${mediaCount} where id = '${attempt.id}'
       `);
     }
 
@@ -468,13 +600,17 @@ describe("database domain constraints", () => {
       state: string;
       visibility: string;
       response_category: string;
+      phase: string;
+      media_count: number;
     }>(db, `
       select
         target.status,
         target.confidence,
         post.state,
         post.visibility,
-        attempt.response_category
+        attempt.response_category,
+        attempt.phase,
+        attempt.media_count
       from career_mcp.targets target
       cross join career_mcp.post_drafts post
       cross join career_mcp.publish_attempts attempt
@@ -488,7 +624,9 @@ describe("database domain constraints", () => {
       confidence: 1,
       state: "publish_unknown",
       visibility: "CONNECTIONS",
-      response_category: "ambiguous"
+      response_category: "media_ambiguous",
+      phase: "complete",
+      media_count: 4
     });
   });
 });

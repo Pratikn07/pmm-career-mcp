@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
 import {
+  bigint,
   boolean,
   check,
   doublePrecision,
@@ -8,6 +9,7 @@ import {
   integer,
   jsonb,
   pgSchema,
+  primaryKey,
   text,
   timestamp,
   unique,
@@ -170,6 +172,34 @@ export const shortlistEntries = careerMcp.table("shortlist_entries", {
   check("shortlist_entries_position_check", sql`${table.position} >= 0`)
 ]);
 
+export const postMedia = careerMcp.table("post_media", {
+  id: uuid("id").primaryKey(),
+  ownerSubject: uuid("owner_subject").notNull(),
+  objectPath: text("object_path").notNull(),
+  sha256: text("sha256").notNull(),
+  mimeType: text("mime_type").notNull(),
+  byteSize: bigint("byte_size", { mode: "number" }).notNull(),
+  width: integer("width").notNull(),
+  height: integer("height").notNull(),
+  frameCount: integer("frame_count").notNull().default(1),
+  originalFilename: text("original_filename"),
+  createdAt: timestamptz("created_at").notNull()
+}, (table) => [
+  uniqueIndex("post_media_owner_sha_unique").on(table.ownerSubject, table.sha256),
+  uniqueIndex("post_media_object_path_unique").on(table.objectPath),
+  check("post_media_sha256_check", sql`${table.sha256} ~ '^[0-9a-f]{64}$'`),
+  check(
+    "post_media_mime_check",
+    sql`${table.mimeType} in ('image/jpeg','image/png','image/gif')`
+  ),
+  check("post_media_size_check", sql`${table.byteSize} between 1 and 20971520`),
+  check(
+    "post_media_dimensions_check",
+    sql`${table.width} > 0 and ${table.height} > 0 and (${table.width}::bigint * ${table.height}::bigint) < 36152320`
+  ),
+  check("post_media_frames_check", sql`${table.frameCount} between 1 and 250`)
+]);
+
 export const postDrafts = careerMcp.table("post_drafts", {
   id: uuid("id").primaryKey(),
   draftId: uuid("draft_id").notNull(),
@@ -193,11 +223,50 @@ export const postDrafts = careerMcp.table("post_drafts", {
     sql`${table.state} in (
       'draft',
       'ready_for_preview',
+      'ready_for_review',
+      'previewed',
+      'uploading_media',
       'publishing',
       'published',
+      'media_upload_failed',
+      'media_upload_unknown',
       'publish_failed',
       'publish_unknown'
     )`
+  )
+]);
+
+export const postDraftMedia = careerMcp.table("post_draft_media", {
+  postDraftId: uuid("post_draft_id").notNull(),
+  version: integer("version").notNull(),
+  position: integer("position").notNull(),
+  mediaId: uuid("media_id").notNull(),
+  altText: text("alt_text").notNull()
+}, (table) => [
+  primaryKey({
+    name: "post_draft_media_pkey",
+    columns: [table.postDraftId, table.version, table.position]
+  }),
+  unique("post_draft_media_version_media_unique").on(
+    table.postDraftId,
+    table.version,
+    table.mediaId
+  ),
+  foreignKey({
+    name: "post_draft_media_exact_version_fk",
+    columns: [table.postDraftId, table.version],
+    foreignColumns: [postDrafts.id, postDrafts.version]
+  }),
+  foreignKey({
+    name: "post_draft_media_media_id_fk",
+    columns: [table.mediaId],
+    foreignColumns: [postMedia.id]
+  }),
+  index("post_draft_media_media_id_idx").on(table.mediaId),
+  check("post_draft_media_position_check", sql`${table.position} between 0 and 3`),
+  check(
+    "post_draft_media_alt_text_check",
+    sql`char_length(${table.altText}) between 1 and 120`
   )
 ]);
 
@@ -222,6 +291,8 @@ export const publishAttempts = careerMcp.table("publish_attempts", {
   postDraftId: uuid("post_draft_id").notNull(),
   version: integer("version").notNull(),
   requestedAt: timestamptz("requested_at").notNull(),
+  phase: text("phase").notNull().default("preflight"),
+  mediaCount: integer("media_count").notNull().default(0),
   responseCategory: text("response_category").notNull(),
   postUrn: text("post_urn"),
   sanitizedError: text("sanitized_error"),
@@ -239,8 +310,48 @@ export const publishAttempts = careerMcp.table("publish_attempts", {
       'pending',
       'published',
       'definite_rejection',
-      'ambiguous'
+      'ambiguous',
+      'media_definite_rejection',
+      'media_ambiguous'
     )`
+  ),
+  check(
+    "publish_attempts_phase_check",
+    sql`${table.phase} in ('preflight','uploading_media','creating_post','complete')`
+  ),
+  check(
+    "publish_attempts_media_count_check",
+    sql`${table.mediaCount} between 0 and 4`
+  )
+]);
+
+export const publishAttemptMedia = careerMcp.table("publish_attempt_media", {
+  id: uuid("id").primaryKey(),
+  publishAttemptId: uuid("publish_attempt_id").notNull(),
+  mediaId: uuid("media_id").notNull(),
+  position: integer("position").notNull(),
+  state: text("state").notNull().default("pending"),
+  linkedinImageUrn: text("linkedin_image_urn")
+}, (table) => [
+  foreignKey({
+    name: "publish_attempt_media_publish_attempt_id_fk",
+    columns: [table.publishAttemptId],
+    foreignColumns: [publishAttempts.id]
+  }),
+  foreignKey({
+    name: "publish_attempt_media_media_id_fk",
+    columns: [table.mediaId],
+    foreignColumns: [postMedia.id]
+  }),
+  unique("publish_attempt_media_position_unique").on(
+    table.publishAttemptId,
+    table.position
+  ),
+  index("publish_attempt_media_publish_attempt_id_idx").on(table.publishAttemptId),
+  index("publish_attempt_media_media_id_idx").on(table.mediaId),
+  check(
+    "publish_attempt_media_state_check",
+    sql`${table.state} in ('pending','initialized','uploaded','definite_failure','unknown')`
   )
 ]);
 
@@ -264,8 +375,11 @@ export const schema = {
   outreachDrafts,
   shortlists,
   shortlistEntries,
+  postMedia,
   postDrafts,
+  postDraftMedia,
   postPreviews,
   publishAttempts,
+  publishAttemptMedia,
   oauthTokens
 };

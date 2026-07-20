@@ -10,6 +10,10 @@ async function initialMigrationSql(): Promise<string> {
   return await readFile(resolve("drizzle/0000_initial.sql"), "utf8");
 }
 
+async function mediaMigrationSql(): Promise<string> {
+  return await readFile(resolve("drizzle/0002_linkedin_media_review.sql"), "utf8");
+}
+
 describe("Supabase runtime-role operator template", () => {
   it("allows migrations after the runtime-role template bootstraps the private schema", async () => {
     const sql = await initialMigrationSql();
@@ -57,6 +61,18 @@ describe("Supabase runtime-role operator template", () => {
     expect(sql).toMatch(/alter\s+default\s+privileges\s+in\s+schema\s+career_mcp/i);
     expect(sql).not.toMatch(/grant[\s\S]{0,120}\b(?:public|anon|authenticated)\b/i);
     expect(sql).not.toMatch(/grant\s+(?:create|all)(?:\s+privileges)?\s+on\s+schema/i);
+  });
+
+  it("keeps normalized media private and does not mutate Supabase Storage from the Drizzle migration", async () => {
+    const sql = await mediaMigrationSql();
+
+    expect(sql).toMatch(/create\s+table\s+"career_mcp"\."post_media"/i);
+    expect(sql).toMatch(/create\s+table\s+"career_mcp"\."post_draft_media"/i);
+    expect(sql).toMatch(/create\s+table\s+"career_mcp"\."publish_attempt_media"/i);
+    expect(sql).not.toMatch(/storage\s*\.\s*(?:buckets|objects)/i);
+    expect(sql).not.toMatch(/\b(?:insert|update|delete)\b[\s\S]{0,80}\bstorage\b/i);
+    expect(sql).not.toMatch(/\bgrant\b[\s\S]{0,100}\b(?:anon|authenticated)\b/i);
+    expect(sql).not.toMatch(/enable\s+row\s+level\s+security/i);
   });
 
   it("fails closed when a reused runtime role belongs to any parent role", async () => {
