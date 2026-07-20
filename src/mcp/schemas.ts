@@ -219,6 +219,20 @@ const postStateSchema = z.enum([
   "publish_unknown"
 ]);
 
+const postDraftMediaSchema = z.object({
+  position: z.number().int().min(0).max(3),
+  mediaId: id,
+  altText: z.string().min(1).max(120),
+  sha256: checksum,
+  mimeType: z.enum(["image/jpeg", "image/png", "image/gif"]),
+  byteSize: z.number().int().min(1).max(20 * 1024 * 1024),
+  width: z.number().int().positive(),
+  height: z.number().int().positive(),
+  frameCount: z.number().int().min(1).max(250),
+  originalFilename: z.string().max(255).nullable(),
+  createdAt: timestamp
+}).strict();
+
 const postDraftSchema = z.object({
   id,
   versionId: id,
@@ -228,7 +242,8 @@ const postDraftSchema = z.object({
   checksum,
   state: postStateSchema,
   createdAt: timestamp,
-  updatedAt: timestamp
+  updatedAt: timestamp,
+  media: z.array(postDraftMediaSchema).max(4).default([])
 }).strict();
 
 const previewSchema = z.object({

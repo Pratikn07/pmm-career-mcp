@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { createTestDatabase } from "../support/database.js";
 import {
@@ -8,6 +8,7 @@ import {
   createDraftService
 } from "../../src/drafts/service.js";
 import { DomainError } from "../../src/domain/errors.js";
+import { checksumLinkedInPost } from "../../src/posts/post-checksum.js";
 
 const db = await createTestDatabase();
 const drafts = createDraftService(db);
@@ -243,6 +244,135 @@ describe("post drafts", () => {
     expect((await drafts.getPostVersion(first.id, 2))?.text).toBe("Second");
     expect((await drafts.getPostHistory(first.id)).map((post) => post.version)).toEqual([1, 2]);
     expect((await drafts.getPostVersion(first.id, 1))).toEqual(first);
+    expect(first.media).toEqual([]);
+    expect(second.media).toEqual([]);
+    expect(second.checksum).toBe(checksumLinkedInPost({
+      draftId: second.id,
+      version: second.version,
+      text: second.text,
+      visibility: second.visibility,
+      media: []
+    }));
+  });
+
+  it("copies ordered media into a new v2 version when revising post text", async () => {
+    const ownerSubject = randomUUID();
+    const first = await drafts.createPost({ text: "First with images", visibility: "PUBLIC" });
+    const stored = await Promise.all(["a", "b"].map(async (digit, index) => db.postMedia.create({
+      id: randomUUID(),
+      ownerSubject,
+      objectPath: `${ownerSubject}/${digit}${digit}/${randomUUID()}.png`,
+      sha256: digit.repeat(64),
+      mimeType: "image/png",
+      byteSize: 3,
+      width: 1,
+      height: 1,
+      frameCount: 1,
+      originalFilename: `image-${index + 1}.png`
+    })));
+    const mediaVersion = await db.postDrafts.createVersionWithMedia({
+      draftId: first.id,
+      expectedVersion: first.version,
+      ownerSubject,
+      text: first.text,
+      visibility: first.visibility,
+      checksum: (version, draftId, media) => checksumLinkedInPost({
+        draftId,
+        version,
+        text: first.text,
+        visibility: first.visibility,
+        media: media.map(({ position, sha256, mimeType, altText }) => ({
+          position,
+          sha256,
+          mimeType: mimeType as "image/png",
+          altText
+        }))
+      }),
+      state: "draft",
+      media: stored.map((item, index) => ({ mediaId: item.id, altText: `Image ${index + 1}` }))
+    });
+
+    const revised = await drafts.revisePost(first.id, "Revised with images");
+    expect(revised.version).toBe(3);
+    expect(revised.media.map(({ mediaId, position, altText }) => ({ mediaId, position, altText }))).toEqual([
+      { mediaId: stored[0]!.id, position: 0, altText: "Image 1" },
+      { mediaId: stored[1]!.id, position: 1, altText: "Image 2" }
+    ]);
+    expect(revised.checksum).toBe(checksumLinkedInPost({
+      draftId: revised.id,
+      version: revised.version,
+      text: revised.text,
+      visibility: revised.visibility,
+      media: revised.media
+    }));
+    expect((await db.postDraftMedia.listForVersion(
+      mediaVersion.post.id,
+      mediaVersion.post.version
+    )).map(({ mediaId }) => mediaId)).toEqual(stored.map(({ id }) => id));
+  });
+
+  it("rejects a text revision if media changes after its outside read", async () => {
+    const ownerSubject = randomUUID();
+    const first = await drafts.createPost({ text: "Concurrent base", visibility: "PUBLIC" });
+    const stored = await Promise.all(["c", "d"].map(async (digit) => db.postMedia.create({
+      id: randomUUID(),
+      ownerSubject,
+      objectPath: `${ownerSubject}/${digit}${digit}/${randomUUID()}.png`,
+      sha256: digit.repeat(64),
+      mimeType: "image/png",
+      byteSize: 3,
+      width: 1,
+      height: 1,
+      frameCount: 1
+    })));
+    const withMedia = await db.postDrafts.createVersionWithMedia({
+      draftId: first.id,
+      expectedVersion: first.version,
+      ownerSubject,
+      text: first.text,
+      visibility: first.visibility,
+      checksum: "media-v2",
+      state: "draft",
+      media: stored.map((item, index) => ({ mediaId: item.id, altText: `Image ${index + 1}` }))
+    });
+    let interleaved = false;
+    const racingDatabase = {
+      ...db,
+      postDraftMedia: {
+        ...db.postDraftMedia,
+        listForVersion: async (versionId: string, version: number) => {
+          const rows = await db.postDraftMedia.listForVersion(versionId, version);
+          if (!interleaved && versionId === withMedia.post.id && version === withMedia.post.version) {
+            interleaved = true;
+            await db.postDrafts.createVersionWithMedia({
+              draftId: first.id,
+              expectedVersion: withMedia.post.version,
+              ownerSubject,
+              text: first.text,
+              visibility: first.visibility,
+              checksum: "concurrent-media-v3",
+              state: "draft",
+              media: [...stored].reverse().map((item, index) => ({
+                mediaId: item.id,
+                altText: `Reordered ${index + 1}`
+              }))
+            });
+          }
+          return rows;
+        }
+      }
+    } as typeof db;
+    const racingDrafts = createDraftService(racingDatabase);
+
+    await expectDomainError(
+      () => racingDrafts.revisePost(first.id, "Must not restore stale media"),
+      "CONFLICT"
+    );
+    expect((await db.postDrafts.listVersions(first.id)).map(({ version }) => version)).toEqual([1, 2, 3]);
+    expect((await db.postDraftMedia.listForVersion(
+      (await db.postDrafts.getVersion(first.id, 3))!.id,
+      3
+    )).map(({ mediaId }) => mediaId)).toEqual([...stored].reverse().map(({ id }) => id));
   });
 
   it("allocates contiguous versions and checksums from each actual version", async () => {
@@ -258,7 +388,15 @@ describe("post drafts", () => {
     );
     expect(revisions.at(-1)?.version).toBe(21);
     for (const post of history) {
-      expect(post.checksum).toBe(computePostChecksum(post.text, post.version));
+      expect(post.checksum).toBe(post.version === 1
+        ? computePostChecksum(post.text, post.version)
+        : checksumLinkedInPost({
+            draftId: post.id,
+            version: post.version,
+            text: post.text,
+            visibility: post.visibility,
+            media: []
+          }));
     }
   });
 

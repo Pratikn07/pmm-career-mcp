@@ -154,7 +154,8 @@ function successfulDependencies(): CareerMcpDependencies {
     checksum: "a".repeat(64),
     state: "draft",
     createdAt: timestamp,
-    updatedAt: timestamp
+    updatedAt: timestamp,
+    media: []
   };
   return {
     ycProvider: {
@@ -519,6 +520,7 @@ it("waits for a database-backed service promise before returning a tool result",
     state: string;
     createdAt: string;
     updatedAt: string;
+    media: [];
   }>();
   const started = deferred<void>();
   const asyncDependencies = dependencies();
@@ -552,7 +554,8 @@ it("waits for a database-backed service promise before returning a tool result",
     checksum: "a".repeat(64),
     state: "draft",
     createdAt: FIXED_NOW.toISOString(),
-    updatedAt: FIXED_NOW.toISOString()
+    updatedAt: FIXED_NOW.toISOString(),
+    media: []
   });
   const result = await resultPromise;
   await Promise.all([client.close(), server.close()]);

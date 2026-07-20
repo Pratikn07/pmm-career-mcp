@@ -1,5 +1,5 @@
 import { randomUUID, timingSafeEqual } from "node:crypto";
-import { and, asc, desc, eq, inArray, isNull, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, notExists, sql } from "drizzle-orm";
 import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
 import {
   companies,
@@ -121,10 +121,28 @@ export type PostMediaCreateInput = Omit<typeof postMedia.$inferInsert, "createdA
   createdAt?: string;
 };
 
-export type PostDraftVersionWithMediaInput = PostDraftVersionInput & {
-  ownerSubject: string;
+export type PostDraftVersionWithMediaInput = Omit<PostDraftVersionInput, "checksum"> & {
+  ownerSubject?: string;
+  expectedVersion?: number;
   media: readonly { mediaId: string; altText: string }[];
+  checksum: string | ((
+    version: number,
+    draftId: string,
+    media: readonly {
+      position: number;
+      sha256: string;
+      mimeType: string;
+      altText: string;
+    }[]
+  ) => string);
 };
+
+export class PostDraftVersionConflictError extends Error {
+  constructor() {
+    super("Post draft version is stale");
+    this.name = "PostDraftVersionConflictError";
+  }
+}
 
 export type PublishAttemptMediaUpdateInput = {
   id: string;
@@ -951,6 +969,26 @@ export function createRepositories(database: Database) {
           eq(postMedia.sha256, sha256)
         ));
         return media === undefined ? undefined : normalizeRowTimestamps(media);
+      },
+      async deleteOwnedUnreferenced(
+        ownerSubject: string,
+        ids: readonly string[]
+      ): Promise<string[]> {
+        if (
+          !isUuid(ownerSubject)
+          || ids.length === 0
+          || ids.some((id) => !isUuid(id))
+        ) {
+          return [];
+        }
+        const rows = await database.delete(postMedia).where(and(
+          eq(postMedia.ownerSubject, ownerSubject),
+          inArray(postMedia.id, [...ids]),
+          notExists(database.select({ id: postDraftMedia.mediaId }).from(postDraftMedia).where(
+            eq(postDraftMedia.mediaId, postMedia.id)
+          ))
+        )).returning({ id: postMedia.id });
+        return rows.map(({ id }) => id);
       }
     },
     postDraftMedia: {
@@ -992,7 +1030,7 @@ export function createRepositories(database: Database) {
       async createVersionWithMedia(
         input: PostDraftVersionWithMediaInput
       ): Promise<{ post: PostDraft; media: PostDraftMediaWithMetadata[] }> {
-        if (!isUuid(input.ownerSubject)) {
+        if (input.media.length > 0 && (input.ownerSubject === undefined || !isUuid(input.ownerSubject))) {
           throw new Error("ownerSubject must be a valid UUID");
         }
         if (input.media.length > 4) {
@@ -1011,24 +1049,52 @@ export function createRepositories(database: Database) {
           const [latest] = await transaction.select().from(postDrafts).where(
             eq(postDrafts.draftId, draftId)
           ).orderBy(desc(postDrafts.version)).limit(1).for("update");
+          if (
+            input.expectedVersion !== undefined
+            && latest?.version !== input.expectedVersion
+          ) {
+            throw new PostDraftVersionConflictError();
+          }
           const lockedMedia = sortedMediaIds.length === 0
             ? []
             : await transaction.select({
                 id: postMedia.id,
-                ownerSubject: postMedia.ownerSubject
+                ownerSubject: postMedia.ownerSubject,
+                objectPath: postMedia.objectPath,
+                sha256: postMedia.sha256,
+                mimeType: postMedia.mimeType,
+                byteSize: postMedia.byteSize,
+                width: postMedia.width,
+                height: postMedia.height,
+                frameCount: postMedia.frameCount,
+                originalFilename: postMedia.originalFilename,
+                createdAt: postMedia.createdAt
               }).from(postMedia).where(
                 inArray(postMedia.id, sortedMediaIds)
               ).orderBy(asc(postMedia.id)).for("update");
           if (
             lockedMedia.length !== sortedMediaIds.length
             || lockedMedia.some(({ ownerSubject }) => (
-              ownerSubject.toLowerCase() !== input.ownerSubject.toLowerCase()
+              ownerSubject.toLowerCase() !== input.ownerSubject?.toLowerCase()
             ))
           ) {
             throw new Error("Every media item must exist and be owned by the request subject");
           }
           const version = (latest?.version ?? 0) + 1;
           const now = nowIso();
+          const lockedById = new Map(lockedMedia.map((media) => [media.id.toLowerCase(), media]));
+          const checksumMedia = input.media.map((item, position) => {
+            const media = lockedById.get(item.mediaId.toLowerCase());
+            if (media === undefined) {
+              throw new Error("Every media item must exist and be owned by the request subject");
+            }
+            return {
+              position,
+              sha256: media.sha256,
+              mimeType: media.mimeType,
+              altText: item.altText
+            };
+          });
           const [postRow] = await transaction.insert(postDrafts).values({
             id: randomUUID(),
             draftId,
@@ -1036,7 +1102,7 @@ export function createRepositories(database: Database) {
             visibility: input.visibility,
             version,
             checksum: typeof input.checksum === "function"
-              ? input.checksum(version)
+              ? input.checksum(version, draftId, checksumMedia)
               : input.checksum,
             state: input.state,
             createdAt: now,

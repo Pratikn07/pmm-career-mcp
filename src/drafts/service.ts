@@ -1,7 +1,16 @@
 import { createHash } from "node:crypto";
 import type { CareerDatabase } from "../db/client.js";
-import type { OutreachDraft, PostDraft } from "../db/repositories.js";
+import {
+  PostDraftVersionConflictError,
+  type OutreachDraft,
+  type PostDraft,
+  type PostDraftMediaWithMetadata
+} from "../db/repositories.js";
 import { DomainError, postgresErrorKind } from "../domain/errors.js";
+import {
+  checksumLinkedInPost,
+  type LinkedInPostChecksumMedia
+} from "../posts/post-checksum.js";
 
 export const POST_CHECKSUM_CONTRACT = "pmm-career-mcp.post-draft.sha256.v1";
 const POST_VISIBILITY_VALUES = ["PUBLIC", "CONNECTIONS"] as const;
@@ -37,7 +46,22 @@ export type PostDraftVersion = Omit<PostDraft, "id" | "draftId" | "visibility"> 
   id: string;
   versionId: string;
   visibility: PostVisibility;
+  media: readonly PostDraftMediaVersion[];
 };
+
+export type PostDraftMediaVersion = Readonly<{
+  position: number;
+  mediaId: string;
+  altText: string;
+  sha256: string;
+  mimeType: "image/jpeg" | "image/png" | "image/gif";
+  byteSize: number;
+  width: number;
+  height: number;
+  frameCount: number;
+  originalFilename: string | null;
+  createdAt: string;
+}>;
 
 function validationError(field: string, reason: string, maximum?: number): DomainError {
   return new DomainError("VALIDATION_ERROR", "Draft input is invalid", {
@@ -73,14 +97,37 @@ function isPostVisibility(value: unknown): value is PostVisibility {
   return typeof value === "string" && POST_VISIBILITY_SET.has(value);
 }
 
-function publicPostDraft(row: PostDraft): PostDraftVersion {
+function isDraftMediaMimeType(value: string): value is PostDraftMediaVersion["mimeType"] {
+  return value === "image/jpeg" || value === "image/png" || value === "image/gif";
+}
+
+function publicPostMedia(row: PostDraftMediaWithMetadata): PostDraftMediaVersion {
+  if (!isDraftMediaMimeType(row.mimeType)) {
+    throw new DomainError("DATA_INTEGRITY", "Stored draft media type is invalid", {
+      entity: "post_media"
+    });
+  }
+  const {
+    postDraftId: _postDraftId,
+    version: _version,
+    ownerSubject: _ownerSubject,
+    objectPath: _objectPath,
+    ...media
+  } = row;
+  return { ...media, mimeType: row.mimeType };
+}
+
+function publicPostDraft(
+  row: PostDraft,
+  media: readonly PostDraftMediaWithMetadata[] = []
+): PostDraftVersion {
   if (!isPostVisibility(row.visibility)) {
     throw new DomainError("DATA_INTEGRITY", "Stored post visibility is invalid", {
       entity: "post_draft"
     });
   }
   const { id: versionId, draftId: id, visibility, ...version } = row;
-  return { ...version, id, versionId, visibility };
+  return { ...version, id, versionId, visibility, media: media.map(publicPostMedia) };
 }
 
 function mapDraftPersistenceError(error: unknown, entity: "outreach_draft" | "post_draft"): never {
@@ -217,16 +264,33 @@ export function createDraftService(database: CareerDatabase) {
           entity: "post_draft"
         });
       }
+      const visibility = latest.visibility;
+      const latestMedia = await database.postDraftMedia.listForVersion(latest.id, latest.version);
 
       try {
-        return publicPostDraft(await database.postDrafts.createVersion({
+        const revised = await database.postDrafts.createVersionWithMedia({
           draftId,
+          expectedVersion: latest.version,
+          ...(latestMedia.length === 0 ? {} : { ownerSubject: latestMedia[0]!.ownerSubject }),
           text,
-          visibility: latest.visibility,
-          checksum: (version) => computePostChecksum(text, version),
-          state: "draft"
-        }));
+          visibility,
+          checksum: (version, actualDraftId, media) => checksumLinkedInPost({
+            draftId: actualDraftId,
+            version,
+            text,
+            visibility,
+            media: media as readonly LinkedInPostChecksumMedia[]
+          }),
+          state: "draft",
+          media: latestMedia.map(({ mediaId, altText }) => ({ mediaId, altText }))
+        });
+        return publicPostDraft(revised.post, revised.media);
       } catch (error) {
+        if (error instanceof PostDraftVersionConflictError) {
+          throw new DomainError("CONFLICT", "Post draft version is stale", {
+            entity: "post_draft"
+          });
+        }
         if (error instanceof DomainError) {
           throw error;
         }
@@ -243,12 +307,18 @@ export function createDraftService(database: CareerDatabase) {
         throw validationError("post.version", "must_be_positive_integer");
       }
       const row = await database.postDrafts.getVersion(draftId, version);
-      return row === undefined ? undefined : publicPostDraft(row);
+      if (row === undefined) return undefined;
+      const media = await database.postDraftMedia.listForVersion(row.id, row.version);
+      return publicPostDraft(row, media);
     },
 
     async getPostHistory(draftIdInput: string): Promise<PostDraftVersion[]> {
       const draftId = normalizedId("post.id", draftIdInput);
-      return (await database.postDrafts.listVersions(draftId)).map(publicPostDraft);
+      const rows = await database.postDrafts.listVersions(draftId);
+      return await Promise.all(rows.map(async (row) => publicPostDraft(
+        row,
+        await database.postDraftMedia.listForVersion(row.id, row.version)
+      )));
     }
   };
 }
