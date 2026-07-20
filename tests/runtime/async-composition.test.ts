@@ -41,6 +41,8 @@ function testConfig() {
     authMode: "none" as const,
     oidcDiscoveryTimeoutMs: 5_000,
     linkedinPublishEnabled: false,
+    linkedinImagePublishEnabled: false,
+    linkedinMediaBucket: "linkedin-draft-media" as const,
     linkedinVersion: "202606"
   };
 }

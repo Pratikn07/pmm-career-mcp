@@ -2,6 +2,14 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { expect, it } from "vitest";
 
+it("declares sharp as a pinned runtime dependency", async () => {
+  const packageJson = JSON.parse(await readFile(resolve(process.cwd(), "package.json"), "utf8")) as {
+    dependencies?: Record<string, string>;
+  };
+
+  expect(packageJson.dependencies?.sharp).toBe("0.35.3");
+});
+
 it("copies the consent build script before building the Docker image", async () => {
   const dockerfile = await readFile(resolve(process.cwd(), "Dockerfile"), "utf8");
   const scriptsCopy = dockerfile.indexOf("COPY scripts ./scripts");

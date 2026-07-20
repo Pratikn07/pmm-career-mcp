@@ -16,6 +16,8 @@ const environmentSchema = z.object({
   OIDC_AUDIENCE: z.string().min(1).optional(),
   ALLOWED_SUBJECT: z.string().optional(),
   LINKEDIN_PUBLISH_ENABLED: z.enum(["true", "false"]).default("false"),
+  LINKEDIN_IMAGE_PUBLISH_ENABLED: z.enum(["true", "false"]).default("false"),
+  LINKEDIN_MEDIA_BUCKET: z.literal("linkedin-draft-media").default("linkedin-draft-media"),
   LINKEDIN_VERSION: z.string().default("202606"),
   TOKEN_ENCRYPTION_KEY: z.string().optional()
 });
@@ -35,6 +37,8 @@ export type AppConfig = {
   oidcAudience?: string;
   allowedSubject?: string;
   linkedinPublishEnabled: boolean;
+  linkedinImagePublishEnabled: boolean;
+  linkedinMediaBucket: "linkedin-draft-media";
   linkedinVersion: string;
   tokenEncryptionKey?: string;
 };
@@ -374,6 +378,8 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
     ...(parsed.OIDC_AUDIENCE === undefined ? {} : { oidcAudience: parsed.OIDC_AUDIENCE }),
     ...(parsed.ALLOWED_SUBJECT === undefined ? {} : { allowedSubject: parsed.ALLOWED_SUBJECT }),
     linkedinPublishEnabled: parsed.LINKEDIN_PUBLISH_ENABLED === "true",
+    linkedinImagePublishEnabled: parsed.LINKEDIN_IMAGE_PUBLISH_ENABLED === "true",
+    linkedinMediaBucket: parsed.LINKEDIN_MEDIA_BUCKET,
     linkedinVersion: parsed.LINKEDIN_VERSION,
     ...(parsed.TOKEN_ENCRYPTION_KEY === undefined
       ? {}

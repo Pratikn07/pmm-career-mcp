@@ -89,6 +89,8 @@ async function startStack(publishEnabled: boolean): Promise<TestStack> {
       authMode: "none",
       oidcDiscoveryTimeoutMs: 5_000,
       linkedinPublishEnabled: publishEnabled,
+      linkedinImagePublishEnabled: false,
+      linkedinMediaBucket: "linkedin-draft-media",
       linkedinVersion: "202606",
       tokenEncryptionKey: "a".repeat(64)
     },

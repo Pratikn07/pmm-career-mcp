@@ -58,9 +58,18 @@ describe("loadConfig", () => {
     TOKEN_ENCRYPTION_KEY: "a".repeat(64)
   };
 
-  it("keeps publishing disabled by default", () => {
+  it("keeps LinkedIn publishing disabled and uses the private draft bucket by default", () => {
     const config = loadConfig({ NODE_ENV: "test" });
     expect(config.linkedinPublishEnabled).toBe(false);
+    expect(config.linkedinImagePublishEnabled).toBe(false);
+    expect(config.linkedinMediaBucket).toBe("linkedin-draft-media");
+  });
+
+  it("rejects invalid LinkedIn image publishing values", () => {
+    expect(() => loadConfig({
+      NODE_ENV: "test",
+      LINKEDIN_IMAGE_PUBLISH_ENABLED: "yes"
+    })).toThrow();
   });
 
   it("rejects no-auth production", () => {
