@@ -7,9 +7,11 @@ function app() {
 }
 
 it("returns a sanitized MCP error and propagates a safe request ID for malformed JSON", async () => {
+  const token = "raw-bearer-token-that-must-not-enter-the-response";
   const response = await request(app())
     .post("/mcp")
     .set("content-type", "application/json")
+    .set("authorization", `Bearer ${token}`)
     .set("X-Request-Id", "mcp_test_request_7")
     .send('{"incomplete":');
 
@@ -17,6 +19,7 @@ it("returns a sanitized MCP error and propagates a safe request ID for malformed
   expect(response.headers["x-request-id"]).toBe("mcp_test_request_7");
   expect(response.body).toEqual({ error: "MCP request could not be completed" });
   expect(response.text).not.toMatch(/syntax|unexpected|\/Users\//i);
+  expect(response.text).not.toContain(token);
 });
 
 it("bounds oversized MCP JSON bodies and still includes a generated request ID", async () => {

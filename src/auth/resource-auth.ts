@@ -2,6 +2,7 @@ import { createRemoteJWKSet, customFetch, jwtVerify, type FetchImplementation, t
 import type { RequestHandler } from "express";
 import { z } from "zod";
 import type { AppConfig } from "../config.js";
+import { REQUEST_AUTH_CONTEXT, type AuthenticatedLocals } from "./request-context.js";
 import { hasExactSupabaseOAuthScopes, SUPABASE_OAUTH_SCOPES } from "./scopes.js";
 
 export { SUPABASE_OAUTH_SCOPES } from "./scopes.js";
@@ -138,6 +139,11 @@ export function createResourceAuth(config: AppConfig): RequestHandler {
         response.status(401).json({ error: "Access to this MCP resource is denied" });
         return;
       }
+      const locals: AuthenticatedLocals = response.locals;
+      locals[REQUEST_AUTH_CONTEXT] = Object.freeze({
+        subject: payload.sub,
+        accessToken: token
+      });
       next();
     } catch {
       response.setHeader("WWW-Authenticate", authenticationChallenge(config));

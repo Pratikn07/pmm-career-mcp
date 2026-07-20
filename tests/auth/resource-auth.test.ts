@@ -125,6 +125,51 @@ describe("protected resource authentication", () => {
     expect(response.body).toEqual({ ok: true });
   });
 
+  it("stores the validated subject and bearer token in an immutable response-local context", async () => {
+    const app = express();
+    let capturedLocals: object | undefined;
+    app.use((_request, response, next) => {
+      response.once("finish", () => { capturedLocals = response.locals; });
+      next();
+    });
+    app.use(createResourceAuth(fixture.config));
+    app.get("/protected", (_request, response) => response.json({ ok: true }));
+    const token = await fixture.token();
+
+    const response = await request(app).get("/protected").set("authorization", `Bearer ${token}`);
+
+    const locals = capturedLocals ?? {};
+    const symbols = Object.getOwnPropertySymbols(locals);
+    expect(response.status).toBe(200);
+    expect(symbols).toHaveLength(1);
+    expect(symbols[0]?.description).toBe("pmm-career-mcp.request-auth-context");
+    const captured = (locals as Record<PropertyKey, unknown>)[symbols[0]!];
+    expect(captured).toEqual({
+      subject: "123e4567-e89b-12d3-a456-426614174000",
+      accessToken: token
+    });
+    expect(Object.isFrozen(captured)).toBe(true);
+    expect(response.text).not.toContain(token);
+  });
+
+  it("does not store request auth context when token validation fails", async () => {
+    const app = express();
+    let capturedLocals: object | undefined;
+    app.use((_request, response, next) => {
+      response.once("finish", () => { capturedLocals = response.locals; });
+      next();
+    });
+    app.use(createResourceAuth(fixture.config));
+    app.get("/protected", (_request, response) => response.json({ ok: true }));
+    const token = await fixture.token({ subject: "someone-else" });
+
+    const response = await request(app).get("/protected").set("authorization", `Bearer ${token}`);
+
+    expect(response.status).toBe(401);
+    expect(Object.getOwnPropertySymbols(capturedLocals ?? {})).toHaveLength(0);
+    expect(response.text).not.toContain(token);
+  });
+
   it("accepts real-world OIDC discovery metadata with additional standard fields", async () => {
     const metadataFixture = await startIssuer({
       scopes_supported: ["openid", "email"],

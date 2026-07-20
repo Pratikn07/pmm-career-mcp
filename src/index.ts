@@ -156,7 +156,7 @@ export async function createCareerApplication(
   const app = createHttpApp({
     config: options.config,
     checkReady: () => database.checkReady(),
-    mcpServerFactory: () => createCareerMcpServer({
+    mcpServerFactory: (_context) => createCareerMcpServer({
       ycProvider,
       peopleDiscovery,
       jobDiscovery,

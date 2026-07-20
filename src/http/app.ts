@@ -6,6 +6,11 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { AppConfig } from "../config.js";
 import { createResourceAuth, protectedResourceMetadata } from "../auth/resource-auth.js";
+import {
+  REQUEST_AUTH_CONTEXT,
+  type AuthenticatedLocals,
+  type RequestAuthContext
+} from "../auth/request-context.js";
 import { applyConsentSecurityHeaders, hasConsentPageConfiguration, invalidConsentPage, renderConsentPage } from "../oauth/consent-page.js";
 import { isSupabaseAuthorizationId } from "../oauth/authorization-id.js";
 import { existsSync } from "node:fs";
@@ -24,7 +29,7 @@ type LegacyHttpDependencies = CommonHttpDependencies & {
 
 type StreamableMcpDependencies = CommonHttpDependencies & {
   /** A fresh server prevents one stateless request leaking state into another. */
-  mcpServerFactory: () => McpServer;
+  mcpServerFactory: (context: RequestAuthContext | undefined) => McpServer;
 };
 
 export type HttpDependencies = LegacyHttpDependencies | StreamableMcpDependencies;
@@ -63,12 +68,15 @@ const mcpJsonBodyError: ErrorRequestHandler = (error, request, response, next) =
   }
 };
 
-function streamableMcpHandler(factory: () => McpServer): RequestHandler {
+function streamableMcpHandler(
+  factory: (context: RequestAuthContext | undefined) => McpServer
+): RequestHandler {
   return async (request, response) => {
     let server: McpServer | undefined;
     let closeServer: (() => Promise<void>) | undefined;
     try {
-      server = factory();
+      const locals: AuthenticatedLocals = response.locals;
+      server = factory(locals[REQUEST_AUTH_CONTEXT]);
       closeServer = registerMcpServerCleanup(response, server);
       // SDK 1.29's declaration omits `undefined`, although it is the documented
       // and runtime-supported stateless setting.
