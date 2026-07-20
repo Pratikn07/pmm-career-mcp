@@ -11,7 +11,7 @@ Choose the Railway HTTPS origin first, for example `https://<railway-service-dom
 | Classification | Values | Operator rule |
 | --- | --- | --- |
 | Public configuration | `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY`, `BASE_URL` | `BASE_URL` is public configuration, but the consent page intentionally exposes only `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY`. These are not database credentials. |
-| Host-only, non-secret configuration | `NODE_ENV=production`, `PORT`, `DATABASE_CA_CERT`, `AUTH_MODE=oauth`, `OIDC_ISSUER`, `OIDC_AUDIENCE`, `ALLOWED_SUBJECT`, `LINKEDIN_VERSION`, `LINKEDIN_PUBLISH_ENABLED=false`, `LINKEDIN_REDIRECT_URI` | Keep these in Railway environment configuration; do not place them in browser code. `DATABASE_CA_CERT` is public trust material, not a credential. |
+| Host-only, non-secret configuration | `NODE_ENV=production`, `PORT`, `DATABASE_CA_CERT`, `AUTH_MODE=oauth`, `OIDC_ISSUER`, `OIDC_AUDIENCE`, `ALLOWED_SUBJECT`, `LINKEDIN_VERSION`, `LINKEDIN_PUBLISH_ENABLED=false`, `LINKEDIN_IMAGE_PUBLISH_ENABLED=false`, `LINKEDIN_MEDIA_BUCKET=linkedin-draft-media`, `LINKEDIN_REDIRECT_URI` | Keep these in Railway environment configuration; do not place them in browser code. `DATABASE_CA_CERT` is public trust material, not a credential. |
 | Secret, host-only | `DATABASE_URL`, `MIGRATION_DATABASE_URL`, `TOKEN_ENCRYPTION_KEY`, `LINKEDIN_CLIENT_ID`, `LINKEDIN_CLIENT_SECRET` | Use Railway secret environment variables. Never commit, log, paste, or enter real values in the example file. |
 
 In the Supabase Dashboard, open **Connect**, select the **Session Pooler**, and copy the exact URLs for the project's region. A shared pooler host has the form `aws-<region>.pooler.supabase.com`, and each username must include the project suffix. Use `career_mcp_runtime.<project-ref>` for `DATABASE_URL` and `postgres.<project-ref>` for `MIGRATION_DATABASE_URL`. Percent-encode every password before placing it in a URL (`@` becomes `%40`, for example); do not paste an unencoded password into a connection string. Do not invent the pooler hostname from the project URL.
@@ -25,10 +25,20 @@ The active lines in [.env.example](../../.env.example) are copyable local-develo
 1. Create one Supabase project in the intended organization and region.
 2. Keep the application schema as `career_mcp`, not `public`. Disable the Supabase Data API for this project because the server connects directly to PostgreSQL. Do not grant `anon` or `authenticated` any privileges on `career_mcp`.
 3. Run `supabase/runtime-role.sql` with `psql` as the migration owner before the first migration smoke or deployment. The template uses `CREATE SCHEMA IF NOT EXISTS` to create the schema if it does not exist; it never changes ownership of an existing schema. It also installs default privileges so later committed migrations create tables the runtime role can use. The template fails closed if a reused `career_mcp_runtime` login already belongs to any parent role; remove and review every such membership before rerunning it. The final `\password` prompt is the required private checkpoint: enter the runtime password yourself, percent-encode it for the connection URL, store the resulting runtime URL only as `DATABASE_URL`, and never paste the password into chat or source control.
-4. Enable asymmetric JWT signing keys for Auth.
-5. Create the one permitted Auth user, record only that user's UUID in Railway as `ALLOWED_SUBJECT`, then disable open signups. Do not create a shared or multi-user access path.
-6. In Auth URL configuration, set **Site URL** to the canonical Railway `BASE_URL` and **Authorization Path** to `/oauth/consent`.
-7. Enable the Supabase OAuth 2.1 authorization server with PKCE and Dynamic Client Registration (DCR). The application accepts only the Supabase-supported `openid` and `email` scopes. Before continuing, confirm `https://<project-ref>.supabase.co/.well-known/oauth-authorization-server/auth/v1` returns OAuth metadata with a `registration_endpoint`; a 404 response or a missing registration endpoint means the Supabase OAuth/DCR setup is not ready for ChatGPT. DCR allows MCP clients to register, so regularly monitor registered clients, validate their redirect URIs, and revoke registrations you do not recognize.
+4. In **Storage**, create the application bucket manually with these exact dashboard settings:
+
+   ```text
+   Bucket name: linkedin-draft-media
+   Public bucket: off
+   File size limit: 20 MiB
+   Allowed MIME types: image/jpeg, image/png, image/gif
+   ```
+
+   This is an explicit user/operator action because the application user JWT is not authorized to create buckets. Do not create or mutate the bucket through SQL, and do not add a secret or service-role key to automate this step. Apply the reviewed `20260719000000_linkedin_media_storage_rls.sql` migration as the database owner; it creates only the owner-folder `SELECT`, `INSERT`, and `DELETE` policies on `storage.objects`. It grants no `UPDATE` policy because uploads use `upsert: false`.
+5. Enable asymmetric JWT signing keys for Auth.
+6. Create the one permitted Auth user, record only that user's UUID in Railway as `ALLOWED_SUBJECT`, then disable open signups. Do not create a shared or multi-user access path.
+7. In Auth URL configuration, set **Site URL** to the canonical Railway `BASE_URL` and **Authorization Path** to `/oauth/consent`.
+8. Enable the Supabase OAuth 2.1 authorization server with PKCE and Dynamic Client Registration (DCR). The application accepts only the Supabase-supported `openid` and `email` scopes. Before continuing, confirm `https://<project-ref>.supabase.co/.well-known/oauth-authorization-server/auth/v1` returns OAuth metadata with a `registration_endpoint`; a 404 response or a missing registration endpoint means the Supabase OAuth/DCR setup is not ready for ChatGPT. DCR allows MCP clients to register, so regularly monitor registered clients, validate their redirect URIs, and revoke registrations you do not recognize.
 
 The browser consent page uses `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY` only. It must never receive `DATABASE_URL`, any Supabase secret/service-role key, the token-encryption key, or LinkedIn secrets.
 
@@ -59,6 +69,8 @@ npm run verify:oauth-token
 Provide the token only through `OAUTH_ACCESS_TOKEN` or a non-interactive pipe, as the command requires. It must accept the token only when the signature, expiry, issuer, subject, exact `BASE_URL` audience, and exact `openid email` resource scope set are valid. Do not echo the token.
 
 The token test must pass after the hook is enabled. A failure is a stop condition: confirm the exact canonical URL in `app_metadata.mcp_audience`, hook selection, issuer, subject, and requested `openid email` scopes. Do not bypass an audience or scope mismatch.
+
+Before enabling image workflows, use that same validated OAuth user access token for a live Storage gate against the private `linkedin-draft-media` bucket. Through the Storage API only, upload a uniquely named small supported image under `<token-subject>/...` with `upsert: false`, create a short-lived signed URL or authenticated download, and remove the test object. The upload, read, and removal must all succeed under the owner-folder RLS policies. If Storage rejects the custom-audience OAuth user token, stop the rollout and inspect the token claims, bucket privacy, and policies. Do not add or fall back to a secret key or service-role key.
 
 ## 5. Deploy one Railway service
 

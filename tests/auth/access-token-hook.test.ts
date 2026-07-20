@@ -29,6 +29,15 @@ describe("MCP audience access-token hook migration", () => {
     expect(migration).not.toMatch(/user_metadata|event\s*->>\s*'scope'/i);
   });
 
+  it("preserves the subject and authenticated role claims required by Storage RLS", () => {
+    const replacedClaimPaths = [...migration.matchAll(
+      /jsonb_set\s*\(\s*claims\s*,\s*'\{([^}]+)\}'/gi
+    )].map((match) => match[1]);
+
+    expect(replacedClaimPaths).toEqual(["aud", "scope"]);
+    expect(migration).toMatch(/return\s+jsonb_build_object\s*\(\s*'claims'\s*,\s*claims\s*\)/i);
+  });
+
   it("permits execution only for Supabase Auth's admin role", () => {
     expect(migration).toMatch(/grant\s+usage\s+on\s+schema\s+public\s+to\s+supabase_auth_admin/i);
     expect(migration).toMatch(/revoke\s+all\s+on\s+function[\s\S]*from\s+public/i);

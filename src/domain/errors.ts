@@ -16,6 +16,7 @@ export type DomainErrorCode =
   | "INVALID_TRANSITION"
   | "CONFLICT"
   | "EVIDENCE_MISMATCH"
+  | "MEDIA_STORAGE_ERROR"
   | "DATA_INTEGRITY";
 
 export type DomainErrorDetails = Readonly<Record<string, string | number | boolean>>;
