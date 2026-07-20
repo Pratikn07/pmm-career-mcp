@@ -30,3 +30,34 @@ Worktree: `/Users/pratik.nandoskar/Documents/working/pmm-career-mcp/.worktrees/s
 - Task 7 completed with 465 tests and independent approval of guarded Supabase smoke, token verification, and optional audience-hook tooling; no live database action occurred.
 - Task 8 completed with 466 tests and independent approval of the local setup, environment split, and Supabase/Railway/ChatGPT operator runbook.
 - Task 9 release gate passed: clean install, 466 tests, coverage, typecheck, build, Docker build, production audit (0 vulnerabilities), and fail-closed image check.
+
+---
+
+Plan: `docs/superpowers/plans/2026-07-19-linkedin-image-review-card.md`
+Branch: `codex/supabase-migration`
+Workspace: `/Users/pratik.nandoskar/Documents/Codex/2026-07-16/what/pmm-career-mcp`
+Started: 2026-07-20
+
+| Task | Status | Implementation | Review | Commit |
+| --- | --- | --- | --- | --- |
+| 1. Configuration and build dependencies | In progress | — | — | — |
+| 2. Request-scoped Supabase identity | Pending | — | — | — |
+| 3. Media and publish-attempt persistence | Pending | — | — | — |
+| 4. Storage RLS and user-JWT adapter | Pending | — | — | — |
+| 5. Untrusted image ingestion | Pending | — | — | — |
+| 6. Immutable media drafts and checksums | Pending | — | — | — |
+| 7. Draft tools and review-card resource | Pending | — | — | — |
+| 8. App-only exact previews | Pending | — | — | — |
+| 9. Interactive review card | Pending | — | — | — |
+| 10. LinkedIn image transport | Pending | — | — | — |
+| 11. Durable app-only publishing | Pending | — | — | — |
+| 12. Schedule safety and release verification | Pending | — | — | — |
+| Final whole-branch review | Pending | — | — | — |
+
+## LinkedIn image workflow constraints
+
+- Keep `LINKEDIN_PUBLISH_ENABLED=false` and `LINKEDIN_IMAGE_PUBLISH_ENABLED=false` through all local and live verification.
+- Create no live LinkedIn post during implementation.
+- Scheduled runs may research and draft, but may never preview or publish.
+- No service-role key, database password, LinkedIn credential, bearer token, or approval capability may be logged or exposed.
+- Live Supabase/Railway changes wait at the explicit rollout checkpoint.
