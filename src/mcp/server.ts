@@ -1,10 +1,12 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
+import type { RequestAuthContext } from "../auth/request-context.js";
 import { SUPABASE_OAUTH_SCOPES } from "../auth/resource-auth.js";
 import type { DraftService } from "../drafts/service.js";
 import { DomainError } from "../domain/errors.js";
 import type { LinkedInOAuth } from "../linkedin/oauth.js";
 import type { PublishService } from "../linkedin/publish-service.js";
+import type { MediaPostDraftVersion, PostMediaService } from "../media/post-media-service.js";
 import type { PipelineService } from "../pipeline/service.js";
 import type { PreviewExpected, PreviewService } from "../posts/preview-service.js";
 import {
@@ -18,6 +20,13 @@ import type { PeopleDiscoveryService } from "../research/people-discovery.js";
 import type { CompanyResult, CompanySearchQuery } from "../research/types.js";
 import { describeYcCompanyCoverage } from "../research/yc-provider.js";
 import {
+  LINKEDIN_REVIEW_CARD_URI,
+  registerLinkedInReviewCardResource,
+  type LinkedInReviewCardResourceOptions
+} from "../review-card/resource.js";
+import {
+  attachLinkedInPostImagesInput,
+  attachLinkedInPostImagesOutput,
   createLinkedInAuthorizationUrlOutput,
   createWeeklyShortlistInput,
   createWeeklyShortlistOutput,
@@ -37,6 +46,8 @@ import {
   listPipelineOutput,
   listPostHistoryInput,
   listPostHistoryOutput,
+  openLinkedInReviewCardInput,
+  openLinkedInReviewCardOutput,
   pipelineStatusSchema,
   previewPostInput,
   previewPostOutput,
@@ -52,14 +63,25 @@ import {
   saveTargetOutput,
   searchYcCompaniesInput,
   searchYcCompaniesOutput,
+  setLinkedInPostImagesInput,
+  setLinkedInPostImagesOutput,
   updateOutreachStatusInput,
   updateOutreachStatusOutput
 } from "./schemas.js";
 
-export const CAREER_MCP_INSTRUCTIONS = "Never fetch LinkedIn for research. Never claim complete employee coverage. Never claim complete YC-company coverage. Never call publish_linkedin_post unless the current user explicitly asks to publish the exact preview. Never batch or retry publishing. Research is restricted to YC companies and allowed public sources. Drafts and pipeline data stay private. Publishing is text-only and requires the exact saved version, checksum, visibility, and fresh one-use preview token.";
+export const CAREER_MCP_INSTRUCTIONS = "Never fetch LinkedIn for research. Never claim complete employee coverage. Never claim complete YC-company coverage. Scheduled and model-driven flows must stop after saving private drafts and may only open the non-writing review card. Exact preview and publish actions are app-only, never model-callable, and available only after the current user explicitly asks to publish the exact preview. Never batch or retry publishing. Research is restricted to YC companies and allowed public sources. Drafts and pipeline data stay private.";
 
 type YcProvider = { searchYcCompanies(query: CompanySearchQuery): Promise<CompanyResult[]> };
-type ConnectionStatus = { connected: boolean; valid: boolean; publishingEnabled: boolean };
+type ConnectionStatus = {
+  connected: boolean;
+  valid: boolean;
+  publishingEnabled: boolean;
+  imagePublishingEnabled?: boolean;
+};
+
+type ModelMediaService = Pick<PostMediaService, "attachFiles" | "setMedia" | "getVersion"> & {
+  createSignedUrls?: (post: MediaPostDraftVersion) => Promise<readonly string[]>;
+};
 
 export type CareerMcpDependencies = {
   ycProvider: YcProvider;
@@ -71,19 +93,36 @@ export type CareerMcpDependencies = {
   publish: Pick<PublishService, "publish">;
   linkedin: Pick<LinkedInOAuth, "createAuthorizationUrl">;
   getLinkedInConnectionStatus: () => Promise<ConnectionStatus>;
+  media?: ModelMediaService;
 };
 
 export type CareerMcpServerOptions = {
   now?: () => Date;
+  requestAuthContext?: RequestAuthContext;
+  reviewCardResource?: LinkedInReviewCardResourceOptions;
 };
 
 const readOnly: ToolAnnotations = { readOnlyHint: true, openWorldHint: false, destructiveHint: false };
 const privateWrite: ToolAnnotations = { readOnlyHint: false, openWorldHint: false, destructiveHint: false };
+const attachmentWrite: ToolAnnotations = { readOnlyHint: false, openWorldHint: true, destructiveHint: false };
 const externalWrite: ToolAnnotations = { readOnlyHint: false, openWorldHint: true, destructiveHint: false };
 const SUPABASE_OAUTH_SECURITY_SCHEMES = [{ type: "oauth2", scopes: [...SUPABASE_OAUTH_SCOPES] }] as const;
 // SDK 1.29 exposes only `_meta` for per-tool extension metadata; its ToolSchema
 // does not serialize an untyped top-level `securitySchemes` field.
 const oauthToolMetadata: Record<string, unknown> = { securitySchemes: SUPABASE_OAUTH_SECURITY_SCHEMES };
+const appOnlyToolMetadata: Record<string, unknown> = {
+  ...oauthToolMetadata,
+  ui: { visibility: ["app"] }
+};
+const attachFileToolMetadata: Record<string, unknown> = {
+  ...oauthToolMetadata,
+  "openai/fileParams": ["images"]
+};
+const reviewCardLauncherMetadata: Record<string, unknown> = {
+  ...oauthToolMetadata,
+  "openai/outputTemplate": LINKEDIN_REVIEW_CARD_URI,
+  "openai/widgetAccessible": true
+};
 
 const MAX_SUMMARY_LENGTH = 240;
 
@@ -159,6 +198,19 @@ export function createCareerMcpServer(
     { name: "pmm-career-mcp", version: "1.0.0" },
     { instructions: CAREER_MCP_INSTRUCTIONS }
   );
+  if (options.reviewCardResource !== undefined) {
+    registerLinkedInReviewCardResource(server, options.reviewCardResource);
+  }
+
+  function authenticatedMedia(): ModelMediaService {
+    if (options.requestAuthContext === undefined) {
+      throw new DomainError("AUTH_REQUIRED", "Authenticated request identity is required");
+    }
+    if (deps.media === undefined) {
+      throw new DomainError("DATA_INTEGRITY", "Draft media service is unavailable");
+    }
+    return deps.media;
+  }
 
   server.registerTool("search_yc_companies", {
     title: "Search YC companies",
@@ -261,13 +313,69 @@ export function createCareerMcpServer(
     post: await deps.drafts.revisePost(postId, text)
   }), ({ post }) => `Saved private post version ${post.version}; nothing was published.`)());
 
+  server.registerTool("attach_linkedin_post_images", {
+    title: "Attach LinkedIn post images",
+    description: "Validate and attach one to four private draft images with alt text, creating a new immutable version. This never previews or publishes.",
+    inputSchema: attachLinkedInPostImagesInput,
+    outputSchema: attachLinkedInPostImagesOutput,
+    annotations: attachmentWrite,
+    _meta: attachFileToolMetadata
+  }, async (input) => guarded(async () => ({
+    post: await authenticatedMedia().attachFiles({
+      ...input,
+      images: input.images.map(({ download_url, file_id, mime_type, file_name }) => ({
+        download_url,
+        file_id,
+        ...(mime_type === undefined ? {} : { mime_type }),
+        ...(file_name === undefined ? {} : { file_name })
+      }))
+    })
+  }), ({ post }) => `Saved ${post.media.length} private draft images in post version ${post.version}; nothing was previewed or published.`)());
+
+  server.registerTool("set_linkedin_post_images", {
+    title: "Set LinkedIn post images",
+    description: "Replace, remove, reorder, or revise alt text for private draft images, creating a new immutable version. This never previews or publishes.",
+    inputSchema: setLinkedInPostImagesInput,
+    outputSchema: setLinkedInPostImagesOutput,
+    annotations: privateWrite,
+    _meta: oauthToolMetadata
+  }, async (input) => guarded(async () => ({
+    post: await authenticatedMedia().setMedia(input)
+  }), ({ post }) => `Saved ${post.media.length} private draft images in post version ${post.version}; nothing was previewed or published.`)());
+
+  server.registerTool("open_linkedin_review_card", {
+    title: "Open LinkedIn review card",
+    description: "Open a non-writing review card for one exact private draft version. This does not create a preview capability or publish.",
+    inputSchema: openLinkedInReviewCardInput,
+    outputSchema: openLinkedInReviewCardOutput,
+    annotations: readOnly,
+    _meta: reviewCardLauncherMetadata
+  }, async ({ postId, version }) => {
+    try {
+      const media = authenticatedMedia();
+      const post = await media.getVersion(postId, version);
+      if (post === undefined) {
+        throw new DomainError("NOT_FOUND", "Post draft was not found", { entity: "post_draft" });
+      }
+      const mediaUrls = media.createSignedUrls === undefined
+        ? []
+        : await media.createSignedUrls(post);
+      return {
+        ...response({ post }, `Opened private post version ${post.version} for review; no preview or publish action was created.`),
+        _meta: { mediaUrls: [...mediaUrls] }
+      };
+    } catch (error) {
+      return safeError(error);
+    }
+  });
+
   server.registerTool("preview_post", {
     title: "Preview post",
     description: "Show the exact latest saved post and create a one-use 15-minute preview token; this does not publish.",
     inputSchema: previewPostInput,
     outputSchema: previewPostOutput,
-    annotations: readOnly,
-    _meta: oauthToolMetadata
+    annotations: privateWrite,
+    _meta: appOnlyToolMetadata
   }, async ({ postId, version }) => guarded(async () => ({
     preview: await deps.previews.create(postId, version)
   }), () => "Created an exact one-use post preview valid for 15 minutes; nothing was published.")());
@@ -346,10 +454,16 @@ export function createCareerMcpServer(
     outputSchema: getLinkedInConnectionStatusOutput,
     annotations: readOnly,
     _meta: oauthToolMetadata
-  }, async () => guarded(async () => ({
-    connection: await deps.getLinkedInConnectionStatus()
-  }), ({ connection }) => (
-    `LinkedIn is ${connection.connected && connection.valid ? "connected" : "not connected"}; publishing is ${connection.publishingEnabled ? "enabled" : "disabled"}.`
+  }, async () => guarded(async () => {
+    const status = await deps.getLinkedInConnectionStatus();
+    return {
+      connection: {
+        ...status,
+        imagePublishingEnabled: status.imagePublishingEnabled ?? false
+      }
+    };
+  }, ({ connection }) => (
+    `LinkedIn is ${connection.connected && connection.valid ? "connected" : "not connected"}; text publishing is ${connection.publishingEnabled ? "enabled" : "disabled"}; image publishing is ${connection.imagePublishingEnabled ? "enabled" : "disabled"}.`
   ))());
 
   server.registerTool("create_linkedin_authorization_url", {
@@ -369,7 +483,7 @@ export function createCareerMcpServer(
     inputSchema: publishLinkedInPostInput,
     outputSchema: publishLinkedInPostOutput,
     annotations: externalWrite,
-    _meta: oauthToolMetadata
+    _meta: appOnlyToolMetadata
   }, async (input) => guarded(async () => ({
     result: await deps.publish.publish(input as PreviewExpected & { previewToken: string })
   }), ({ result }) => `LinkedIn publish attempt finished with state ${result.state}; it was not retried.`)());

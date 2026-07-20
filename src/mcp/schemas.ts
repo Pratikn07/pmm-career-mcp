@@ -134,6 +134,33 @@ export const revisePostInput = z.object({
   postId: id,
   text: z.string().trim().min(1).max(3_000)
 }).strict();
+export const openAiFileSchema = z.object({
+  download_url: z.string().url(),
+  file_id: z.string().min(1).max(512),
+  mime_type: z.string().max(100).optional(),
+  file_name: z.string().max(255).optional()
+}).strict();
+export const attachLinkedInPostImagesInput = z.object({
+  postId: id,
+  expectedVersion: z.number().int().positive(),
+  images: z.array(openAiFileSchema).min(1).max(4),
+  altTexts: z.array(z.string().min(1).max(120)).min(1).max(4)
+}).strict().refine((value) => value.images.length === value.altTexts.length, {
+  message: "images and altTexts must have equal length",
+  path: ["altTexts"]
+});
+export const setLinkedInPostImagesInput = z.object({
+  postId: id,
+  expectedVersion: z.number().int().positive(),
+  media: z.array(z.object({
+    mediaId: id,
+    altText: z.string().min(1).max(120)
+  }).strict()).max(4)
+}).strict();
+export const openLinkedInReviewCardInput = z.object({
+  postId: id,
+  version: z.number().int().positive()
+}).strict();
 export const previewPostInput = z.object({ postId: id, version: z.number().int().positive() }).strict();
 export const createWeeklyShortlistInput = z.object({
   name: z.string().trim().min(1).max(120),
@@ -302,6 +329,10 @@ const safeErrorDataSchema = z.object({
       "INVALID_TRANSITION",
       "CONFLICT",
       "EVIDENCE_MISMATCH",
+      "MEDIA_DOWNLOAD_ERROR",
+      "MEDIA_VALIDATION_ERROR",
+      "MEDIA_STORAGE_ERROR",
+      "AUTH_REQUIRED",
       "DATA_INTEGRITY"
     ])
   }).strict()
@@ -350,6 +381,9 @@ export const explainTargetMatchOutput = outputSchema(z.object({
 export const draftOutreachOutput = outputSchema(z.object({ draft: outreachDraftSchema }).strict());
 export const draftLinkedInPostOutput = outputSchema(z.object({ post: postDraftSchema }).strict());
 export const revisePostOutput = outputSchema(z.object({ post: postDraftSchema }).strict());
+export const attachLinkedInPostImagesOutput = outputSchema(z.object({ post: postDraftSchema }).strict());
+export const setLinkedInPostImagesOutput = outputSchema(z.object({ post: postDraftSchema }).strict());
+export const openLinkedInReviewCardOutput = outputSchema(z.object({ post: postDraftSchema }).strict());
 export const previewPostOutput = outputSchema(z.object({ preview: previewSchema }).strict());
 export const createWeeklyShortlistOutput = outputSchema(z.object({ shortlist: shortlistSchema }).strict());
 export const saveTargetOutput = outputSchema(z.object({ target: pipelineTargetSchema }).strict());
@@ -361,7 +395,8 @@ export const getLinkedInConnectionStatusOutput = outputSchema(z.object({
   connection: z.object({
     connected: z.boolean(),
     valid: z.boolean(),
-    publishingEnabled: z.boolean()
+    publishingEnabled: z.boolean(),
+    imagePublishingEnabled: z.boolean()
   }).strict()
 }).strict());
 export const createLinkedInAuthorizationUrlOutput = outputSchema(z.object({

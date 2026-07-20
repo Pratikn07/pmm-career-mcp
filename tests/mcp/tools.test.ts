@@ -30,6 +30,9 @@ const expectedTools = [
   "draft_outreach",
   "draft_linkedin_post",
   "revise_post",
+  "attach_linkedin_post_images",
+  "set_linkedin_post_images",
+  "open_linkedin_review_card",
   "preview_post",
   "create_weekly_shortlist",
   "save_target",
@@ -124,7 +127,7 @@ function dependencies(): CareerMcpDependencies {
     previews: { create: () => { throw new Error("not called"); } },
     publish: { publish: async () => ({ state: "publish_failed" as const }) },
     linkedin: { createAuthorizationUrl: () => "https://www.linkedin.com/oauth/v2/authorization" },
-    getLinkedInConnectionStatus: async () => ({ connected: false, valid: false, publishingEnabled: false })
+    getLinkedInConnectionStatus: async () => ({ connected: false, valid: false, publishingEnabled: false, imagePublishingEnabled: false })
   };
 }
 
@@ -239,7 +242,7 @@ function successfulDependencies(): CareerMcpDependencies {
     },
     publish: { publish: async () => ({ state: "published", postUrn: "urn:li:share:12345" }) },
     linkedin: { createAuthorizationUrl: () => "https://www.linkedin.com/oauth/v2/authorization" },
-    getLinkedInConnectionStatus: async () => ({ connected: true, valid: true, publishingEnabled: false })
+    getLinkedInConnectionStatus: async () => ({ connected: true, valid: true, publishingEnabled: false, imagePublishingEnabled: false })
   };
 }
 
@@ -272,6 +275,9 @@ it("publishes an explicit success and safe-error output contract for every tool"
     draft_outreach: "draft",
     draft_linkedin_post: "post",
     revise_post: "post",
+    attach_linkedin_post_images: "post",
+    set_linkedin_post_images: "post",
+    open_linkedin_review_card: "post",
     preview_post: "preview",
     create_weekly_shortlist: "shortlist",
     save_target: "target",
@@ -383,9 +389,26 @@ it("returns bounded useful text instead of the generic Done response", async () 
   expect(text).toContain("0");
 });
 
-it("returns schema-valid structured data and bounded summaries from all 18 tools", async () => {
+it("returns schema-valid structured data and bounded summaries from every registered tool", async () => {
   const target = scoringTarget();
-  const server = createServerWithClock(successfulDependencies(), () => new Date(FIXED_NOW));
+  const successful = successfulDependencies();
+  const mediaPost = await successful.drafts.createPost({
+    text: "A safe test post",
+    visibility: "PUBLIC"
+  });
+  successful.media = {
+    attachFiles: async () => mediaPost,
+    setMedia: async () => mediaPost,
+    getVersion: async () => mediaPost,
+    createSignedUrls: async () => []
+  };
+  const server = createCareerMcpServer(successful, {
+    now: () => new Date(FIXED_NOW),
+    requestAuthContext: Object.freeze({
+      subject: "123e4567-e89b-12d3-a456-426614174000",
+      accessToken: "test-request-token"
+    })
+  });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "test", version: "1.0.0" });
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
@@ -398,6 +421,27 @@ it("returns schema-valid structured data and bounded summaries from all 18 tools
     { name: "draft_outreach", arguments: { targetId: "target-1", purpose: "networking", text: "Hello", evidenceIds: ["evidence-1"] } },
     { name: "draft_linkedin_post", arguments: { text: "A safe test post", visibility: "PUBLIC" } },
     { name: "revise_post", arguments: { postId: "post-1", text: "A safe revised post" } },
+    {
+      name: "attach_linkedin_post_images",
+      arguments: {
+        postId: "123e4567-e89b-12d3-a456-426614174001",
+        expectedVersion: 1,
+        images: [{ download_url: "https://files.example/image.png", file_id: "file-1" }],
+        altTexts: ["A product dashboard"]
+      }
+    },
+    {
+      name: "set_linkedin_post_images",
+      arguments: {
+        postId: "123e4567-e89b-12d3-a456-426614174001",
+        expectedVersion: 1,
+        media: []
+      }
+    },
+    {
+      name: "open_linkedin_review_card",
+      arguments: { postId: "123e4567-e89b-12d3-a456-426614174001", version: 1 }
+    },
     { name: "preview_post", arguments: { postId: "post-1", version: 1 } },
     { name: "create_weekly_shortlist", arguments: { name: "This week", targetIds: ["target-1"] } },
     { name: "save_target", arguments: { target } },
@@ -431,6 +475,145 @@ it("returns schema-valid structured data and bounded summaries from all 18 tools
     expect(summary.length, call.name).toBeLessThanOrEqual(240);
   }
   await Promise.all([client.close(), server.close()]);
+});
+
+it("requires request auth before any draft-media or Storage action", async () => {
+  const attachFiles = vi.fn();
+  const setMedia = vi.fn();
+  const getVersion = vi.fn();
+  const createSignedUrls = vi.fn();
+  const deps = dependencies();
+  deps.media = { attachFiles, setMedia, getVersion, createSignedUrls };
+  const server = createCareerMcpServer(deps);
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "test", version: "1.0.0" });
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+
+  for (const call of [
+    {
+      name: "attach_linkedin_post_images",
+      arguments: {
+        postId: "123e4567-e89b-12d3-a456-426614174001",
+        expectedVersion: 1,
+        images: [{ download_url: "https://files.example/image.png", file_id: "file-1" }],
+        altTexts: ["A product dashboard"]
+      }
+    },
+    {
+      name: "set_linkedin_post_images",
+      arguments: {
+        postId: "123e4567-e89b-12d3-a456-426614174001",
+        expectedVersion: 1,
+        media: []
+      }
+    },
+    {
+      name: "open_linkedin_review_card",
+      arguments: { postId: "123e4567-e89b-12d3-a456-426614174001", version: 1 }
+    }
+  ]) {
+    const result = await client.callTool(call);
+    expect(result.isError, call.name).toBe(true);
+    expect(result.structuredContent, call.name).toEqual({
+      data: { error: { code: "AUTH_REQUIRED" } }
+    });
+  }
+  await Promise.all([client.close(), server.close()]);
+
+  expect(attachFiles).not.toHaveBeenCalled();
+  expect(setMedia).not.toHaveBeenCalled();
+  expect(getVersion).not.toHaveBeenCalled();
+  expect(createSignedUrls).not.toHaveBeenCalled();
+});
+
+it("opens a non-writing review card and keeps signed URLs widget-private", async () => {
+  const timestamp = FIXED_NOW.toISOString();
+  const post = {
+    id: "123e4567-e89b-12d3-a456-426614174001",
+    versionId: "123e4567-e89b-12d3-a456-426614174002",
+    text: "Exact private text",
+    visibility: "CONNECTIONS" as const,
+    version: 2,
+    checksum: "b".repeat(64),
+    state: "draft",
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    media: [{
+      position: 0,
+      mediaId: "123e4567-e89b-12d3-a456-426614174003",
+      altText: "A launch dashboard",
+      sha256: "c".repeat(64),
+      mimeType: "image/png" as const,
+      byteSize: 123,
+      width: 640,
+      height: 480,
+      frameCount: 1,
+      originalFilename: "launch.png",
+      createdAt: timestamp
+    }]
+  };
+  const previewCreate = vi.fn();
+  const deps = dependencies();
+  deps.previews.create = previewCreate;
+  deps.media = {
+    attachFiles: vi.fn(),
+    setMedia: vi.fn(),
+    getVersion: vi.fn(async () => post),
+    createSignedUrls: vi.fn(async () => ["https://project.supabase.co/storage/v1/object/sign/private"])
+  };
+  const server = createCareerMcpServer(deps, {
+    requestAuthContext: Object.freeze({
+      subject: "123e4567-e89b-12d3-a456-426614174000",
+      accessToken: "request-token-that-must-not-leak"
+    })
+  });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "test", version: "1.0.0" });
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+
+  const result = await client.callTool({
+    name: "open_linkedin_review_card",
+    arguments: { postId: post.id, version: post.version }
+  });
+  await Promise.all([client.close(), server.close()]);
+
+  expect(result.isError).not.toBe(true);
+  expect(result.structuredContent).toEqual({ data: { post } });
+  expect(result._meta).toEqual({
+    mediaUrls: ["https://project.supabase.co/storage/v1/object/sign/private"]
+  });
+  expect(JSON.stringify(result.structuredContent)).not.toContain("supabase.co");
+  expect(JSON.stringify(result.content)).not.toContain("supabase.co");
+  expect(JSON.stringify(result)).not.toContain("request-token-that-must-not-leak");
+  expect(previewCreate).not.toHaveBeenCalled();
+});
+
+it("reports the independent image-publishing switch as a boolean only", async () => {
+  const deps = dependencies();
+  deps.getLinkedInConnectionStatus = async () => ({
+    connected: true,
+    valid: true,
+    publishingEnabled: false,
+    imagePublishingEnabled: false
+  });
+  const server = createCareerMcpServer(deps);
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "test", version: "1.0.0" });
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  const result = await client.callTool({ name: "get_linkedin_connection_status", arguments: {} });
+  await Promise.all([client.close(), server.close()]);
+
+  expect(result.structuredContent).toEqual({
+    data: {
+      connection: {
+        connected: true,
+        valid: true,
+        publishingEnabled: false,
+        imagePublishingEnabled: false
+      }
+    }
+  });
+  expect(JSON.stringify(result)).not.toContain("LINKEDIN_IMAGE_PUBLISH_ENABLED");
 });
 
 it("makes the four publishing and research safety rules prominent in instructions", async () => {

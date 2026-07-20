@@ -143,7 +143,12 @@ it("runs the private career flow and only publishes one exact enabled preview", 
     .reply(201, undefined, { "x-restli-id": "urn:li:share:12345" });
   const disabled = await startStack(false);
   const connection = object(data(await disabled.client.callTool({ name: "get_linkedin_connection_status", arguments: {} })).connection);
-  expect(connection).toEqual({ connected: false, valid: false, publishingEnabled: false });
+  expect(connection).toEqual({
+    connected: false,
+    valid: false,
+    publishingEnabled: false,
+    imagePublishingEnabled: false
+  });
   const companies = records(data(await disabled.client.callTool({ name: "search_yc_companies", arguments: { keyword: "Acme" } })).companies);
   expect(companies).toHaveLength(1);
   const company = companies[0];
