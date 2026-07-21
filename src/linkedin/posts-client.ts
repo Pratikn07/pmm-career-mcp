@@ -6,7 +6,18 @@ import { decryptJson, type EncryptedEnvelope } from "../security/crypto.js";
 const POSTS_ENDPOINT = "https://api.linkedin.com/rest/posts";
 const ALLOWED_VISIBILITIES: ReadonlySet<string> = new Set(["PUBLIC", "CONNECTIONS"]);
 
-type StoredLinkedInCredential = Readonly<{ accessToken: string; authorUrn: string }>;
+export type StoredLinkedInCredential = Readonly<{ accessToken: string; authorUrn: string }>;
+
+export type LinkedInPostMedia = Readonly<{
+  imageUrn: string;
+  altText: string;
+}>;
+
+export type LinkedInPostCreateInput = Readonly<{
+  text: string;
+  visibility: PostVisibility;
+  media: readonly LinkedInPostMedia[];
+}>;
 
 export type LinkedInPostsClientDependencies = {
   tokenEncryptionKey: string;
@@ -46,7 +57,7 @@ function parseEnvelope(value: string): EncryptedEnvelope {
   }
 }
 
-async function loadCredential(
+export async function loadLinkedInCredential(
   database: CareerDatabase,
   encryptionKey: string
 ): Promise<StoredLinkedInCredential> {
@@ -73,6 +84,58 @@ function validVersion(value: string): boolean {
   return /^\d{6}$/.test(value);
 }
 
+function validImageUrn(value: string): boolean {
+  return /^urn:li:image:[A-Za-z0-9_-]+$/.test(value);
+}
+
+function validAltText(value: string): boolean {
+  const length = [...value].length;
+  return length >= 1 && length <= 120;
+}
+
+function isDenseMediaArray(media: readonly LinkedInPostMedia[]): boolean {
+  for (let index = 0; index < media.length; index += 1) {
+    if (!Object.prototype.hasOwnProperty.call(media, index)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function validatePostInput(input: LinkedInPostCreateInput): void {
+  if (
+    typeof input?.text !== "string"
+    || input.text.length === 0
+    || !ALLOWED_VISIBILITIES.has(input.visibility)
+    || !Array.isArray(input.media)
+    || input.media.length > 4
+    || !isDenseMediaArray(input.media)
+    || input.media.some((media) => (
+      typeof media !== "object"
+      || media === null
+      || !validImageUrn(media.imageUrn)
+      || !validAltText(media.altText)
+    ))
+  ) {
+    throw new DomainError("VALIDATION_ERROR", "LinkedIn post input is invalid");
+  }
+}
+
+function contentFor(media: readonly LinkedInPostMedia[]): Record<string, unknown> | undefined {
+  if (media.length === 0) {
+    return undefined;
+  }
+  if (media.length === 1) {
+    const image = media[0]!;
+    return { media: { id: image.imageUrn, altText: image.altText } };
+  }
+  return {
+    multiImage: {
+      images: media.map(({ imageUrn, altText }) => ({ id: imageUrn, altText }))
+    }
+  };
+}
+
 /** A one-shot adapter for the official, versioned LinkedIn Posts API. */
 export function createLinkedInPostsClient(
   database: CareerDatabase,
@@ -83,19 +146,15 @@ export function createLinkedInPostsClient(
   }
   const fetch = dependencies.fetch ?? globalThis.fetch;
 
-  async function createTextPost(input: { text: string; visibility: PostVisibility }): Promise<LinkedInPostCreateResult> {
-    if (
-      typeof input?.text !== "string"
-      || input.text.length === 0
-      || !ALLOWED_VISIBILITIES.has(input.visibility)
-    ) {
-      throw new DomainError("VALIDATION_ERROR", "LinkedIn post input is invalid");
-    }
-    const credential = await loadCredential(database, dependencies.tokenEncryptionKey);
+  async function createPost(input: LinkedInPostCreateInput): Promise<LinkedInPostCreateResult> {
+    validatePostInput(input);
+    const credential = await loadLinkedInCredential(database, dependencies.tokenEncryptionKey);
+    const content = contentFor(input.media);
     let response: Response;
     try {
       response = await fetch(POSTS_ENDPOINT, {
         method: "POST",
+        redirect: "manual",
         headers: {
           authorization: `Bearer ${credential.accessToken}`,
           "content-type": "application/json",
@@ -111,6 +170,7 @@ export function createLinkedInPostsClient(
             targetEntities: [],
             thirdPartyDistributionChannels: []
           },
+          ...(content === undefined ? {} : { content }),
           lifecycleState: "PUBLISHED",
           isReshareDisabledByAuthor: false
         })
@@ -131,5 +191,9 @@ export function createLinkedInPostsClient(
     return { status: response.status };
   }
 
-  return { createTextPost };
+  async function createTextPost(input: { text: string; visibility: PostVisibility }): Promise<LinkedInPostCreateResult> {
+    return createPost({ ...input, media: [] });
+  }
+
+  return { createPost, createTextPost };
 }

@@ -90,4 +90,28 @@ describe("versioned LinkedIn Posts API client", () => {
       status: 0
     });
   });
+
+  it("preserves the generic transport result while supporting ordered image content", async () => {
+    const scope = nock("https://api.linkedin.com")
+      .post("/rest/posts", (body) => JSON.stringify(body.content) === JSON.stringify({
+        multiImage: {
+          images: [
+            { id: "urn:li:image:first", altText: "First" },
+            { id: "urn:li:image:second", altText: "Second" }
+          ]
+        }
+      }))
+      .once()
+      .reply(201, undefined, { "x-restli-id": "urn:li:share:321" });
+
+    await expect((await client()).createPost({
+      text: "Two images",
+      visibility: "PUBLIC",
+      media: [
+        { imageUrn: "urn:li:image:first", altText: "First" },
+        { imageUrn: "urn:li:image:second", altText: "Second" }
+      ]
+    })).resolves.toEqual({ status: 201, postUrn: "urn:li:share:321" });
+    expect(scope.isDone()).toBe(true);
+  });
 });
