@@ -36,13 +36,16 @@ it("serves a self-contained semantic review-card shell with minimal canonical CS
 
   const html = resource.text ?? "";
   expect(html).toContain('src="https://mcp.example/review-card-client.js"');
+  expect(html).toContain('data-storage-origin="https://project.supabase.co"');
   for (const id of [
     "post-text",
     "post-visibility",
     "post-media",
+    "post-id",
     "post-version",
     "post-checksum",
     "preview-expiry",
+    "validation-status",
     "validation-errors",
     "create-preview",
     "publish-post",
@@ -51,7 +54,9 @@ it("serves a self-contained semantic review-card shell with minimal canonical CS
     expect(html).toContain(`id="${id}"`);
   }
   expect(html).toContain("<dialog");
-  expect(html).not.toMatch(/https?:\/\/(?!mcp\.example\/review-card-client\.js)/);
+  expect(html.match(/https?:\/\//g)).toHaveLength(2);
+  expect(html).not.toMatch(/<script[^>]+src=(?!"https:\/\/mcp\.example\/review-card-client\.js")/i);
+  expect(html).not.toMatch(/on(?:click|load|error)=/i);
 });
 
 it.each([

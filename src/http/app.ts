@@ -137,6 +137,19 @@ export function createHttpApp(deps: HttpDependencies): Express {
       response.status(503).json({ status: "not_ready" });
     }
   });
+  app.get("/review-card-client.js", (_request, response) => {
+    const publicDirectory = resolve(process.cwd(), "dist/public");
+    if (!existsSync(resolve(publicDirectory, "review-card-client.js"))) {
+      response.status(404).end();
+      return;
+    }
+    response.setHeader("Cache-Control", "no-cache");
+    response.setHeader("X-Content-Type-Options", "nosniff");
+    response.type("application/javascript").sendFile("review-card-client.js", {
+      root: publicDirectory,
+      dotfiles: "allow"
+    });
+  });
   const consentConfig = deps.config;
   if (consentConfig !== undefined && hasConsentPageConfiguration(consentConfig)) {
     app.get("/oauth/consent", (request, response) => {

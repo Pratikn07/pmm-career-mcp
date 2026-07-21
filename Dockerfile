@@ -7,7 +7,7 @@ COPY tsconfig.json ./
 COPY drizzle ./drizzle
 COPY scripts ./scripts
 COPY src ./src
-RUN npm run build && npm prune --omit=dev
+RUN npm run build && test -f dist/public/review-card-client.js && npm prune --omit=dev
 
 FROM node:22-bookworm-slim AS runtime
 

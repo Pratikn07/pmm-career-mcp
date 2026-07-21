@@ -28,7 +28,7 @@ function canonicalHttpsOrigin(value: string, field: string): string {
   return parsed.origin;
 }
 
-function shell(baseUrl: string): string {
+function shell(baseUrl: string, storageOrigin: string): string {
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -37,13 +37,14 @@ function shell(baseUrl: string): string {
   <title>LinkedIn post review</title>
 </head>
 <body>
-  <main aria-labelledby="review-title">
+  <main id="review-root" data-storage-origin="${storageOrigin}" aria-labelledby="review-title">
     <h1 id="review-title">LinkedIn post review</h1>
     <section aria-labelledby="content-title">
       <h2 id="content-title">Exact draft</h2>
       <p id="post-text"></p>
       <dl>
         <dt>Visibility</dt><dd id="post-visibility"></dd>
+        <dt>Draft ID</dt><dd id="post-id"></dd>
         <dt>Version</dt><dd id="post-version"></dd>
         <dt>Checksum</dt><dd id="post-checksum"></dd>
         <dt>Preview expires</dt><dd id="preview-expiry"></dd>
@@ -55,6 +56,7 @@ function shell(baseUrl: string): string {
     </section>
     <section aria-labelledby="validation-title">
       <h2 id="validation-title">Validation</h2>
+      <p id="validation-status" aria-live="polite"></p>
       <ul id="validation-errors" aria-live="polite"></ul>
     </section>
     <footer>
@@ -70,7 +72,7 @@ function shell(baseUrl: string): string {
       <button id="confirm-publish" value="confirm">Publish this exact version</button>
     </form>
   </dialog>
-  <script type="module" src="${baseUrl}/review-card-client.js"></script>
+  <script defer src="${baseUrl}/review-card-client.js"></script>
 </body>
 </html>`;
 }
@@ -99,7 +101,7 @@ export function registerLinkedInReviewCardResource(
     contents: [{
       uri: LINKEDIN_REVIEW_CARD_URI,
       mimeType: "text/html+skybridge",
-      text: shell(baseUrl),
+      text: shell(baseUrl, supabaseUrl),
       _meta: { "openai/widgetCSP": csp }
     }]
   }));

@@ -19,6 +19,27 @@ it("copies the consent build script before building the Docker image", async () 
   expect(build).toBeGreaterThan(scriptsCopy);
 });
 
+it("builds and packages the review-card client bundle in Docker", async () => {
+  const [dockerfile, packageJson] = await Promise.all([
+    readFile(resolve(process.cwd(), "Dockerfile"), "utf8"),
+    readFile(resolve(process.cwd(), "package.json"), "utf8")
+  ]);
+  const scriptsCopy = dockerfile.indexOf("COPY scripts ./scripts");
+  const sourceCopy = dockerfile.indexOf("COPY src ./src");
+  const build = dockerfile.indexOf("RUN npm run build");
+
+  expect(scriptsCopy).toBeGreaterThan(-1);
+  expect(sourceCopy).toBeGreaterThan(-1);
+  expect(build).toBeGreaterThan(scriptsCopy);
+  expect(build).toBeGreaterThan(sourceCopy);
+  expect(JSON.parse(packageJson).scripts).toMatchObject({
+    "build:review-card": "node scripts/build-review-card.mjs"
+  });
+  expect(JSON.parse(packageJson).scripts.build).toContain("npm run build:review-card");
+  expect(dockerfile).toContain("test -f dist/public/review-card-client.js");
+  expect(dockerfile).toContain("COPY --from=build --chown=node:node /app/dist ./dist");
+});
+
 it("ships Postgres migrations and uses the readiness endpoint for Docker deployment health", async () => {
   const dockerfile = await readFile(resolve(process.cwd(), "Dockerfile"), "utf8");
 

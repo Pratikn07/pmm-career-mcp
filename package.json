@@ -7,9 +7,10 @@
     "doc": "docs"
   },
   "scripts": {
-    "build": "npm run build:server && npm run build:consent",
+    "build": "npm run build:server && npm run build:consent && npm run build:review-card",
     "build:server": "tsc -p tsconfig.json",
     "build:consent": "node scripts/build-consent-client.mjs",
+    "build:review-card": "node scripts/build-review-card.mjs",
     "pretest": "npm run build",
     "dev": "node --env-file-if-exists=.env --import tsx --watch src/index.ts",
     "start": "node --env-file-if-exists=.env dist/src/index.js",
