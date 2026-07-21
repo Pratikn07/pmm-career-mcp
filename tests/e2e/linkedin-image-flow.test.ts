@@ -5,6 +5,10 @@ import { afterEach, expect, it, vi } from "vitest";
 import type { RequestAuthContext } from "../../src/auth/request-context.js";
 import type { AppConfig } from "../../src/config.js";
 import { createCareerApplication, type CareerApplication } from "../../src/index.js";
+import {
+  createReviewCardController,
+  type ReviewCardView
+} from "../../src/review-card/controller.js";
 import type { ImageInspection } from "../../src/media/image-inspection.js";
 import type { DraftMediaStorage } from "../../src/media/storage.js";
 import { encryptJson } from "../../src/security/crypto.js";
@@ -14,7 +18,6 @@ import { E2E_NOW, YC_DIRECTORY_FIXTURE } from "./fixtures.js";
 const SUBJECT = "123e4567-e89b-42d3-a456-426614174000";
 const TOKEN_KEY = "a".repeat(64);
 const IMAGE_BYTES = Uint8Array.of(137, 80, 78, 71, 13, 10, 26, 10, 1, 2, 3, 4);
-const IMAGE_SHA256 = createHash("sha256").update(IMAGE_BYTES).digest("hex");
 const AUTH_CONTEXT: RequestAuthContext = Object.freeze({
   subject: SUBJECT,
   accessToken: "private-request-token"
@@ -118,14 +121,14 @@ function memoryStorage() {
   return { storage, objects };
 }
 
-function imageInspection(): ImageInspection {
+function imageInspection(bytes: Uint8Array<ArrayBufferLike> = IMAGE_BYTES): ImageInspection {
   return {
     mimeType: "image/png",
     width: 4,
     height: 3,
     frameCount: 1,
-    byteSize: IMAGE_BYTES.byteLength,
-    sha256: IMAGE_SHA256
+    byteSize: bytes.byteLength,
+    sha256: createHash("sha256").update(bytes).digest("hex")
   };
 }
 
@@ -147,8 +150,11 @@ async function createRuntime(input: {
       postUrn: "urn:li:share:12345"
     }))
   };
-  const downloadFile = vi.fn(async () => new Uint8Array(IMAGE_BYTES));
-  const inspectImage = vi.fn(async () => imageInspection());
+  const downloadFile = vi.fn(async (file: { file_id: string }) => {
+    const index = Number(file.file_id.match(/(\d+)$/)?.[1] ?? 1);
+    return Uint8Array.of(...IMAGE_BYTES, index);
+  });
+  const inspectImage = vi.fn(async (bytes: Uint8Array) => imageInspection(bytes));
   const mediaStorageFactory = vi.fn(() => input.storage);
   const application = await createCareerApplication({
     database,
@@ -185,7 +191,7 @@ async function connect(
   return connected;
 }
 
-async function draftAndAttach(client: Client) {
+async function draftAndAttach(client: Client, mediaCount = 1) {
   const companies = structuredData(await client.callTool({
     name: "search_yc_companies",
     arguments: { keyword: "Acme" }
@@ -201,24 +207,26 @@ async function draftAndAttach(client: Client) {
     arguments: {
       postId: text(draft.id),
       expectedVersion: integer(draft.version),
-      images: [{
-        download_url: "https://files.openai.example/generated.png",
-        file_id: "file-generated-1",
+      images: Array.from({ length: mediaCount }, (_, index) => ({
+        download_url: `https://files.openai.example/generated-${index + 1}.png`,
+        file_id: `file-generated-${index + 1}`,
         mime_type: "image/png",
-        file_name: "generated.png"
-      }],
-      altTexts: ["A product marketing launch dashboard"]
+        file_name: `generated-${index + 1}.png`
+      })),
+      altTexts: Array.from({ length: mediaCount }, (_, index) => (
+        `A product marketing launch dashboard ${index + 1}`
+      ))
     }
   })).post);
   return attached;
 }
 
-it("runs the morning image flow through the launcher and stops before exact preview or LinkedIn", async () => {
+it.each([1, 2, 3, 4])("hydrates %i ordered launcher images in the real card and stops before exact preview or LinkedIn", async (mediaCount) => {
   const { storage } = memoryStorage();
   const { application, database, linkedin, mediaStorageFactory, downloadFile, inspectImage } = await createRuntime({ storage });
   const { client } = await connect(application, AUTH_CONTEXT);
 
-  const attached = await draftAndAttach(client);
+  const attached = await draftAndAttach(client, mediaCount);
   const opened = await client.callTool({
     name: "open_linkedin_review_card",
     arguments: { postId: text(attached.id), version: integer(attached.version) }
@@ -228,13 +236,87 @@ it("runs the morning image flow through the launcher and stops before exact prev
   expect(record(structuredData(opened).post)).toMatchObject({
     id: attached.id,
     version: attached.version,
-    media: [{ position: 0, altText: "A product marketing launch dashboard" }]
+    media: Array.from({ length: mediaCount }, (_, position) => ({
+      position,
+      altText: `A product marketing launch dashboard ${position + 1}`
+    }))
   });
+  const views: ReviewCardView[] = [];
+  const errors: string[] = [];
+  const structuredContent = opened.structuredContent;
+  const controller = createReviewCardController({
+    storageOrigin: "https://project-ref.supabase.co",
+    globals: {
+      snapshot: () => ({
+        toolOutput: structuredContent,
+        toolResponseMetadata: {
+          status: "complete",
+          call_tool_result: structuredContent,
+          mcp_tool_result: {
+            content: opened.content,
+            structuredContent,
+            _meta: opened._meta
+          }
+        }
+      }),
+      subscribe: () => () => undefined
+    },
+    callTool: vi.fn(),
+    ui: {
+      render: (view) => views.push(view),
+      showError: (message) => errors.push(message),
+      setBusy: vi.fn(),
+      setPublishingEnabled: vi.fn(),
+      showTerminal: vi.fn(),
+      confirm: vi.fn(async () => false)
+    }
+  });
+  await controller.start();
+  expect(errors).toEqual([]);
+  expect(views[0]?.media.map(({ position, altText, url }) => ({ position, altText, url }))).toEqual(
+    Array.from({ length: mediaCount }, (_, position) => ({
+      position,
+      altText: `A product marketing launch dashboard ${position + 1}`,
+      url: expect.stringContaining("/storage/v1/object/sign/linkedin-draft-media/")
+    }))
+  );
   expect(await database.previews.listForPostDraft(text(attached.versionId))).toEqual([]);
   expect(await database.publishAttempts.listForPostDraft(text(attached.versionId))).toEqual([]);
   expect(mediaStorageFactory).toHaveBeenCalledWith(expect.any(Object), AUTH_CONTEXT);
-  expect(downloadFile).toHaveBeenCalledOnce();
-  expect(inspectImage).toHaveBeenCalledOnce();
+  expect(downloadFile).toHaveBeenCalledTimes(mediaCount);
+  expect(inspectImage).toHaveBeenCalledTimes(mediaCount);
+  expect(linkedin.initializeImage).not.toHaveBeenCalled();
+  expect(linkedin.uploadImage).not.toHaveBeenCalled();
+  expect(linkedin.createPost).not.toHaveBeenCalled();
+});
+
+it("moves a new text-only draft directly through launcher and exact preview without a forced revision", async () => {
+  const { storage } = memoryStorage();
+  const { application, database, linkedin } = await createRuntime({ storage });
+  const { client } = await connect(application, AUTH_CONTEXT);
+  const draft = record(structuredData(await client.callTool({
+    name: "draft_linkedin_post",
+    arguments: { text: "Line one\nLine  two", visibility: "CONNECTIONS" }
+  })).post);
+  const opened = await client.callTool({
+    name: "open_linkedin_review_card",
+    arguments: { postId: text(draft.id), version: integer(draft.version) }
+  });
+  expect(opened.isError).not.toBe(true);
+  expect((opened._meta as Record<string, unknown>).mediaUrls).toEqual([]);
+  expect(await database.previews.listForPostDraft(text(draft.versionId))).toEqual([]);
+
+  const exact = await client.callTool({
+    name: "create_exact_linkedin_preview",
+    arguments: { postId: text(draft.id), version: integer(draft.version) }
+  });
+  expect(exact.isError).not.toBe(true);
+  expect(record(structuredData(exact).preview)).toMatchObject({
+    postId: draft.id,
+    version: 1,
+    text: "Line one\nLine  two",
+    media: []
+  });
   expect(linkedin.initializeImage).not.toHaveBeenCalled();
   expect(linkedin.uploadImage).not.toHaveBeenCalled();
   expect(linkedin.createPost).not.toHaveBeenCalled();
@@ -265,8 +347,10 @@ it("creates an exact preview only interactively and both disabled switches stop 
   await first.database.oauthTokens.upsert({
     provider: "linkedin",
     ciphertext: JSON.stringify(encryptJson({
+      credentialVersion: 1,
       accessToken: "test-linkedin-access-token",
-      authorUrn: "urn:li:person:e2e-author"
+      authorUrn: "urn:li:person:e2e-author",
+      grantedScopes: ["openid", "profile", "w_member_social"]
     }, TOKEN_KEY)),
     expiresAt: "2099-01-01T00:00:00.000Z"
   });
@@ -299,12 +383,23 @@ it("creates an exact preview only interactively and both disabled switches stop 
 
 it("keeps local no-auth text flows working while private-media and unavailable LinkedIn paths fail closed", async () => {
   const database = await createTestDatabase();
-  const mediaStorageFactory = vi.fn(() => memoryStorage().storage);
+  const localStorage = memoryStorage().storage;
+  const mediaStorageFactory = vi.fn(() => localStorage);
+  const mediaDownloadFile = vi.fn(async () => new Uint8Array(IMAGE_BYTES));
+  const mediaInspectImage = vi.fn(async () => imageInspection());
+  const linkedin = {
+    initializeImage: vi.fn(),
+    uploadImage: vi.fn(),
+    createPost: vi.fn()
+  };
   const application = await createCareerApplication({
     database,
     config: localNoAuthConfig(),
     ycSource: { fetch: async () => YC_DIRECTORY_FIXTURE },
-    mediaStorageFactory
+    mediaStorageFactory,
+    mediaDownloadFile,
+    mediaInspectImage,
+    linkedinPublishingClient: linkedin
   });
   runtimes.push({ application, database });
   const { client } = await connect(application, undefined);
@@ -326,12 +421,20 @@ it("keeps local no-auth text flows working while private-media and unavailable L
       }
     },
     {
+      name: "set_linkedin_post_images",
+      arguments: { postId: text(draft.id), expectedVersion: integer(draft.version), media: [] }
+    },
+    {
       name: "open_linkedin_review_card",
       arguments: { postId: text(draft.id), version: integer(draft.version) }
     },
     {
       name: "create_exact_linkedin_preview",
       arguments: { postId: text(draft.id), version: integer(draft.version) }
+    },
+    {
+      name: "publish_exact_linkedin_post",
+      arguments: { approvalCapability: "a".repeat(43) }
     }
   ]) {
     const result = await client.callTool(call);
@@ -349,6 +452,65 @@ it("keeps local no-auth text flows working while private-media and unavailable L
     data: { error: { code: "OAUTH_PROVIDER_ERROR" } }
   });
   expect(mediaStorageFactory).not.toHaveBeenCalled();
+  expect(mediaDownloadFile).not.toHaveBeenCalled();
+  expect(mediaInspectImage).not.toHaveBeenCalled();
+  expect(localStorage.upload).not.toHaveBeenCalled();
+  expect(localStorage.download).not.toHaveBeenCalled();
+  expect(localStorage.createSignedUrl).not.toHaveBeenCalled();
+  expect(localStorage.remove).not.toHaveBeenCalled();
+  expect(linkedin.initializeImage).not.toHaveBeenCalled();
+  expect(linkedin.uploadImage).not.toHaveBeenCalled();
+  expect(linkedin.createPost).not.toHaveBeenCalled();
+});
+
+it.each([
+  ["absent scope evidence", {
+    accessToken: "legacy-token",
+    authorUrn: "urn:li:person:e2e-author"
+  }],
+  ["partial scope evidence", {
+    credentialVersion: 1,
+    accessToken: "partial-token",
+    authorUrn: "urn:li:person:e2e-author",
+    grantedScopes: ["openid", "profile"]
+  }]
+])("leaves exact preview unconsumed with zero Storage or LinkedIn calls for %s", async (_label, credential) => {
+  const { storage } = memoryStorage();
+  const runtime = await createRuntime({
+    storage,
+    linkedinPublishEnabled: true,
+    linkedinImagePublishEnabled: true
+  });
+  const { client } = await connect(runtime.application, AUTH_CONTEXT);
+  const attached = await draftAndAttach(client);
+  const exact = await client.callTool({
+    name: "create_exact_linkedin_preview",
+    arguments: { postId: text(attached.id), version: integer(attached.version) }
+  });
+  const capability = text((exact._meta as Record<string, unknown>).approvalCapability);
+  await runtime.database.oauthTokens.upsert({
+    provider: "linkedin",
+    ciphertext: JSON.stringify(encryptJson(credential, TOKEN_KEY)),
+    expiresAt: "2099-01-01T00:00:00.000Z"
+  });
+  const connection = record(structuredData(await client.callTool({
+    name: "get_linkedin_connection_status",
+    arguments: {}
+  })).connection);
+  expect(connection).toMatchObject({ connected: true, valid: false });
+
+  const result = await client.callTool({
+    name: "publish_exact_linkedin_post",
+    arguments: { approvalCapability: capability }
+  });
+  expect(result.isError).toBe(true);
+  expect(result.structuredContent).toEqual({ data: { error: { code: "OAUTH_PROVIDER_ERROR" } } });
+  expect((await runtime.database.previews.listForPostDraft(text(attached.versionId)))[0]?.consumedAt).toBeNull();
+  expect(await runtime.database.publishAttempts.listForPostDraft(text(attached.versionId))).toEqual([]);
+  expect(storage.download).not.toHaveBeenCalled();
+  expect(runtime.linkedin.initializeImage).not.toHaveBeenCalled();
+  expect(runtime.linkedin.uploadImage).not.toHaveBeenCalled();
+  expect(runtime.linkedin.createPost).not.toHaveBeenCalled();
 });
 
 it("returns generic OAuth errors before claims or network calls when LinkedIn adapters are unavailable", async () => {

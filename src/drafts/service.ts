@@ -236,12 +236,20 @@ export function createDraftService(database: CareerDatabase) {
       }
 
       try {
-        return publicPostDraft(await database.postDrafts.createVersion({
+        const created = await database.postDrafts.createVersionWithMedia({
           text,
           visibility: input.visibility,
-          checksum: (version) => computePostChecksum(text, version),
-          state: "draft"
-        }));
+          checksum: (version, draftId) => checksumLinkedInPost({
+            draftId,
+            version,
+            text,
+            visibility: input.visibility,
+            media: []
+          }),
+          state: "draft",
+          media: []
+        });
+        return publicPostDraft(created.post, created.media);
       } catch (error) {
         if (error instanceof DomainError) {
           throw error;

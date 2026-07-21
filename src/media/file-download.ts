@@ -34,6 +34,7 @@ export type RequestDownloadHop = (
 export type DownloadOpenAiFileDependencies = Readonly<{
   resolveAddresses: ResolveDownloadAddresses;
   requestHop: RequestDownloadHop;
+  httpsRequest?: typeof https.request;
 }>;
 
 const MAX_BYTES = 20 * 1024 * 1024;
@@ -54,12 +55,16 @@ async function defaultResolveAddresses(hostname: string): Promise<string[]> {
   return results.map(({ address }) => address);
 }
 
-function createPinnedLookup(address: string): LookupFunction {
+function createPinnedLookup(expectedHostname: string, address: string): LookupFunction {
   const family = isIP(address);
   if (family !== 4 && family !== 6) {
     throw new Error("Resolved address is not a valid IP");
   }
-  return (_hostname, options, callback) => {
+  return (hostname, options, callback) => {
+    if (hostname !== expectedHostname) {
+      callback(new Error("Pinned lookup hostname mismatch"), address, family);
+      return;
+    }
     if (options.all === true) {
       callback(null, [{ address, family }]);
       return;
@@ -71,19 +76,21 @@ function createPinnedLookup(address: string): LookupFunction {
 async function defaultRequestHop(
   url: URL,
   address: string,
-  signal: AbortSignal
+  signal: AbortSignal,
+  requestHttps: typeof https.request
 ): Promise<DownloadFileHop> {
   const hostname = hostnameWithoutBrackets(url);
   return await new Promise<DownloadFileHop>((resolve, reject) => {
-    const request = https.request(url, {
+    const request = requestHttps(url, {
       method: "GET",
       agent: false,
       signal,
       headers: {
         Accept: "image/jpeg, image/png, image/gif",
+        Host: url.host,
         "User-Agent": "pmm-career-mcp/1.0 draft-image-downloader"
       },
-      lookup: createPinnedLookup(address),
+      lookup: createPinnedLookup(hostname, address),
       ...(isIP(hostname) === 0 ? { servername: hostname } : {})
     }, (response) => {
       const location = response.headers.location;
@@ -216,7 +223,10 @@ export async function downloadOpenAiFile(
   dependencies: Partial<DownloadOpenAiFileDependencies> = {}
 ): Promise<Uint8Array> {
   const resolveAddresses = dependencies.resolveAddresses ?? defaultResolveAddresses;
-  const requestHop = dependencies.requestHop ?? defaultRequestHop;
+  const requestHttps = dependencies.httpsRequest ?? https.request;
+  const requestHop = dependencies.requestHop ?? ((url, address, signal) => (
+    defaultRequestHop(url, address, signal, requestHttps)
+  ));
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
   timeout.unref();

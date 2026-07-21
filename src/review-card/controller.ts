@@ -1,4 +1,5 @@
 const GENERIC_ERROR = "Unable to complete this action.";
+const EXPIRED_ERROR = "Exact preview expired. Create a new exact preview before publishing.";
 const CAPABILITY_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const CHECKSUM_PATTERN = /^[0-9a-f]{64}$/;
@@ -71,6 +72,7 @@ export type ReviewCardControllerDependencies = Readonly<{
   storageOrigin: string;
   globals: ReviewCardGlobalSource;
   metadataTimeoutMs?: number;
+  now?: () => Date;
   callTool(name: string, arguments_: Record<string, unknown>): Promise<unknown>;
   ui: ReviewCardUi;
 }>;
@@ -517,10 +519,66 @@ export function createReviewCardController(
   let approvalCapability: string | undefined;
   let busy = false;
   let terminal = false;
+  let expiryTimer: ReturnType<typeof setTimeout> | undefined;
+  const now = dependencies.now ?? (() => new Date());
+
+  function previewExpired(post: SafePost): boolean {
+    if (post.expiresAt === null) return true;
+    let current: Date;
+    try {
+      current = now();
+    } catch {
+      return true;
+    }
+    return !(current instanceof Date)
+      || !Number.isFinite(current.getTime())
+      || Date.parse(post.expiresAt) <= current.getTime();
+  }
+
+  function clearExpiryTimer(): void {
+    if (expiryTimer === undefined) return;
+    clearTimeout(expiryTimer);
+    expiryTimer = undefined;
+  }
 
   function disablePublishing(): void {
+    clearExpiryTimer();
     approvalCapability = undefined;
     dependencies.ui.setPublishingEnabled(false);
+  }
+
+  function scheduleExpiry(post: SafePost): boolean {
+    clearExpiryTimer();
+    if (post.expiresAt === null) return false;
+    let current: Date;
+    try {
+      current = now();
+    } catch {
+      return false;
+    }
+    const currentTime = current instanceof Date ? current.getTime() : Number.NaN;
+    const expiresAt = Date.parse(post.expiresAt);
+    if (!Number.isFinite(currentTime) || !Number.isFinite(expiresAt) || expiresAt <= currentTime) {
+      return false;
+    }
+    const delay = Math.min(expiresAt - currentTime, 2_147_483_647);
+    expiryTimer = setTimeout(() => {
+      expiryTimer = undefined;
+      if (
+        terminal
+        || approvalCapability === undefined
+        || currentPost?.versionId !== post.versionId
+        || currentPost.expiresAt !== post.expiresAt
+      ) return;
+      if (!previewExpired(post)) {
+        scheduleExpiry(post);
+        return;
+      }
+      disablePublishing();
+      dependencies.ui.showError(EXPIRED_ERROR);
+    }, delay);
+    (expiryTimer as unknown as { unref?: () => void }).unref?.();
+    return true;
   }
 
   function genericError(): void {
@@ -590,7 +648,12 @@ export function createReviewCardController(
         currentPost = preview;
         dependencies.ui.render(view(preview, metadata.urls));
         approvalCapability = metadata.capability;
-        dependencies.ui.setPublishingEnabled(true);
+        if (!scheduleExpiry(preview)) {
+          disablePublishing();
+          dependencies.ui.showError(EXPIRED_ERROR);
+        } else {
+          dependencies.ui.setPublishingEnabled(true);
+        }
       } catch {
         disablePublishing();
         genericError();
@@ -609,6 +672,11 @@ export function createReviewCardController(
         genericError();
         return;
       }
+      if (previewExpired(selectedPost)) {
+        disablePublishing();
+        dependencies.ui.showError(EXPIRED_ERROR);
+        return;
+      }
       busy = true;
       dependencies.ui.setBusy(true);
       let dispatched = false;
@@ -619,6 +687,11 @@ export function createReviewCardController(
           visibility: selectedPost.visibility
         });
         if (!confirmed) return;
+        if (previewExpired(selectedPost)) {
+          disablePublishing();
+          dependencies.ui.showError(EXPIRED_ERROR);
+          return;
+        }
         disablePublishing();
         terminal = true;
         dispatched = true;

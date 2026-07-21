@@ -280,7 +280,7 @@ export async function createCareerApplication(
         const token = await database.oauthTokens.getByProvider("linkedin");
         return {
           connected: token !== undefined,
-          valid: token !== undefined && (token.expiresAt === null || Date.parse(token.expiresAt) > now().getTime()),
+          valid: token !== undefined && await connectionValid(),
           publishingEnabled: options.config.linkedinPublishEnabled,
           imagePublishingEnabled: options.config.linkedinImagePublishEnabled
         };

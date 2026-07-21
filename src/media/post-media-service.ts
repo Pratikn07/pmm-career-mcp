@@ -40,6 +40,7 @@ export type PostMediaServiceDependencies = Readonly<{
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MAX_MEDIA = 4;
 const MAX_ALT_TEXT_CHARACTERS = 120;
+const SIGNED_URL_LIFETIME_SECONDS = 900;
 
 export type MediaPostDraftVersion = Omit<PostDraftVersion, "media"> & {
   media: readonly PostDraftMediaVersion[];
@@ -310,6 +311,62 @@ export function createPostMediaService(
       }
       const result = await drafts.getPostVersion(id, version);
       return result === undefined ? undefined : withMedia(result);
+    },
+
+    async createSignedUrls(requested: MediaPostDraftVersion): Promise<readonly string[]> {
+      const id = postId(requested.id);
+      const version = expectedVersion(requested.version);
+      const row = await database.postDrafts.getVersion(id, version);
+      if (row === undefined) {
+        throw new DomainError("NOT_FOUND", "Post draft was not found", { entity: "post_draft" });
+      }
+      const storedMedia = await database.postDraftMedia.listForVersion(row.id, row.version);
+      const postMatches = row.id === requested.versionId
+        && row.draftId === requested.id
+        && row.text === requested.text
+        && row.visibility === requested.visibility
+        && row.version === requested.version
+        && row.checksum === requested.checksum
+        && row.state === requested.state
+        && row.createdAt === requested.createdAt
+        && row.updatedAt === requested.updatedAt;
+      const mediaIds = new Set<string>();
+      const mediaMatches = storedMedia.length <= MAX_MEDIA
+        && storedMedia.length === requested.media.length
+        && storedMedia.every((stored, position) => {
+          const selected = requested.media[position];
+          const normalizedMediaId = stored.mediaId.toLowerCase();
+          const matches = selected !== undefined
+            && stored.position === position
+            && stored.postDraftId === row.id
+            && stored.version === row.version
+            && stored.ownerSubject.toLowerCase() === subject
+            && stored.objectPath.startsWith(`${subject}/`)
+            && !mediaIds.has(normalizedMediaId)
+            && stored.position === selected.position
+            && stored.mediaId === selected.mediaId
+            && stored.altText === selected.altText
+            && stored.sha256 === selected.sha256
+            && stored.mimeType === selected.mimeType
+            && stored.byteSize === selected.byteSize
+            && stored.width === selected.width
+            && stored.height === selected.height
+            && stored.frameCount === selected.frameCount
+            && stored.originalFilename === selected.originalFilename
+            && stored.createdAt === selected.createdAt;
+          mediaIds.add(normalizedMediaId);
+          return matches;
+        });
+      if (!postMatches || !mediaMatches) {
+        throw safePersistenceError();
+      }
+      try {
+        return await Promise.all(storedMedia.map(({ objectPath }) => (
+          dependencies.storage.createSignedUrl(objectPath, SIGNED_URL_LIFETIME_SECONDS)
+        )));
+      } catch {
+        throw new DomainError("MEDIA_STORAGE_ERROR", "Draft media storage operation failed");
+      }
     }
   };
 }

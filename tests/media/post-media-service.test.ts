@@ -101,11 +101,71 @@ beforeEach(() => {
   inspectImage.mockClear();
   upload.mockClear();
   remove.mockClear();
+  storage.createSignedUrl.mockReset();
+  storage.createSignedUrl.mockImplementation(async (path: string) => (
+    `https://project.supabase.co/storage/v1/object/sign/linkedin-draft-media/${encodeURIComponent(path)}`
+  ));
 });
 afterEach(async () => db.resetForTests());
 afterAll(async () => db.close());
 
 describe("post media service", () => {
+  it("reloads and signs one exact owned immutable path per image in display order for 900 seconds", async () => {
+    const first = await textDraft();
+    const attached = await service().attachFiles({
+      postId: first.draftId,
+      expectedVersion: 1,
+      images: files.slice(0, 3),
+      altTexts: ["One", "Two", "Three"]
+    });
+    const rows = await db.postDraftMedia.listForVersion(attached.versionId, attached.version);
+
+    await expect(service().createSignedUrls(attached)).resolves.toEqual(rows.map(({ objectPath }) => (
+      `https://project.supabase.co/storage/v1/object/sign/linkedin-draft-media/${encodeURIComponent(objectPath)}`
+    )));
+    expect(storage.createSignedUrl).toHaveBeenCalledTimes(3);
+    expect(storage.createSignedUrl.mock.calls).toEqual(rows.map(({ objectPath }) => [objectPath, 900]));
+  });
+
+  it.each([
+    ["caller metadata", (row: Awaited<ReturnType<typeof db.postDraftMedia.listForVersion>>[number]) => ({
+      publicAltText: `${row.altText} changed`
+    })],
+    ["dense order", (row: Awaited<ReturnType<typeof db.postDraftMedia.listForVersion>>[number]) => ({
+      storedPosition: row.position + 1
+    })],
+    ["owner", () => ({ storedOwner: randomUUID() })],
+    ["subject path", () => ({ storedPath: `${randomUUID()}/aa/${randomUUID()}.png` })]
+  ])("fails closed before signing when %s does not match the immutable owner-scoped version", async (_label, mutate) => {
+    const first = await textDraft();
+    const attached = await service().attachFiles({
+      postId: first.draftId,
+      expectedVersion: 1,
+      images: [files[0]!],
+      altTexts: ["Exact alt text"]
+    });
+    const row = (await db.postDraftMedia.listForVersion(attached.versionId, attached.version))[0]!;
+    const mutation = mutate(row);
+    const corruptDatabase = {
+      ...db,
+      postDraftMedia: {
+        ...db.postDraftMedia,
+        listForVersion: vi.fn(async () => [{
+          ...row,
+          position: "storedPosition" in mutation ? mutation.storedPosition : row.position,
+          ownerSubject: "storedOwner" in mutation ? mutation.storedOwner : row.ownerSubject,
+          objectPath: "storedPath" in mutation ? mutation.storedPath : row.objectPath
+        }])
+      }
+    } as CareerDatabase;
+    const requested = "publicAltText" in mutation
+      ? { ...attached, media: [{ ...attached.media[0]!, altText: mutation.publicAltText }] }
+      : attached;
+
+    await expectCode(() => service(corruptDatabase).createSignedUrls(requested), "DATA_INTEGRITY");
+    expect(storage.createSignedUrl).not.toHaveBeenCalled();
+  });
+
   it.each([1, 2, 3, 4])("attaches %i unchanged files in order as one immutable version", async (count) => {
     const first = await textDraft();
     const originals = files.slice(0, count).map((file) => new Uint8Array(bytesById.get(file.file_id)!));

@@ -187,7 +187,7 @@ describe("outreach drafts", () => {
 });
 
 describe("post drafts", () => {
-  it("creates a text-only v1 draft with logical and version-row IDs made explicit", async () => {
+  it("creates a text-only whole-post v2 draft with logical and version-row IDs made explicit", async () => {
     const input = { text: "  Launch update\r\nSecond line  ", visibility: "PUBLIC" as const };
     const before = structuredClone(input);
 
@@ -202,7 +202,13 @@ describe("post drafts", () => {
     expect(post.id).toMatch(/^[0-9a-f-]{36}$/);
     expect(post.versionId).toMatch(/^[0-9a-f-]{36}$/);
     expect(post.id).not.toBe(post.versionId);
-    expect(post.checksum).toBe(computePostChecksum(post.text, post.version));
+    expect(post.checksum).toBe(checksumLinkedInPost({
+      draftId: post.id,
+      version: post.version,
+      text: post.text,
+      visibility: post.visibility,
+      media: []
+    }));
     expect(new Date(post.createdAt).toISOString()).toBe(post.createdAt);
     expect(new Date(post.updatedAt).toISOString()).toBe(post.updatedAt);
     expect((await db.postDrafts.getVersion(post.id, 1))).toMatchObject({
@@ -388,15 +394,13 @@ describe("post drafts", () => {
     );
     expect(revisions.at(-1)?.version).toBe(21);
     for (const post of history) {
-      expect(post.checksum).toBe(post.version === 1
-        ? computePostChecksum(post.text, post.version)
-        : checksumLinkedInPost({
-            draftId: post.id,
-            version: post.version,
-            text: post.text,
-            visibility: post.visibility,
-            media: []
-          }));
+      expect(post.checksum).toBe(checksumLinkedInPost({
+        draftId: post.id,
+        version: post.version,
+        text: post.text,
+        visibility: post.visibility,
+        media: []
+      }));
     }
   });
 

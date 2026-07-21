@@ -85,8 +85,10 @@ describe("LinkedIn OAuth", () => {
     expect(JSON.stringify(stored)).not.toContain("access-token-that-must-not-leak");
     expect(JSON.stringify(stored)).not.toContain("refresh-token-that-must-not-leak");
     expect(decryptJson(JSON.parse(stored.ciphertext), KEY)).toEqual({
+      credentialVersion: 1,
       accessToken: "access-token-that-must-not-leak",
-      authorUrn: "urn:li:person:person-123"
+      authorUrn: "urn:li:person:person-123",
+      grantedScopes: ["openid", "profile", "w_member_social"]
     });
     expect(decryptJson(JSON.parse(stored.refreshMetadataCiphertext!), KEY)).toEqual({
       refreshToken: "refresh-token-that-must-not-leak"
@@ -95,6 +97,51 @@ describe("LinkedIn OAuth", () => {
       code: "OAUTH_STATE_INVALID"
     });
     expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    ["a partial grant", "openid profile"],
+    ["an unexpected grant", "openid profile w_member_social email"],
+    ["a duplicate grant", "openid profile w_member_social profile"],
+    ["an empty grant", ""]
+  ])("rejects %s reported by the token endpoint before identity lookup or persistence", async (_label, scope) => {
+    const fetch = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({
+      access_token: "scope-test-token",
+      expires_in: 3600,
+      scope
+    }), { status: 200, headers: { "content-type": "application/json" } }));
+    const service = oauth(fetch);
+    const state = new URL(service.createAuthorizationUrl()).searchParams.get("state")!;
+
+    await expect(service.exchangeCallback({ code: "authorization-code", state })).rejects.toMatchObject({
+      code: "OAUTH_PROVIDER_ERROR"
+    });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(await db.oauthTokens.getByProvider("linkedin")).toBeUndefined();
+  });
+
+  it("accepts the exact required scope set when LinkedIn reports it in a different order", async () => {
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        access_token: "exact-scope-token",
+        expires_in: 3600,
+        scope: "w_member_social openid profile"
+      }), { status: 200, headers: { "content-type": "application/json" } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ sub: "exact-person" }), {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      }));
+    const service = oauth(fetch);
+    const state = new URL(service.createAuthorizationUrl()).searchParams.get("state")!;
+
+    await expect(service.exchangeCallback({ code: "authorization-code", state })).resolves.toEqual({
+      connected: true
+    });
+    const stored = (await db.oauthTokens.getByProvider("linkedin"))!;
+    expect(decryptJson(JSON.parse(stored.ciphertext), KEY)).toMatchObject({
+      credentialVersion: 1,
+      grantedScopes: ["openid", "profile", "w_member_social"]
+    });
   });
 
   it("rejects expired state before exchanging a code", async () => {

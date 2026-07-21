@@ -5,8 +5,11 @@ import { expect, it, vi } from "vitest";
 import { createCareerMcpServer, type CareerMcpDependencies } from "../../src/mcp/server.js";
 import { createHttpApp } from "../../src/http/app.js";
 import {
+  attachLinkedInPostImagesInput,
+  attachLinkedInPostImagesOutput,
   rankNetworkingTargetsInput,
-  saveTargetInput
+  saveTargetInput,
+  setLinkedInPostImagesInput
 } from "../../src/mcp/schemas.js";
 import { scoreTarget, type ScoreTargetInput } from "../../src/ranking/score-target.js";
 import request from "supertest";
@@ -46,6 +49,54 @@ const expectedTools = [
 ] as const;
 
 const FIXED_NOW = new Date("2026-07-17T00:00:00.000Z");
+
+it("counts LinkedIn image alt text by Unicode code point in input and output schemas", () => {
+  const id = "123e4567-e89b-12d3-a456-426614174000";
+  const alt120 = "🙂".repeat(120);
+  const alt121 = `${alt120}🙂`;
+  const attach = (altText: string) => ({
+    postId: id,
+    expectedVersion: 1,
+    images: [{ download_url: "https://files.example/image.png", file_id: "file-1" }],
+    altTexts: [altText]
+  });
+  const set = (altText: string) => ({
+    postId: id,
+    expectedVersion: 1,
+    media: [{ mediaId: id, altText }]
+  });
+  const output = (altText: string) => ({ data: { post: {
+    id,
+    versionId: "123e4567-e89b-12d3-a456-426614174001",
+    text: "Exact post",
+    visibility: "CONNECTIONS",
+    version: 1,
+    checksum: "a".repeat(64),
+    state: "draft",
+    createdAt: FIXED_NOW.toISOString(),
+    updatedAt: FIXED_NOW.toISOString(),
+    media: [{
+      position: 0,
+      mediaId: id,
+      altText,
+      sha256: "b".repeat(64),
+      mimeType: "image/png",
+      byteSize: 1,
+      width: 1,
+      height: 1,
+      frameCount: 1,
+      originalFilename: null,
+      createdAt: FIXED_NOW.toISOString()
+    }]
+  } } });
+
+  expect(attachLinkedInPostImagesInput.safeParse(attach(alt120)).success).toBe(true);
+  expect(setLinkedInPostImagesInput.safeParse(set(alt120)).success).toBe(true);
+  expect(attachLinkedInPostImagesOutput.safeParse(output(alt120)).success).toBe(true);
+  expect(attachLinkedInPostImagesInput.safeParse(attach(alt121)).success).toBe(false);
+  expect(setLinkedInPostImagesInput.safeParse(set(alt121)).success).toBe(false);
+  expect(attachLinkedInPostImagesOutput.safeParse(output(alt121)).success).toBe(false);
+});
 
 function scoringTarget(overrides: Partial<ScoreTargetInput> = {}): ScoreTargetInput {
   return {

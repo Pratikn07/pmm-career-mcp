@@ -1,4 +1,6 @@
 import { Readable } from "node:stream";
+import { EventEmitter } from "node:events";
+import * as https from "node:https";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DomainError } from "../../src/domain/errors.js";
 import {
@@ -73,6 +75,69 @@ afterEach(() => {
 });
 
 describe("downloadOpenAiFile", () => {
+  it("pins the default HTTPS transport to each validated address with fresh redirect requests", async () => {
+    const responses = [
+      Object.assign(Readable.from([]), {
+        statusCode: 302,
+        headers: { location: "https://next.example/image.png" }
+      }),
+      Object.assign(Readable.from([Uint8Array.of(1, 2, 3)]), {
+        statusCode: 200,
+        headers: {}
+      })
+    ];
+    const requests: EventEmitter[] = [];
+    const httpsRequest = vi.fn(((url: URL, options: https.RequestOptions, callback: (response: never) => void) => {
+      const request = new EventEmitter() as EventEmitter & { end(): void };
+      request.end = () => callback(responses.shift() as never);
+      requests.push(request);
+      return request;
+    }) as unknown as typeof https.request);
+    const resolveAddresses = vi.fn(async (hostname: string) => (
+      hostname === "next.example" ? [PUBLIC_IPV6] : [PUBLIC_IPV4]
+    ));
+
+    await expect(downloadOpenAiFile(file, {
+      resolveAddresses,
+      httpsRequest: httpsRequest as unknown as typeof https.request
+    }))
+      .resolves.toEqual(Uint8Array.of(1, 2, 3));
+
+    expect(httpsRequest).toHaveBeenCalledTimes(2);
+    expect(requests[0]).not.toBe(requests[1]);
+    const calls = httpsRequest.mock.calls as unknown as Array<[URL, https.RequestOptions]>;
+    expect(calls.map(([url]) => url.hostname)).toEqual(["files.openai.example", "next.example"]);
+    for (const [index, [, options]] of calls.entries()) {
+      const hostname = index === 0 ? "files.openai.example" : "next.example";
+      const address = index === 0 ? PUBLIC_IPV4 : PUBLIC_IPV6;
+      expect(options).toMatchObject({
+        method: "GET",
+        agent: false,
+        servername: hostname,
+        headers: expect.objectContaining({ Host: hostname })
+      });
+      expect(options.signal).toBeInstanceOf(AbortSignal);
+      const lookup = options.lookup!;
+      const all = await new Promise<unknown>((resolve, reject) => lookup(
+        hostname,
+        { all: true },
+        (error, result) => error ? reject(error) : resolve(result)
+      ));
+      expect(all).toEqual([{ address, family: index === 0 ? 4 : 6 }]);
+      const single = await new Promise<unknown>((resolve, reject) => lookup(
+        hostname,
+        {},
+        (error, result, family) => error ? reject(error) : resolve({ address: result, family })
+      ));
+      expect(single).toEqual({ address, family: index === 0 ? 4 : 6 });
+      await expect(new Promise((resolve, reject) => lookup(
+        "rebound.example",
+        {},
+        (error, result) => error ? reject(error) : resolve(result)
+      ))).rejects.toThrow("hostname");
+    }
+  });
+
   it("downloads an HTTPS file through one selected address only after validating every DNS answer", async () => {
     const bytes = Uint8Array.of(1, 2, 3, 4);
     const resolveAddresses = vi.fn(async () => [PUBLIC_IPV4, PUBLIC_IPV6]);

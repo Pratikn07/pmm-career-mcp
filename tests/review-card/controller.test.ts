@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createReviewCardController,
   type PublishTerminalView,
@@ -15,6 +15,7 @@ const capability = "a".repeat(43);
 const storageOrigin = "https://project.supabase.co";
 const signedUrl = `${storageOrigin}/storage/v1/object/sign/linkedin-draft-media/private-image?token=signed`;
 const GENERIC_ERROR = "Unable to complete this action.";
+const EXPIRED_ERROR = "Exact preview expired. Create a new exact preview before publishing.";
 
 const media = [{
   position: 0,
@@ -128,9 +129,10 @@ type HarnessOptions = {
   previewCallResult?: unknown;
   publishResult?: unknown;
   publishThrows?: string;
-  confirmation?: boolean | Promise<boolean>;
+  confirmation?: boolean | Promise<boolean> | (() => boolean | Promise<boolean>);
   timeoutMs?: number;
   throwOnSubscription?: number;
+  now?: () => Date;
 };
 
 function harness(options: HarnessOptions = {}) {
@@ -152,7 +154,9 @@ function harness(options: HarnessOptions = {}) {
     showTerminal: (value) => terminals.push(value),
     confirm: async (details) => {
       confirmations.push(details);
-      return await (options.confirmation ?? true);
+      return await (typeof options.confirmation === "function"
+        ? options.confirmation()
+        : options.confirmation ?? true);
     }
   };
   const callTool = vi.fn(async (name: string) => {
@@ -181,7 +185,8 @@ function harness(options: HarnessOptions = {}) {
     globals,
     metadataTimeoutMs: options.timeoutMs ?? 20,
     callTool,
-    ui
+    ui,
+    now: options.now ?? (() => new Date("2026-07-19T12:00:00.000Z"))
   });
   return {
     controller,
@@ -203,6 +208,10 @@ async function readyForPublish(result: ReturnType<typeof harness>): Promise<void
   result.callTool.mockClear();
 }
 
+afterEach(() => {
+  vi.useRealTimers();
+});
+
 describe("LinkedIn review-card controller", () => {
   it("hydrates the canonical launcher envelope without calling any tool", async () => {
     const result = harness();
@@ -219,6 +228,22 @@ describe("LinkedIn review-card controller", () => {
       previewExpiresAt: null
     })]);
     expect(result.publishingEnabled.at(-1)).toBe(false);
+  });
+
+  it("preserves multiline text and repeated spaces for exact pre-wrap rendering", async () => {
+    const exactText = "Line one\nLine  two";
+    const output = structuredClone(draftOutput);
+    output.data.post.text = exactText;
+    const result = harness({
+      initialGlobals: {
+        toolOutput: output,
+        toolResponseMetadata: canonicalMetadata(output, { mediaUrls: [signedUrl] })
+      }
+    });
+
+    await result.controller.start();
+
+    expect(result.views[0]?.text).toBe(exactText);
   });
 
   it("waits for late initial tool output and canonical metadata", async () => {
@@ -467,6 +492,51 @@ describe("LinkedIn review-card controller", () => {
     expect(result.callTool).not.toHaveBeenCalled();
     expect(result.terminals).toEqual([]);
     expect(result.publishingEnabled.at(-1)).toBe(true);
+  });
+
+  it("never enables publishing for an already expired exact preview", async () => {
+    const result = harness({ now: () => new Date("2026-07-19T12:15:00.000Z") });
+    await result.controller.start();
+
+    await result.controller.createPreview();
+
+    expect(result.publishingEnabled.at(-1)).toBe(false);
+    expect(result.errors).toEqual([EXPIRED_ERROR]);
+    expect(result.callTool).toHaveBeenCalledTimes(1);
+  });
+
+  it("disables publishing when an open exact preview reaches expiry", async () => {
+    vi.useFakeTimers();
+    let currentTime = new Date("2026-07-19T12:00:00.000Z");
+    const result = harness({ now: () => currentTime });
+    await readyForPublish(result);
+
+    currentTime = new Date("2026-07-19T12:15:00.000Z");
+    await vi.advanceTimersByTimeAsync(15 * 60 * 1_000);
+
+    expect(result.publishingEnabled.at(-1)).toBe(false);
+    expect(result.errors).toEqual([EXPIRED_ERROR]);
+    expect(result.callTool).not.toHaveBeenCalled();
+    expect(result.terminals).toEqual([]);
+  });
+
+  it("rechecks expiry after confirmation and does not dispatch or report ambiguity", async () => {
+    let now = new Date("2026-07-19T12:00:00.000Z");
+    const result = harness({
+      now: () => now,
+      confirmation: () => {
+        now = new Date("2026-07-19T12:15:00.000Z");
+        return true;
+      }
+    });
+    await readyForPublish(result);
+
+    await result.controller.publish();
+
+    expect(result.callTool).not.toHaveBeenCalled();
+    expect(result.errors).toEqual([EXPIRED_ERROR]);
+    expect(result.terminals).toEqual([]);
+    expect(result.publishingEnabled.at(-1)).toBe(false);
   });
 
   it.each([

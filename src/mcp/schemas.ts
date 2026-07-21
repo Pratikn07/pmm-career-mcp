@@ -10,6 +10,16 @@ const timestamp = z.string().datetime({ offset: true });
 const confidence = z.number().finite().min(0).max(1);
 const scoreComponent = z.number().finite().min(0).max(100);
 const checksum = z.string().regex(/^[0-9a-f]{64}$/);
+const imageAltText = z.string()
+  .refine((value) => {
+    const normalized = value.normalize("NFC").trim();
+    return [...normalized].length >= 1 && [...normalized].length <= 120;
+  }, {
+    message: "alt text must contain 1 to 120 Unicode characters"
+  })
+  .refine((value) => !/[\r\n\u2028\u2029]/u.test(value.normalize("NFC").trim()), {
+    message: "alt text must be a single line"
+  });
 
 export const visibilitySchema = z.enum(["PUBLIC", "CONNECTIONS"]);
 export const pipelineStatusSchema = z.enum([
@@ -144,7 +154,7 @@ export const attachLinkedInPostImagesInput = z.object({
   postId: id,
   expectedVersion: z.number().int().positive(),
   images: z.array(openAiFileSchema).min(1).max(4),
-  altTexts: z.array(z.string().min(1).max(120)).min(1).max(4)
+  altTexts: z.array(imageAltText).min(1).max(4)
 }).strict().refine((value) => value.images.length === value.altTexts.length, {
   message: "images and altTexts must have equal length",
   path: ["altTexts"]
@@ -154,7 +164,7 @@ export const setLinkedInPostImagesInput = z.object({
   expectedVersion: z.number().int().positive(),
   media: z.array(z.object({
     mediaId: id,
-    altText: z.string().min(1).max(120)
+    altText: imageAltText
   }).strict()).max(4)
 }).strict();
 export const openLinkedInReviewCardInput = z.object({
@@ -253,7 +263,7 @@ const postStateSchema = z.enum([
 const postDraftMediaSchema = z.object({
   position: z.number().int().min(0).max(3),
   mediaId: id,
-  altText: z.string().min(1).max(120),
+  altText: imageAltText,
   sha256: checksum,
   mimeType: z.enum(["image/jpeg", "image/png", "image/gif"]),
   byteSize: z.number().int().min(1).max(20 * 1024 * 1024),

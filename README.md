@@ -53,9 +53,11 @@ Enabling either switch never authorizes a post. There is no unattended posting, 
 
 Only after the private deployment and read-only MCP flow are working should an operator create a LinkedIn app, set the host-only (non-secret) `LINKEDIN_REDIRECT_URI` to `https://your-host.example/linkedin/callback`, and add the LinkedIn client values plus a 64-character hexadecimal `TOKEN_ENCRYPTION_KEY` to the host's secret store. Leave the redirect URI unset before that later phase. Tokens are encrypted in managed PostgreSQL and are never returned by MCP tools.
 
+After deploying this version, any legacy LinkedIn connection without encrypted, versioned scope evidence will appear invalid and must be re-authorized through the normal LinkedIn consent flow. Do not preserve, backfill, or fabricate scope evidence for an older token.
+
 The model-visible tools may research, save or revise a private draft, attach or reorder one to four validated images, update alt text, list history, and open the non-writing review card. `create_exact_linkedin_preview` and `publish_exact_linkedin_post` are app-only actions hidden from the model. Opening the card is not approval, and creating an exact preview is not publishing. Every real post requires the exact immutable text, visibility, image order, alt text, checksums, a fresh one-use capability, and a final human confirmation in the card.
 
-Drafts created before the whole-post checksum format remain readable, but exact review rejects them. Revise the legacy draft to create a new immutable current-format version before opening an exact preview.
+Every newly created draft, including its first text-only version, uses the whole-post checksum format and can enter exact review without a forced revision. Drafts stored before that format remain readable, but exact review rejects them; revise a legacy draft to create a new immutable current-format version before opening an exact preview.
 
 Use this exact instruction for the morning ChatGPT schedule:
 

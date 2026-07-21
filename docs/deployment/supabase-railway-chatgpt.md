@@ -112,6 +112,8 @@ Supabase advertises the `refresh_token` grant and issues rotating refresh tokens
 
 ChatGPT keeps an approved snapshot of tool definitions. If this branch's tool schemas change after the app is created, refresh the app's actions or recreate the draft before testing; do not assume server changes are picked up automatically.
 
+This release requires encrypted, versioned LinkedIn scope evidence. After deployment, any existing connection without that scope evidence will intentionally show as invalid and must be re-authorized through the normal LinkedIn consent flow. Do not preserve, backfill, or fabricate scope evidence for a legacy credential; the provider must grant it again.
+
 ## 7. Verify the morning and interactive boundaries
 
 Use this exact schedule instruction:
@@ -122,7 +124,7 @@ The scheduled flow may research, draft, revise, attach a ChatGPT-generated or us
 
 Scheduled image handoff is a capability gate, not a reason to add credentials. If the scheduled ChatGPT environment cannot hand a generated image file to the MCP file parameter, save the text draft plus a detailed image brief or generation prompt and stop. Generate or upload the image later in the interactive conversation. Do not add an OpenAI API key, paid image service, Supabase service-role key, or Supabase secret key.
 
-Drafts created before the versioned whole-post checksum remain readable but cannot enter exact review. Use `revise_post` to create a new immutable current-format version first. Any later text, visibility, image bytes, order, MIME type, or alt-text change also requires a new version and a new exact preview.
+Every new initial draft, including a text-only draft with no images, uses the versioned whole-post checksum and can enter exact review directly. Drafts stored before that checksum remain readable but cannot enter exact review; use `revise_post` to create a new immutable current-format version first. Any later text, visibility, image bytes, order, MIME type, or alt-text change also requires a new version and a new exact preview.
 
 Before requesting permission to enable either publishing switch, complete these checks in order:
 

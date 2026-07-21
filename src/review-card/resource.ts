@@ -35,6 +35,7 @@ function shell(baseUrl: string, storageOrigin: string): string {
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>LinkedIn post review</title>
+  <style>#post-text { white-space: pre-wrap; overflow-wrap: anywhere; }</style>
 </head>
 <body>
   <main id="review-root" data-storage-origin="${storageOrigin}" aria-labelledby="review-title">

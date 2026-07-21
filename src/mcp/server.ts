@@ -6,7 +6,7 @@ import type { DraftService } from "../drafts/service.js";
 import { DomainError } from "../domain/errors.js";
 import type { LinkedInOAuth } from "../linkedin/oauth.js";
 import type { ImagePublishService } from "../linkedin/image-publish-service.js";
-import type { MediaPostDraftVersion, PostMediaService } from "../media/post-media-service.js";
+import type { PostMediaService } from "../media/post-media-service.js";
 import type { PipelineService } from "../pipeline/service.js";
 import type { PreviewService } from "../posts/preview-service.js";
 import type { ReviewService } from "../posts/review-service.js";
@@ -80,9 +80,10 @@ type ConnectionStatus = {
   imagePublishingEnabled?: boolean;
 };
 
-type ModelMediaService = Pick<PostMediaService, "attachFiles" | "setMedia" | "getVersion"> & {
-  createSignedUrls?: (post: MediaPostDraftVersion) => Promise<readonly string[]>;
-};
+type ModelMediaService = Pick<
+  PostMediaService,
+  "attachFiles" | "setMedia" | "getVersion" | "createSignedUrls"
+>;
 
 export type CareerMcpDependencies = {
   ycProvider: YcProvider;
@@ -377,9 +378,7 @@ export function createCareerMcpServer(
       if (post === undefined) {
         throw new DomainError("NOT_FOUND", "Post draft was not found", { entity: "post_draft" });
       }
-      const mediaUrls = media.createSignedUrls === undefined
-        ? []
-        : await media.createSignedUrls(post);
+      const mediaUrls = await media.createSignedUrls(post);
       return {
         ...response({ post }, `Opened private post version ${post.version} for review; no preview or publish action was created.`),
         _meta: { mediaUrls: [...mediaUrls] }

@@ -20,8 +20,10 @@ async function client(fetch?: typeof globalThis.fetch) {
   await db.oauthTokens.upsert({
     provider: "linkedin",
     ciphertext: JSON.stringify(encryptJson({
+      credentialVersion: 1,
       accessToken: ACCESS_TOKEN,
-      authorUrn: AUTHOR_URN
+      authorUrn: AUTHOR_URN,
+      grantedScopes: ["openid", "profile", "w_member_social"]
     }, KEY)),
     expiresAt: "2030-07-17T13:00:00.000Z"
   });

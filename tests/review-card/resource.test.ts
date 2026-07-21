@@ -35,6 +35,7 @@ it("serves a self-contained semantic review-card shell with minimal canonical CS
   });
 
   const html = resource.text ?? "";
+  expect(html).toMatch(/#post-text\s*\{[^}]*white-space:\s*pre-wrap/i);
   expect(html).toContain('src="https://mcp.example/review-card-client.js"');
   expect(html).toContain('data-storage-origin="https://project.supabase.co"');
   for (const id of [

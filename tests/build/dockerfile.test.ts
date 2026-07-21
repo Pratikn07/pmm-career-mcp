@@ -8,6 +8,8 @@ it("declares sharp as a pinned runtime dependency", async () => {
   };
 
   expect(packageJson.dependencies?.sharp).toBe("0.35.3");
+  const dockerfile = await readFile(resolve(process.cwd(), "Dockerfile"), "utf8");
+  expect(dockerfile).toMatch(/node -e ["']import\(['"]sharp['"]\)["']/);
 });
 
 it("copies the consent build script before building the Docker image", async () => {
@@ -98,6 +100,9 @@ it("provides a no-secret Supabase, Railway, and ChatGPT operator runbook", async
   expect(runbook).toMatch(/percent-encode/i);
   expect(runbook).toMatch(/`MIGRATION_DATABASE_URL`[^\n]*migrat/i);
   expect(runbook).toMatch(/`DATABASE_URL`[^\n]*(?:read|write|DML|runtime)/i);
+  expect(readme).toMatch(/legacy LinkedIn connection[\s\S]*re-authoriz/i);
+  expect(runbook).toMatch(/scope evidence[\s\S]*re-authoriz/i);
+  expect(runbook).toMatch(/do not (?:preserve|backfill|fabricate)[^\n]*scope evidence/i);
   expect(runbook).toMatch(/run `supabase\/runtime-role\.sql`[^\n]*before[^\n]*(?:smoke|deploy|migration)/i);
   expect(runbook).toMatch(/CREATE SCHEMA IF NOT EXISTS/i);
   expect(runbook).toMatch(/default privileges[^\n]*migrations/i);

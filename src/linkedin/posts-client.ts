@@ -2,11 +2,17 @@ import type { CareerDatabase } from "../db/client.js";
 import type { PostVisibility } from "../drafts/service.js";
 import { DomainError } from "../domain/errors.js";
 import { decryptJson, type EncryptedEnvelope } from "../security/crypto.js";
+import { exactLinkedInScopes } from "./scopes.js";
 
 const POSTS_ENDPOINT = "https://api.linkedin.com/rest/posts";
 const ALLOWED_VISIBILITIES: ReadonlySet<string> = new Set(["PUBLIC", "CONNECTIONS"]);
 
-export type StoredLinkedInCredential = Readonly<{ accessToken: string; authorUrn: string }>;
+export type StoredLinkedInCredential = Readonly<{
+  credentialVersion: 1;
+  accessToken: string;
+  authorUrn: string;
+  grantedScopes: readonly string[];
+}>;
 
 export type LinkedInPostMedia = Readonly<{
   imageUrn: string;
@@ -38,15 +44,23 @@ function parseCredential(value: unknown): StoredLinkedInCredential {
     throw credentialError();
   }
   const credential = value as Record<string, unknown>;
+  const grantedScopes = exactLinkedInScopes(credential.grantedScopes);
   if (
-    typeof credential.accessToken !== "string"
+    credential.credentialVersion !== 1
+    || typeof credential.accessToken !== "string"
     || credential.accessToken.length === 0
     || typeof credential.authorUrn !== "string"
     || !/^urn:li:person:[A-Za-z0-9_-]+$/.test(credential.authorUrn)
+    || grantedScopes === undefined
   ) {
     throw credentialError();
   }
-  return { accessToken: credential.accessToken, authorUrn: credential.authorUrn };
+  return {
+    credentialVersion: 1,
+    accessToken: credential.accessToken,
+    authorUrn: credential.authorUrn,
+    grantedScopes
+  };
 }
 
 function parseEnvelope(value: string): EncryptedEnvelope {

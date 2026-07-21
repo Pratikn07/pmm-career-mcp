@@ -2,12 +2,15 @@ import { randomBytes as nodeRandomBytes } from "node:crypto";
 import type { CareerDatabase } from "../db/client.js";
 import { DomainError } from "../domain/errors.js";
 import { encryptJson } from "../security/crypto.js";
+import {
+  LINKEDIN_REQUIRED_SCOPES,
+  scopesFromTokenResponse
+} from "./scopes.js";
 
 const AUTHORIZATION_ENDPOINT = "https://www.linkedin.com/oauth/v2/authorization";
 const TOKEN_ENDPOINT = "https://www.linkedin.com/oauth/v2/accessToken";
 const USERINFO_ENDPOINT = "https://api.linkedin.com/v2/userinfo";
 const OAUTH_STATE_TTL_MS = 10 * 60 * 1_000;
-const REQUIRED_SCOPES = Object.freeze(["openid", "profile", "w_member_social"]);
 
 type PendingState = Readonly<{ expiresAt: number }>;
 
@@ -101,7 +104,7 @@ export function createLinkedInOAuth(database: CareerDatabase, dependencies: Link
     url.searchParams.set("enable_extended_login", "true");
     url.searchParams.set("client_id", dependencies.clientId);
     url.searchParams.set("redirect_uri", dependencies.redirectUri);
-    url.searchParams.set("scope", REQUIRED_SCOPES.join(" "));
+    url.searchParams.set("scope", LINKEDIN_REQUIRED_SCOPES.join(" "));
     url.searchParams.set("state", state);
     return url.href;
   }
@@ -144,6 +147,10 @@ export function createLinkedInOAuth(database: CareerDatabase, dependencies: Link
     if (typeof expiresIn !== "number" || !Number.isSafeInteger(expiresIn) || expiresIn <= 0) {
       throw providerError();
     }
+    const grantedScopes = scopesFromTokenResponse(token.scope);
+    if (grantedScopes === undefined) {
+      throw providerError();
+    }
 
     let identityResponse: Response;
     try {
@@ -172,8 +179,10 @@ export function createLinkedInOAuth(database: CareerDatabase, dependencies: Link
       await database.oauthTokens.upsert({
         provider: "linkedin",
         ciphertext: JSON.stringify(encryptJson({
+          credentialVersion: 1,
           accessToken: token.access_token,
-          authorUrn
+          authorUrn,
+          grantedScopes
         }, dependencies.tokenEncryptionKey)),
         ...(refreshToken === undefined
           ? {}

@@ -2,7 +2,10 @@ import { afterAll, afterEach, describe, expect, it } from "vitest";
 import nock from "nock";
 import { createTestDatabase } from "../support/database.js";
 import { encryptJson } from "../../src/security/crypto.js";
-import { createLinkedInPostsClient } from "../../src/linkedin/posts-client.js";
+import {
+  createLinkedInPostsClient,
+  loadLinkedInCredential
+} from "../../src/linkedin/posts-client.js";
 
 const KEY = "b".repeat(64);
 const db = await createTestDatabase();
@@ -17,8 +20,10 @@ async function client(fetch?: typeof globalThis.fetch) {
   (await db.oauthTokens.upsert({
     provider: "linkedin",
     ciphertext: JSON.stringify(encryptJson({
+      credentialVersion: 1,
       accessToken: "access-token-that-must-not-leak",
-      authorUrn: "urn:li:person:person-123"
+      authorUrn: "urn:li:person:person-123",
+      grantedScopes: ["openid", "profile", "w_member_social"]
     }, KEY)),
     expiresAt: "2030-07-17T13:00:00.000Z"
   }));
@@ -30,6 +35,29 @@ async function client(fetch?: typeof globalThis.fetch) {
 }
 
 describe("versioned LinkedIn Posts API client", () => {
+  it.each([
+    ["legacy credentials without scope evidence", {
+      accessToken: "legacy-token",
+      authorUrn: "urn:li:person:person-123"
+    }],
+    ["partial scope evidence", {
+      credentialVersion: 1,
+      accessToken: "partial-token",
+      authorUrn: "urn:li:person:person-123",
+      grantedScopes: ["openid", "profile"]
+    }]
+  ])("requires reconnect for %s", async (_label, credential) => {
+    await db.oauthTokens.upsert({
+      provider: "linkedin",
+      ciphertext: JSON.stringify(encryptJson(credential, KEY)),
+      expiresAt: "2030-07-17T13:00:00.000Z"
+    });
+
+    await expect(loadLinkedInCredential(db, KEY)).rejects.toMatchObject({
+      code: "OAUTH_PROVIDER_ERROR"
+    });
+  });
+
   it("sends one official Posts API request with versioned headers and the documented text payload", async () => {
     const expected = {
       author: "urn:li:person:person-123",

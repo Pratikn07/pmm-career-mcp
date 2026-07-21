@@ -1,6 +1,6 @@
 import { Buffer } from "node:buffer";
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
-import { createDraftService } from "../../src/drafts/service.js";
+import { computePostChecksum, createDraftService } from "../../src/drafts/service.js";
 import { DomainError } from "../../src/domain/errors.js";
 import type { DraftMediaStorage } from "../../src/media/storage.js";
 import { checksumLinkedInPost } from "../../src/posts/post-checksum.js";
@@ -205,10 +205,15 @@ describe("exact LinkedIn review creation", () => {
     }
   });
 
-  it("rejects legacy-v1, corrupt-v2, stale, and invalid-state drafts without creating a preview", async () => {
-    const legacy = await drafts.createPost({ text: "Legacy text", visibility: "PUBLIC" });
+  it("rejects stored legacy-v1, corrupt-v2, stale, and invalid-state drafts without creating a preview", async () => {
+    const legacy = await db.postDrafts.createVersion({
+      text: "Legacy text",
+      visibility: "PUBLIC",
+      state: "draft",
+      checksum: (version) => computePostChecksum("Legacy text", version)
+    });
     await expectDomainError(
-      () => review(storage()).createExact(legacy.id, legacy.version),
+      () => review(storage()).createExact(legacy.draftId, legacy.version),
       "DATA_INTEGRITY"
     );
 
