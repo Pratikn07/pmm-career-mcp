@@ -273,6 +273,22 @@ function canonicalPrivateMetadata(
   return hidden;
 }
 
+function directToolResultPrivateMetadata(
+  value: unknown,
+  expectedStructuredContent: unknown
+): Record<string, unknown> | undefined {
+  const result = record(value);
+  const hidden = record(result?._meta);
+  if (result === undefined
+    || hidden === undefined
+    || (own(result, "isError") && result.isError !== false)
+    || !own(result, "structuredContent")
+    || !jsonEqual(result.structuredContent, expectedStructuredContent)) {
+    return undefined;
+  }
+  return hidden;
+}
+
 function initialPrivateMetadata(
   value: unknown,
   expectedStructuredContent: unknown
@@ -301,9 +317,12 @@ function previewMetadata(
   metadataValue: unknown,
   structuredContent: unknown,
   count: number,
-  storageOrigin: string
+  storageOrigin: string,
+  source: "canonical-global" | "direct-result" = "canonical-global"
 ): Readonly<{ capability: string; urls: readonly string[] }> | undefined {
-  const metadata = canonicalPrivateMetadata(metadataValue, structuredContent);
+  const metadata = source === "direct-result"
+    ? directToolResultPrivateMetadata(metadataValue, structuredContent)
+    : canonicalPrivateMetadata(metadataValue, structuredContent);
   if (metadata === undefined
     || typeof metadata.approvalCapability !== "string"
     || !CAPABILITY_PATTERN.test(metadata.approvalCapability)
@@ -639,7 +658,14 @@ export function createReviewCardController(
         if (preview === undefined || !sameSelectedVersion(preview, selectedPost)) {
           throw new Error("invalid preview");
         }
-        const metadata = await capture.waitFor((globals) => previewMetadata(
+        const directMetadata = previewMetadata(
+          callResult,
+          structuredContent,
+          preview.media.length,
+          storageOrigin,
+          "direct-result"
+        );
+        const metadata = directMetadata ?? await capture.waitFor((globals) => previewMetadata(
           globals.toolResponseMetadata,
           structuredContent,
           preview.media.length,

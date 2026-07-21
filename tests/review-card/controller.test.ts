@@ -289,6 +289,32 @@ describe("LinkedIn review-card controller", () => {
     expect(result.globals.listeners.size).toBe(0);
   });
 
+  it("uses private metadata returned by the exact preview call without waiting for a globals refresh", async () => {
+    const result = harness({
+      previewMode: "manual",
+      previewCallResult: {
+        content: [{ type: "text", text: "Created an exact private preview." }],
+        structuredContent: previewOutput,
+        _meta: {
+          approvalCapability: capability,
+          signedMediaUrls: [{ position: 0, url: signedUrl }]
+        }
+      },
+      timeoutMs: 5
+    });
+    await result.controller.start();
+
+    await result.controller.createPreview();
+
+    expect(result.errors).toEqual([]);
+    expect(result.publishingEnabled.at(-1)).toBe(true);
+    expect(result.views.at(-1)).toEqual(expect.objectContaining({
+      previewExpiresAt: "2026-07-19T12:15:00.000Z",
+      media: [expect.objectContaining({ position: 0, url: signedUrl })]
+    }));
+    expect(result.globals.listeners.size).toBe(0);
+  });
+
   it("never falls back to valid raw fields on a malformed canonical wrapper", async () => {
     const malformed = {
       status: "complete",
