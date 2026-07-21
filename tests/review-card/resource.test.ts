@@ -22,12 +22,27 @@ it("serves a self-contained semantic review-card shell with minimal canonical CS
   await Promise.all([client.close(), server.close()]);
 
   expect(listed.resources).toEqual(expect.arrayContaining([
-    expect.objectContaining({ uri: LINKEDIN_REVIEW_CARD_URI, mimeType: "text/html+skybridge" })
+    expect.objectContaining({
+      uri: LINKEDIN_REVIEW_CARD_URI,
+      mimeType: "text/html+skybridge",
+      _meta: expect.objectContaining({
+        ui: expect.objectContaining({ domain: "https://mcp.example" }),
+        "openai/widgetDomain": "https://mcp.example"
+      })
+    })
   ]));
   expect(result.contents).toHaveLength(1);
   const resource = result.contents[0] as { mimeType?: string; text?: string; _meta?: Record<string, unknown> };
   expect(resource.mimeType).toBe("text/html+skybridge");
   expect(resource._meta).toMatchObject({
+    ui: {
+      domain: "https://mcp.example",
+      csp: {
+        connectDomains: ["https://mcp.example", "https://project.supabase.co"],
+        resourceDomains: ["https://mcp.example", "https://project.supabase.co"]
+      }
+    },
+    "openai/widgetDomain": "https://mcp.example",
     "openai/widgetCSP": {
       connect_domains: ["https://mcp.example", "https://project.supabase.co"],
       resource_domains: ["https://mcp.example", "https://project.supabase.co"]

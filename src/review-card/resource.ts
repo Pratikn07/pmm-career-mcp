@@ -88,14 +88,23 @@ export function registerLinkedInReviewCardResource(
     connect_domains: [baseUrl, supabaseUrl],
     resource_domains: [baseUrl, supabaseUrl]
   };
+  const ui = {
+    domain: baseUrl,
+    csp: {
+      connectDomains: [baseUrl, supabaseUrl],
+      resourceDomains: [baseUrl, supabaseUrl]
+    }
+  };
 
   server.registerResource("linkedin-review-card", LINKEDIN_REVIEW_CARD_URI, {
     title: "LinkedIn post review",
     description: "Review an exact private LinkedIn draft before any app-only preview or publish action.",
     mimeType: "text/html+skybridge",
     _meta: {
+      ui,
       "openai/widgetDescription": "Review the full text, ordered images, alt text, visibility, version, and checksum.",
       "openai/widgetPrefersBorder": true,
+      "openai/widgetDomain": baseUrl,
       "openai/widgetCSP": csp
     }
   }, async () => ({
@@ -103,7 +112,11 @@ export function registerLinkedInReviewCardResource(
       uri: LINKEDIN_REVIEW_CARD_URI,
       mimeType: "text/html+skybridge",
       text: shell(baseUrl, supabaseUrl),
-      _meta: { "openai/widgetCSP": csp }
+      _meta: {
+        ui,
+        "openai/widgetDomain": baseUrl,
+        "openai/widgetCSP": csp
+      }
     }]
   }));
 }
