@@ -11,6 +11,7 @@ function dependencies(): CareerMcpDependencies {
     pipeline: { saveTarget: async () => { throw new Error("not called"); }, updateStatus: async () => { throw new Error("not called"); }, recordNote: async () => { throw new Error("not called"); }, listPipeline: async () => [], createShortlist: async () => { throw new Error("not called"); } },
     drafts: { createOutreach: async () => { throw new Error("not called"); }, createPost: async () => { throw new Error("not called"); }, revisePost: async () => { throw new Error("not called"); }, getPostHistory: async () => [] },
     previews: { create: () => { throw new Error("not called"); } },
+    reviews: { createExact: () => { throw new Error("not called"); } },
     publish: { publish: async () => ({ state: "publish_failed" as const }) },
     linkedin: { createAuthorizationUrl: () => "https://www.linkedin.com/oauth/v2/authorization" },
     getLinkedInConnectionStatus: async () => ({ connected: false, valid: false, publishingEnabled: false, imagePublishingEnabled: false })
@@ -33,7 +34,7 @@ it("uses complete, safe tool annotations", async () => {
   for (const name of ["draft_outreach", "draft_linkedin_post", "revise_post", "set_linkedin_post_images", "create_weekly_shortlist", "save_target", "update_outreach_status", "record_note", "create_linkedin_authorization_url"]) {
     expect(annotationsFor(name)).toMatchObject({ readOnlyHint: false, openWorldHint: false, destructiveHint: false });
   }
-  expect(annotationsFor("preview_post")).toEqual({
+  expect(annotationsFor("create_exact_linkedin_preview")).toEqual({
     readOnlyHint: false,
     openWorldHint: false,
     destructiveHint: false
@@ -58,8 +59,9 @@ it("uses complete, safe tool annotations", async () => {
     "openai/outputTemplate": "ui://pmm-career-mcp/linkedin-review-card.html",
     "openai/widgetAccessible": true
   });
-  expect(byName.get("preview_post")?._meta).toMatchObject({
-    ui: { visibility: ["app"] }
+  expect(byName.get("create_exact_linkedin_preview")?._meta).toMatchObject({
+    ui: { visibility: ["app"] },
+    "openai/widgetAccessible": true
   });
   expect(byName.get("publish_linkedin_post")?._meta).toMatchObject({
     ui: { visibility: ["app"] }
@@ -68,6 +70,6 @@ it("uses complete, safe tool annotations", async () => {
   const modelVisibleNames = tools
     .filter((tool) => !((tool._meta?.ui as { visibility?: string[] } | undefined)?.visibility?.includes("app") ?? false))
     .map((tool) => tool.name);
-  expect(modelVisibleNames).not.toContain("preview_post");
+  expect(modelVisibleNames).not.toContain("create_exact_linkedin_preview");
   expect(modelVisibleNames).not.toContain("publish_linkedin_post");
 });

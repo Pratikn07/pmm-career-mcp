@@ -5,8 +5,10 @@ import { createTestDatabase, queryTestDatabase } from "../support/database.js";
 import { createDraftService } from "../../src/drafts/service.js";
 import { DomainError } from "../../src/domain/errors.js";
 import {
+  APPROVAL_CAPABILITY_HASH_CONTEXT,
   PREVIEW_TOKEN_HASH_CONTEXT,
   createPreviewService,
+  hashApprovalCapability,
   hashPreviewToken,
   type PreviewExpected,
   type PreviewResult
@@ -56,6 +58,24 @@ async function expectDomainError(
 }
 
 describe("post previews", () => {
+  it("hashes approval capabilities with a distinct context and rejects malformed values safely", () => {
+    const capability = Buffer.alloc(32, 0x5a).toString("base64url");
+    const expected = createHash("sha256")
+      .update(APPROVAL_CAPABILITY_HASH_CONTEXT, "utf8")
+      .update("\0", "utf8")
+      .update(Buffer.from(capability, "base64url"))
+      .digest("hex");
+
+    expect(hashApprovalCapability(capability)).toBe(expected);
+    expect(hashApprovalCapability(capability)).not.toBe(hashPreviewToken(capability));
+    expect(() => hashApprovalCapability("not-a-capability")).toThrowError(DomainError);
+    try {
+      hashApprovalCapability("private-malformed-capability");
+    } catch (error) {
+      expect(JSON.stringify(error)).not.toContain("private-malformed-capability");
+    }
+  });
+
   it("returns the exact latest saved version and stores only a domain-separated token hash", async () => {
     const post = (await drafts.createPost({
       text: "Café\r\n🙂 exact  spacing",

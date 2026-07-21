@@ -9,6 +9,7 @@ import type { PublishService } from "../linkedin/publish-service.js";
 import type { MediaPostDraftVersion, PostMediaService } from "../media/post-media-service.js";
 import type { PipelineService } from "../pipeline/service.js";
 import type { PreviewExpected, PreviewService } from "../posts/preview-service.js";
+import type { ReviewService } from "../posts/review-service.js";
 import {
   explainTargetMatch,
   rankTargetScores,
@@ -27,6 +28,8 @@ import {
 import {
   attachLinkedInPostImagesInput,
   attachLinkedInPostImagesOutput,
+  createExactLinkedInPreviewInput,
+  createExactLinkedInPreviewOutput,
   createLinkedInAuthorizationUrlOutput,
   createWeeklyShortlistInput,
   createWeeklyShortlistOutput,
@@ -49,8 +52,6 @@ import {
   openLinkedInReviewCardInput,
   openLinkedInReviewCardOutput,
   pipelineStatusSchema,
-  previewPostInput,
-  previewPostOutput,
   publishLinkedInPostInput,
   publishLinkedInPostOutput,
   rankNetworkingTargetsInput,
@@ -90,6 +91,7 @@ export type CareerMcpDependencies = {
   pipeline: Pick<PipelineService, "saveTarget" | "updateStatus" | "recordNote" | "listPipeline" | "createShortlist">;
   drafts: Pick<DraftService, "createOutreach" | "createPost" | "revisePost" | "getPostHistory">;
   previews: Pick<PreviewService, "create">;
+  reviews?: Pick<ReviewService, "createExact">;
   publish: Pick<PublishService, "publish">;
   linkedin: Pick<LinkedInOAuth, "createAuthorizationUrl">;
   getLinkedInConnectionStatus: () => Promise<ConnectionStatus>;
@@ -112,7 +114,8 @@ const SUPABASE_OAUTH_SECURITY_SCHEMES = [{ type: "oauth2", scopes: [...SUPABASE_
 const oauthToolMetadata: Record<string, unknown> = { securitySchemes: SUPABASE_OAUTH_SECURITY_SCHEMES };
 const appOnlyToolMetadata: Record<string, unknown> = {
   ...oauthToolMetadata,
-  ui: { visibility: ["app"] }
+  ui: { visibility: ["app"] },
+  "openai/widgetAccessible": true
 };
 const attachFileToolMetadata: Record<string, unknown> = {
   ...oauthToolMetadata,
@@ -210,6 +213,16 @@ export function createCareerMcpServer(
       throw new DomainError("DATA_INTEGRITY", "Draft media service is unavailable");
     }
     return deps.media;
+  }
+
+  function authenticatedReview(): Pick<ReviewService, "createExact"> {
+    if (options.requestAuthContext === undefined) {
+      throw new DomainError("AUTH_REQUIRED", "Authenticated request identity is required");
+    }
+    if (deps.reviews === undefined) {
+      throw new DomainError("DATA_INTEGRITY", "Exact review service is unavailable");
+    }
+    return deps.reviews;
   }
 
   server.registerTool("search_yc_companies", {
@@ -369,16 +382,31 @@ export function createCareerMcpServer(
     }
   });
 
-  server.registerTool("preview_post", {
-    title: "Preview post",
-    description: "Show the exact latest saved post and create a one-use 15-minute preview token; this does not publish.",
-    inputSchema: previewPostInput,
-    outputSchema: previewPostOutput,
+  server.registerTool("create_exact_linkedin_preview", {
+    title: "Create exact LinkedIn preview",
+    description: "Private review-card write: lock one exact latest private draft version for 15 minutes. This does not upload to LinkedIn or publish.",
+    inputSchema: createExactLinkedInPreviewInput,
+    outputSchema: createExactLinkedInPreviewOutput,
     annotations: privateWrite,
     _meta: appOnlyToolMetadata
-  }, async ({ postId, version }) => guarded(async () => ({
-    preview: await deps.previews.create(postId, version)
-  }), () => "Created an exact one-use post preview valid for 15 minutes; nothing was published.")());
+  }, async ({ postId, version }) => {
+    try {
+      const result = await authenticatedReview().createExact(postId, version);
+      return {
+        content: [{
+          type: "text" as const,
+          text: "Created an exact one-use post preview valid for 15 minutes; nothing was uploaded or published."
+        }],
+        structuredContent: { data: { preview: result.preview } },
+        _meta: {
+          approvalCapability: result.approvalCapability,
+          signedMediaUrls: [...result.signedMediaUrls]
+        }
+      };
+    } catch (error) {
+      return safeError(error);
+    }
+  });
 
   server.registerTool("create_weekly_shortlist", {
     title: "Create shortlist",

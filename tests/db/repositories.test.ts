@@ -6,15 +6,18 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest
 import { postgresErrorKind } from "../../src/domain/errors.js";
 import { computePostChecksum } from "../../src/drafts/service.js";
 import { createRepositories } from "../../src/db/repositories.js";
+import { checksumLinkedInPost } from "../../src/posts/post-checksum.js";
 import {
   createTestDatabase,
   queryTestDatabase,
-  type TestCareerDatabase
+  type TestCareerDatabase,
+  type TestQueryLogEntry
 } from "../support/database.js";
 
 let db: TestCareerDatabase;
+const queryLog: TestQueryLogEntry[] = [];
 beforeAll(async () => {
-  db = await createTestDatabase();
+  db = await createTestDatabase({ queryLog });
 });
 afterEach(async () => (await db.resetForTests()));
 afterAll(async () => (await db?.close()));
@@ -372,6 +375,83 @@ describe("PostgreSQL transaction retries", () => {
     })).rejects.toBe(error);
 
     expect(transaction).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("exact preview snapshot locking", () => {
+  it("locks draft-media rows first and shared media rows in global UUID order", async () => {
+    const ownerSubject = "123e4567-e89b-12d3-a456-426614174000";
+    const draftId = "223e4567-e89b-12d3-a456-426614174000";
+    const lowerMediaId = "323e4567-e89b-12d3-a456-426614174000";
+    const higherMediaId = "323e4567-e89b-12d3-a456-426614174001";
+    for (const [id, digit] of [[lowerMediaId, "1"], [higherMediaId, "2"]] as const) {
+      await db.postMedia.create({
+        id,
+        ownerSubject,
+        objectPath: `${ownerSubject}/${digit}${digit}/${id}.png`,
+        sha256: digit.repeat(64),
+        mimeType: "image/png",
+        byteSize: 100,
+        width: 640,
+        height: 480,
+        frameCount: 1,
+        originalFilename: `${id}.png`,
+        createdAt: "2026-07-19T12:00:00.000Z"
+      });
+    }
+    const text = "Reverse display order";
+    const visibility = "CONNECTIONS";
+    const created = await db.postDrafts.createVersionWithMedia({
+      draftId,
+      ownerSubject,
+      text,
+      visibility,
+      state: "draft",
+      media: [
+        { mediaId: higherMediaId, altText: "Higher first" },
+        { mediaId: lowerMediaId, altText: "Lower second" }
+      ],
+      checksum: (version, actualDraftId, media) => checksumLinkedInPost({
+        draftId: actualDraftId,
+        version,
+        text,
+        visibility,
+        media: media.map((item) => ({
+          ...item,
+          mimeType: item.mimeType as "image/png"
+        }))
+      })
+    });
+
+    queryLog.length = 0;
+    const result = await db.previews.createForLatest({
+      draftId,
+      version: created.post.version,
+      tokenHash: "a".repeat(64),
+      expiresAt: "2026-07-19T12:15:00.000Z",
+      allowedStates: ["draft"],
+      expectedVersionId: created.post.id,
+      expectedChecksum: created.post.checksum,
+      expectedSnapshot: {
+        subject: ownerSubject,
+        post: created.post,
+        media: created.media
+      }
+    });
+
+    expect(result.outcome).toBe("created");
+    const lockQueries = queryLog.filter(({ query }) => /for update/i.test(query));
+    const joinLockIndex = lockQueries.findIndex(({ query }) => (
+      query.includes('from "career_mcp"."post_draft_media"')
+      && !query.includes('join "career_mcp"."post_media"')
+    ));
+    const mediaLockIndex = lockQueries.findIndex(({ query }) => (
+      query.includes('from "career_mcp"."post_media"')
+      && query.includes('order by "career_mcp"."post_media"."id" asc')
+    ));
+    expect(joinLockIndex).toBeGreaterThanOrEqual(0);
+    expect(mediaLockIndex).toBeGreaterThan(joinLockIndex);
+    expect(lockQueries[mediaLockIndex]?.params).toEqual([lowerMediaId, higherMediaId]);
   });
 });
 

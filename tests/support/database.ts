@@ -12,6 +12,11 @@ export type TestCareerDatabase = CareerDatabase & {
   resetForTests(): Promise<void>;
 };
 
+export type TestQueryLogEntry = {
+  query: string;
+  params: unknown[];
+};
+
 const clients = new WeakMap<TestCareerDatabase, PGlite>();
 
 function findMigrationsFolder(): string {
@@ -34,9 +39,22 @@ function findMigrationsFolder(): string {
   }
 }
 
-export async function createTestDatabase(): Promise<TestCareerDatabase> {
+export async function createTestDatabase(options: {
+  queryLog?: TestQueryLogEntry[];
+} = {}): Promise<TestCareerDatabase> {
   const client = new PGlite();
-  const database = drizzle(client, { schema });
+  const database = drizzle(client, {
+    schema,
+    ...(options.queryLog === undefined
+      ? {}
+      : {
+          logger: {
+            logQuery(query: string, params: unknown[]) {
+              options.queryLog?.push({ query, params });
+            }
+          }
+        })
+  });
 
   try {
     await migrate(database, { migrationsFolder: findMigrationsFolder() });

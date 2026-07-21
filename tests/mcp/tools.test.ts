@@ -33,7 +33,7 @@ const expectedTools = [
   "attach_linkedin_post_images",
   "set_linkedin_post_images",
   "open_linkedin_review_card",
-  "preview_post",
+  "create_exact_linkedin_preview",
   "create_weekly_shortlist",
   "save_target",
   "update_outreach_status",
@@ -125,6 +125,7 @@ function dependencies(): CareerMcpDependencies {
       getPostHistory: async () => []
     },
     previews: { create: () => { throw new Error("not called"); } },
+    reviews: { createExact: () => { throw new Error("not called"); } },
     publish: { publish: async () => ({ state: "publish_failed" as const }) },
     linkedin: { createAuthorizationUrl: () => "https://www.linkedin.com/oauth/v2/authorization" },
     getLinkedInConnectionStatus: async () => ({ connected: false, valid: false, publishingEnabled: false, imagePublishingEnabled: false })
@@ -240,6 +241,23 @@ function successfulDependencies(): CareerMcpDependencies {
         expiresAt: "2026-07-17T00:15:00.000Z"
       })
     },
+    reviews: {
+      createExact: async () => ({
+        preview: {
+          postId: post.id,
+          versionId: post.versionId,
+          text: post.text,
+          version: post.version,
+          checksum: post.checksum,
+          visibility: post.visibility,
+          characterCount: [...post.text].length,
+          media: [],
+          expiresAt: "2026-07-17T00:15:00.000Z"
+        },
+        approvalCapability: "A".repeat(43),
+        signedMediaUrls: []
+      })
+    },
     publish: { publish: async () => ({ state: "published", postUrn: "urn:li:share:12345" }) },
     linkedin: { createAuthorizationUrl: () => "https://www.linkedin.com/oauth/v2/authorization" },
     getLinkedInConnectionStatus: async () => ({ connected: true, valid: true, publishingEnabled: false, imagePublishingEnabled: false })
@@ -278,7 +296,7 @@ it("publishes an explicit success and safe-error output contract for every tool"
     attach_linkedin_post_images: "post",
     set_linkedin_post_images: "post",
     open_linkedin_review_card: "post",
-    preview_post: "preview",
+    create_exact_linkedin_preview: "preview",
     create_weekly_shortlist: "shortlist",
     save_target: "target",
     update_outreach_status: "target",
@@ -442,7 +460,7 @@ it("returns schema-valid structured data and bounded summaries from every regist
       name: "open_linkedin_review_card",
       arguments: { postId: "123e4567-e89b-12d3-a456-426614174001", version: 1 }
     },
-    { name: "preview_post", arguments: { postId: "post-1", version: 1 } },
+    { name: "create_exact_linkedin_preview", arguments: { postId: "post-1", version: 1 } },
     { name: "create_weekly_shortlist", arguments: { name: "This week", targetIds: ["target-1"] } },
     { name: "save_target", arguments: { target } },
     { name: "update_outreach_status", arguments: { targetId: "target-1", status: "shortlisted" } },
@@ -482,8 +500,10 @@ it("requires request auth before any draft-media or Storage action", async () =>
   const setMedia = vi.fn();
   const getVersion = vi.fn();
   const createSignedUrls = vi.fn();
+  const createExact = vi.fn();
   const deps = dependencies();
   deps.media = { attachFiles, setMedia, getVersion, createSignedUrls };
+  deps.reviews = { createExact };
   const server = createCareerMcpServer(deps);
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "test", version: "1.0.0" });
@@ -510,6 +530,10 @@ it("requires request auth before any draft-media or Storage action", async () =>
     {
       name: "open_linkedin_review_card",
       arguments: { postId: "123e4567-e89b-12d3-a456-426614174001", version: 1 }
+    },
+    {
+      name: "create_exact_linkedin_preview",
+      arguments: { postId: "123e4567-e89b-12d3-a456-426614174001", version: 1 }
     }
   ]) {
     const result = await client.callTool(call);
@@ -524,6 +548,68 @@ it("requires request auth before any draft-media or Storage action", async () =>
   expect(setMedia).not.toHaveBeenCalled();
   expect(getVersion).not.toHaveBeenCalled();
   expect(createSignedUrls).not.toHaveBeenCalled();
+  expect(createExact).not.toHaveBeenCalled();
+});
+
+it("keeps exact-preview capabilities and signed URLs widget-private", async () => {
+  const approvalCapability = "Z".repeat(43);
+  const requestBearer = "private-request-bearer-that-must-not-leak";
+  const signedMediaUrls = [{
+    position: 0,
+    url: "https://project.supabase.co/storage/v1/object/sign/linkedin-draft-media/image"
+  }];
+  const preview = {
+    postId: "123e4567-e89b-12d3-a456-426614174001",
+    versionId: "123e4567-e89b-12d3-a456-426614174002",
+    text: "The full exact post text",
+    version: 2,
+    checksum: "a".repeat(64),
+    visibility: "CONNECTIONS" as const,
+    characterCount: 24,
+    media: [{
+      position: 0,
+      mediaId: "123e4567-e89b-12d3-a456-426614174003",
+      altText: "A launch dashboard",
+      sha256: "b".repeat(64),
+      mimeType: "image/png" as const,
+      byteSize: 123,
+      width: 640,
+      height: 480,
+      frameCount: 1,
+      originalFilename: "launch.png",
+      createdAt: FIXED_NOW.toISOString()
+    }],
+    expiresAt: "2026-07-17T00:15:00.000Z"
+  };
+  const deps = dependencies();
+  deps.reviews = {
+    createExact: vi.fn(async () => ({ preview, approvalCapability, signedMediaUrls }))
+  };
+  const server = createCareerMcpServer(deps, {
+    requestAuthContext: Object.freeze({
+      subject: "123e4567-e89b-12d3-a456-426614174000",
+      accessToken: requestBearer
+    })
+  });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "test", version: "1.0.0" });
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+
+  const result = await client.callTool({
+    name: "create_exact_linkedin_preview",
+    arguments: { postId: preview.postId, version: preview.version }
+  });
+  await Promise.all([client.close(), server.close()]);
+
+  expect(result.isError).not.toBe(true);
+  expect(result.structuredContent).toEqual({ data: { preview } });
+  expect(result.structuredContent).not.toHaveProperty("approvalCapability");
+  expect(result._meta).toEqual({ approvalCapability, signedMediaUrls });
+  expect(JSON.stringify(result.structuredContent)).not.toContain(approvalCapability);
+  expect(JSON.stringify(result.structuredContent)).not.toContain("supabase.co");
+  expect(JSON.stringify(result.content)).not.toContain(approvalCapability);
+  expect(JSON.stringify(result.content)).not.toContain("supabase.co");
+  expect(JSON.stringify(result)).not.toContain(requestBearer);
 });
 
 it("opens a non-writing review card and keeps signed URLs widget-private", async () => {

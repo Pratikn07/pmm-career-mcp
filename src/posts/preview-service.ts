@@ -5,6 +5,8 @@ import type { PostVisibility } from "../drafts/service.js";
 import { DomainError, postgresErrorKind } from "../domain/errors.js";
 
 export const PREVIEW_TOKEN_HASH_CONTEXT = "pmm-career-mcp.preview-token.sha256.v1";
+export const APPROVAL_CAPABILITY_HASH_CONTEXT =
+  "pmm-career-mcp.linkedin-preview-capability.sha256.v1";
 const TOKEN_BYTES = 32;
 const TOKEN_LIFETIME_MS = 15 * 60 * 1_000;
 const MAX_ID_LENGTH = 256;
@@ -82,6 +84,26 @@ export function hashPreviewToken(token: string): string {
   const bytes = parseToken(token);
   return createHash("sha256")
     .update(PREVIEW_TOKEN_HASH_CONTEXT, "utf8")
+    .update("\0", "utf8")
+    .update(bytes)
+    .digest("hex");
+}
+
+function parseApprovalCapability(value: unknown): Buffer {
+  if (typeof value !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(value)) {
+    throw new DomainError("PREVIEW_INVALID", "Approval capability is invalid");
+  }
+  const decoded = Buffer.from(value, "base64url");
+  if (decoded.length !== TOKEN_BYTES || decoded.toString("base64url") !== value) {
+    throw new DomainError("PREVIEW_INVALID", "Approval capability is invalid");
+  }
+  return decoded;
+}
+
+export function hashApprovalCapability(capability: string): string {
+  const bytes = parseApprovalCapability(capability);
+  return createHash("sha256")
+    .update(APPROVAL_CAPABILITY_HASH_CONTEXT, "utf8")
     .update("\0", "utf8")
     .update(bytes)
     .digest("hex");

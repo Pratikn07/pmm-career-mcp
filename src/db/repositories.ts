@@ -20,6 +20,7 @@ import {
   targetNotes,
   targets
 } from "./schema.js";
+import { checksumLinkedInPost } from "../posts/post-checksum.js";
 
 type Database = PgDatabase<PgQueryResultHKT, typeof schema>;
 
@@ -161,7 +162,22 @@ export type PreviewExpectedRow = {
 
 export type PreviewCreationResult =
   | { outcome: "created"; post: PostDraft; preview: PostPreview }
-  | { outcome: "not_found" | "not_latest" | "invalid_state" };
+  | {
+      outcome:
+        | "not_found"
+        | "not_latest"
+        | "invalid_state"
+        | "integrity_mismatch";
+    };
+
+export type ExactPreviewSnapshotExpected = Readonly<{
+  subject: string;
+  post: Readonly<Pick<
+    PostDraft,
+    "id" | "draftId" | "text" | "visibility" | "version" | "checksum"
+  >>;
+  media: readonly Readonly<PostDraftMediaWithMetadata>[];
+}>;
 
 export type PreviewConsumptionResult =
   | { outcome: "consumed"; post: PostDraft; preview: PostPreview }
@@ -303,13 +319,90 @@ function timingSafeTextEqual(left: string, right: string): boolean {
   return leftBytes.length === rightBytes.length && timingSafeEqual(leftBytes, rightBytes);
 }
 
+function isExactPreviewMimeType(
+  value: string
+): value is "image/jpeg" | "image/png" | "image/gif" {
+  return value === "image/jpeg" || value === "image/png" || value === "image/gif";
+}
+
+function exactPreviewSnapshotMatches(
+  post: PostDraft,
+  media: readonly PostDraftMediaWithMetadata[],
+  expected: ExactPreviewSnapshotExpected
+): boolean {
+  if (
+    !isUuid(expected.subject)
+    || post.id !== expected.post.id
+    || post.draftId !== expected.post.draftId
+    || post.text !== expected.post.text
+    || post.visibility !== expected.post.visibility
+    || post.version !== expected.post.version
+    || post.checksum !== expected.post.checksum
+    || media.length !== expected.media.length
+    || media.length > 4
+    || (post.visibility !== "PUBLIC" && post.visibility !== "CONNECTIONS")
+  ) {
+    return false;
+  }
+
+  const subject = expected.subject.toLowerCase();
+  for (let position = 0; position < media.length; position += 1) {
+    const current = media[position]!;
+    const signed = expected.media[position]!;
+    if (
+      current.postDraftId !== post.id
+      || current.version !== post.version
+      || current.position !== position
+      || current.ownerSubject.toLowerCase() !== subject
+      || !current.objectPath.startsWith(`${subject}/`)
+      || current.postDraftId !== signed.postDraftId
+      || current.version !== signed.version
+      || current.position !== signed.position
+      || current.mediaId !== signed.mediaId
+      || current.altText !== signed.altText
+      || current.ownerSubject !== signed.ownerSubject
+      || current.objectPath !== signed.objectPath
+      || current.sha256 !== signed.sha256
+      || current.mimeType !== signed.mimeType
+      || current.byteSize !== signed.byteSize
+      || current.width !== signed.width
+      || current.height !== signed.height
+      || current.frameCount !== signed.frameCount
+      || current.originalFilename !== signed.originalFilename
+      || current.createdAt !== signed.createdAt
+      || !isExactPreviewMimeType(current.mimeType)
+    ) {
+      return false;
+    }
+  }
+
+  try {
+    const recomputed = checksumLinkedInPost({
+      draftId: post.draftId,
+      version: post.version,
+      text: post.text,
+      visibility: post.visibility,
+      media: media.map(({ position, sha256, mimeType, altText }) => {
+        if (!isExactPreviewMimeType(mimeType)) {
+          throw new TypeError("Stored exact-preview media type is invalid");
+        }
+        return { position, sha256, mimeType, altText };
+      })
+    });
+    return timingSafeTextEqual(recomputed, post.checksum)
+      && timingSafeTextEqual(recomputed, expected.post.checksum);
+  } catch {
+    return false;
+  }
+}
+
 export function createRepositories(database: Database) {
-  async function listPostDraftMediaForVersion(
+  function postDraftMediaForVersionQuery(
     queryDatabase: Database,
     postDraftId: string,
     version: number
-  ): Promise<PostDraftMediaWithMetadata[]> {
-    const rows = await queryDatabase.select({
+  ) {
+    return queryDatabase.select({
       postDraftId: postDraftMedia.postDraftId,
       version: postDraftMedia.version,
       position: postDraftMedia.position,
@@ -332,7 +425,73 @@ export function createRepositories(database: Database) {
       eq(postDraftMedia.postDraftId, postDraftId),
       eq(postDraftMedia.version, version)
     )).orderBy(asc(postDraftMedia.position));
+  }
+
+  async function listPostDraftMediaForVersion(
+    queryDatabase: Database,
+    postDraftId: string,
+    version: number
+  ): Promise<PostDraftMediaWithMetadata[]> {
+    const rows = await postDraftMediaForVersionQuery(queryDatabase, postDraftId, version);
     return normalizeRows(rows);
+  }
+
+  async function lockPostDraftMediaForVersion(
+    queryDatabase: Database,
+    postDraftId: string,
+    version: number
+  ): Promise<PostDraftMediaWithMetadata[]> {
+    const lockedDraftMedia = await queryDatabase.select({
+      postDraftId: postDraftMedia.postDraftId,
+      version: postDraftMedia.version,
+      position: postDraftMedia.position,
+      mediaId: postDraftMedia.mediaId,
+      altText: postDraftMedia.altText
+    }).from(postDraftMedia).where(and(
+      eq(postDraftMedia.postDraftId, postDraftId),
+      eq(postDraftMedia.version, version)
+    )).orderBy(asc(postDraftMedia.position)).for("update");
+    if (lockedDraftMedia.length === 0) {
+      return [];
+    }
+
+    const sortedMediaIds = lockedDraftMedia
+      .map(({ mediaId }) => mediaId.toLowerCase())
+      .sort();
+    if (new Set(sortedMediaIds).size !== sortedMediaIds.length) {
+      return [];
+    }
+    const lockedMedia = await queryDatabase.select({
+      id: postMedia.id,
+      ownerSubject: postMedia.ownerSubject,
+      objectPath: postMedia.objectPath,
+      sha256: postMedia.sha256,
+      mimeType: postMedia.mimeType,
+      byteSize: postMedia.byteSize,
+      width: postMedia.width,
+      height: postMedia.height,
+      frameCount: postMedia.frameCount,
+      originalFilename: postMedia.originalFilename,
+      createdAt: postMedia.createdAt
+    }).from(postMedia).where(
+      inArray(postMedia.id, sortedMediaIds)
+    ).orderBy(asc(postMedia.id)).for("update");
+    if (lockedMedia.length !== sortedMediaIds.length) {
+      return [];
+    }
+
+    const mediaById = new Map(lockedMedia.map((media) => [
+      media.id.toLowerCase(),
+      normalizeRowTimestamps(media)
+    ]));
+    return lockedDraftMedia.flatMap((draftMedia) => {
+      const media = mediaById.get(draftMedia.mediaId.toLowerCase());
+      if (media === undefined) {
+        return [];
+      }
+      const { id: _id, ...metadata } = media;
+      return [{ ...draftMedia, ...metadata }];
+    });
   }
 
   async function consumePreviewExact(
@@ -1195,8 +1354,16 @@ export function createRepositories(database: Database) {
         tokenHash: string;
         expiresAt: string;
         allowedStates: readonly string[];
+        expectedVersionId?: string;
+        expectedChecksum?: string;
+        replaceUnconsumedAt?: string;
+        nextState?: string;
+        expectedSnapshot?: ExactPreviewSnapshotExpected;
       }): Promise<PreviewCreationResult> {
         const expiresAt = assertIsoTimestamp("preview.expiresAt", input.expiresAt);
+        const replaceUnconsumedAt = input.replaceUnconsumedAt === undefined
+          ? undefined
+          : assertIsoTimestamp("preview.replaceUnconsumedAt", input.replaceUnconsumedAt);
         if (!isUuid(input.draftId)) {
           return { outcome: "not_found" };
         }
@@ -1220,8 +1387,33 @@ export function createRepositories(database: Database) {
           if (latest.id !== post.id) {
             return { outcome: "not_latest" };
           }
+          if (
+            (input.expectedVersionId !== undefined && input.expectedVersionId !== post.id)
+            || (input.expectedChecksum !== undefined && input.expectedChecksum !== post.checksum)
+          ) {
+            return { outcome: "integrity_mismatch" };
+          }
+          if (input.expectedSnapshot !== undefined) {
+            const lockedMedia = await lockPostDraftMediaForVersion(
+              transaction,
+              post.id,
+              post.version
+            );
+            if (!exactPreviewSnapshotMatches(post, lockedMedia, input.expectedSnapshot)) {
+              return { outcome: "integrity_mismatch" };
+            }
+          }
           if (!input.allowedStates.includes(post.state)) {
             return { outcome: "invalid_state" };
+          }
+          if (replaceUnconsumedAt !== undefined) {
+            await transaction.update(postPreviews).set({
+              consumedAt: replaceUnconsumedAt
+            }).where(and(
+              eq(postPreviews.postDraftId, post.id),
+              eq(postPreviews.version, post.version),
+              isNull(postPreviews.consumedAt)
+            ));
           }
           const [previewRow] = await transaction.insert(postPreviews).values({
             id: randomUUID(),
@@ -1231,7 +1423,25 @@ export function createRepositories(database: Database) {
             expiresAt
           }).returning();
           const preview = requiredRow(previewRow, "post preview");
-          return { outcome: "created", post, preview };
+          if (input.nextState === undefined || input.nextState === post.state) {
+            return { outcome: "created", post, preview };
+          }
+          const [updatedPostRow] = await transaction.update(postDrafts).set({
+            state: input.nextState,
+            updatedAt: replaceUnconsumedAt ?? nowIso()
+          }).where(and(
+            eq(postDrafts.id, post.id),
+            eq(postDrafts.version, post.version),
+            eq(postDrafts.state, post.state)
+          )).returning();
+          if (updatedPostRow === undefined) {
+            throw new Error("Post draft state changed before preview creation completed");
+          }
+          return {
+            outcome: "created",
+            post: normalizeRowTimestamps(updatedPostRow),
+            preview
+          };
         });
       },
       async consumeExact(input: {

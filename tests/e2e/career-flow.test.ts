@@ -5,7 +5,6 @@ import { afterEach, expect, it } from "vitest";
 import nock from "nock";
 import { createTestDatabase, type TestCareerDatabase } from "../support/database.js";
 import { createCareerApplication } from "../../src/index.js";
-import { encryptJson } from "../../src/security/crypto.js";
 import {
   E2E_NOW,
   mockedCompanyPage,
@@ -50,34 +49,8 @@ function text(value: unknown): string {
   return value as string;
 }
 
-function number(value: unknown): number {
-  expect(typeof value).toBe("number");
-  return value as number;
-}
-
-function publishInput(preview: Record<string, unknown>) {
-  return {
-    postId: text(preview.postId),
-    versionId: text(preview.versionId),
-    version: number(preview.version),
-    checksum: text(preview.checksum),
-    visibility: text(preview.visibility),
-    previewToken: text(preview.previewToken)
-  };
-}
-
-async function startStack(publishEnabled: boolean): Promise<TestStack> {
+async function startStack(): Promise<TestStack> {
   const database = await createTestDatabase();
-  if (publishEnabled) {
-    (await database.oauthTokens.upsert({
-      provider: "linkedin",
-      ciphertext: JSON.stringify(encryptJson({
-        accessToken: "e2e-access-token",
-        authorUrn: "urn:li:person:e2e-author"
-      }, "a".repeat(64))),
-      expiresAt: "2030-07-17T13:00:00.000Z"
-    }));
-  }
   const runtime = (await createCareerApplication({
     database,
     config: {
@@ -88,7 +61,7 @@ async function startStack(publishEnabled: boolean): Promise<TestStack> {
       baseUrl: "http://127.0.0.1:3000",
       authMode: "none",
       oidcDiscoveryTimeoutMs: 5_000,
-      linkedinPublishEnabled: publishEnabled,
+      linkedinPublishEnabled: false,
       linkedinImagePublishEnabled: false,
       linkedinMediaBucket: "linkedin-draft-media",
       linkedinVersion: "202606",
@@ -123,7 +96,7 @@ async function startStack(publishEnabled: boolean): Promise<TestStack> {
   return stack;
 }
 
-it("runs the private career flow and only publishes one exact enabled preview", async () => {
+it("runs the private career flow and stops at the app-only exact-preview boundary", async () => {
   nock.disableNetConnect();
   nock.enableNetConnect((host) => host.startsWith("127.0.0.1"));
   const linkedinPost = nock("https://api.linkedin.com")
@@ -141,7 +114,7 @@ it("runs the private career flow and only publishes one exact enabled preview", 
     })
     .once()
     .reply(201, undefined, { "x-restli-id": "urn:li:share:12345" });
-  const disabled = await startStack(false);
+  const disabled = await startStack();
   const connection = object(data(await disabled.client.callTool({ name: "get_linkedin_connection_status", arguments: {} })).connection);
   expect(connection).toEqual({
     connected: false,
@@ -185,21 +158,21 @@ it("runs the private career flow and only publishes one exact enabled preview", 
   const shortlist = object(data(await disabled.client.callTool({ name: "create_weekly_shortlist", arguments: { name: "This week", targetIds: [text(target.id)] } })).shortlist);
   expect(records(shortlist.entries)).toHaveLength(1);
   const post = object(data(await disabled.client.callTool({ name: "draft_linkedin_post", arguments: { text: "I am exploring PMM roles.", visibility: "PUBLIC" } })).post);
-  const preview = object(data(await disabled.client.callTool({ name: "preview_post", arguments: { postId: text(post.id), version: number(post.version) } })).preview);
-  const disabledPublish = await disabled.client.callTool({ name: "publish_linkedin_post", arguments: publishInput(preview) });
-  expect(disabledPublish.isError).toBe(true);
-  expect(JSON.stringify(disabledPublish)).toContain("PUBLISH_DISABLED");
-  expect(linkedinPost.isDone()).toBe(false);
+  const exactPreview = await disabled.client.callTool({
+    name: "create_exact_linkedin_preview",
+    arguments: { postId: text(post.id), version: post.version }
+  });
+  expect(exactPreview.isError).toBe(true);
+  expect(exactPreview.structuredContent).toEqual({
+    data: { error: { code: "AUTH_REQUIRED" } }
+  });
 
-  const enabled = await startStack(true);
-  // A separately configured runtime proves the only setting that opens the external-write path.
-  const enabledPost = object(data(await enabled.client.callTool({ name: "draft_linkedin_post", arguments: { text: "I am exploring PMM roles.", visibility: "PUBLIC" } })).post);
-  const enabledPreview = object(data(await enabled.client.callTool({ name: "preview_post", arguments: { postId: text(enabledPost.id), version: number(enabledPost.version) } })).preview);
-  const enabledPublishInput = publishInput(enabledPreview);
-  const firstPublish = data(await enabled.client.callTool({ name: "publish_linkedin_post", arguments: enabledPublishInput })).result;
-  expect(firstPublish).toEqual({ state: "published", postUrn: "urn:li:share:12345" });
-  const replay = await enabled.client.callTool({ name: "publish_linkedin_post", arguments: enabledPublishInput });
-  expect(replay.isError).toBe(true);
-  expect(JSON.stringify(replay)).toContain("PREVIEW_CONSUMED");
-  expect(linkedinPost.isDone()).toBe(true);
+  const legacyPreview = await disabled.client.callTool({
+    name: "preview_post",
+    arguments: { postId: text(post.id), version: post.version }
+  });
+  expect(legacyPreview.isError).toBe(true);
+  expect(JSON.stringify(legacyPreview)).toContain("Tool preview_post not found");
+  expect(JSON.stringify(exactPreview)).not.toContain("previewToken");
+  expect(linkedinPost.isDone()).toBe(false);
 }, 15_000);

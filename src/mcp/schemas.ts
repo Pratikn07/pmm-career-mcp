@@ -161,6 +161,10 @@ export const openLinkedInReviewCardInput = z.object({
   postId: id,
   version: z.number().int().positive()
 }).strict();
+export const createExactLinkedInPreviewInput = z.object({
+  postId: id,
+  version: z.number().int().positive()
+}).strict();
 export const previewPostInput = z.object({ postId: id, version: z.number().int().positive() }).strict();
 export const createWeeklyShortlistInput = z.object({
   name: z.string().trim().min(1).max(120),
@@ -240,8 +244,13 @@ const outreachDraftSchema = z.object({
 const postStateSchema = z.enum([
   "draft",
   "ready_for_preview",
+  "ready_for_review",
+  "previewed",
+  "uploading_media",
   "publishing",
   "published",
+  "media_upload_failed",
+  "media_upload_unknown",
   "publish_failed",
   "publish_unknown"
 ]);
@@ -282,6 +291,18 @@ const previewSchema = z.object({
   visibility: visibilitySchema,
   characterCount: z.number().int().nonnegative().max(3_000),
   previewToken: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+  expiresAt: timestamp
+}).strict();
+
+const exactPreviewSchema = z.object({
+  postId: id,
+  versionId: id,
+  text: z.string().max(3_000),
+  version: z.number().int().positive(),
+  checksum,
+  visibility: visibilitySchema,
+  characterCount: z.number().int().nonnegative().max(3_000),
+  media: z.array(postDraftMediaSchema).max(4),
   expiresAt: timestamp
 }).strict();
 
@@ -384,6 +405,9 @@ export const revisePostOutput = outputSchema(z.object({ post: postDraftSchema })
 export const attachLinkedInPostImagesOutput = outputSchema(z.object({ post: postDraftSchema }).strict());
 export const setLinkedInPostImagesOutput = outputSchema(z.object({ post: postDraftSchema }).strict());
 export const openLinkedInReviewCardOutput = outputSchema(z.object({ post: postDraftSchema }).strict());
+export const createExactLinkedInPreviewOutput = outputSchema(z.object({
+  preview: exactPreviewSchema
+}).strict());
 export const previewPostOutput = outputSchema(z.object({ preview: previewSchema }).strict());
 export const createWeeklyShortlistOutput = outputSchema(z.object({ shortlist: shortlistSchema }).strict());
 export const saveTargetOutput = outputSchema(z.object({ target: pipelineTargetSchema }).strict());
