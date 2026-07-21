@@ -16,7 +16,9 @@ Choose the Railway HTTPS origin first, for example `https://<railway-service-dom
 
 In the Supabase Dashboard, open **Connect**, select the **Session Pooler**, and copy the exact URLs for the project's region. A shared pooler host has the form `aws-<region>.pooler.supabase.com`, and each username must include the project suffix. Use `career_mcp_runtime.<project-ref>` for `DATABASE_URL` and `postgres.<project-ref>` for `MIGRATION_DATABASE_URL`. Percent-encode every password before placing it in a URL (`@` becomes `%40`, for example); do not paste an unencoded password into a connection string. Do not invent the pooler hostname from the project URL.
 
-Set `DATABASE_URL` to the copied Supabase Session Pooler connection for the least-privilege `career_mcp_runtime` role. Set `MIGRATION_DATABASE_URL` to the separate copied owner/migration connection; production startup normalizes direct and pooler aliases, requires the runtime underlying role to be exactly `career_mcp_runtime`, and rejects configurations that reuse the runtime role. In Supabase **Database Settings → SSL Configuration**, download the project's CA certificate and store its complete PEM text as the Railway `DATABASE_CA_CERT` variable. Both connections require that CA and use verified TLS with hostname validation and finite timeouts; do not use `rejectUnauthorized=false`, and do not add TLS query parameters to either URL. Neither URL may override the application's timeout or connection-name parameters. Set `OIDC_ISSUER` to the exact derived value `SUPABASE_URL/auth/v1`. Set `OIDC_AUDIENCE` to exactly `BASE_URL`, including the same origin and no trailing slash. Set `ALLOWED_SUBJECT` to the UUID of the one permitted Supabase Auth user. Keep `LINKEDIN_PUBLISH_ENABLED=false`.
+Set `DATABASE_URL` to the copied Supabase Session Pooler connection for the least-privilege `career_mcp_runtime` role. Set `MIGRATION_DATABASE_URL` to the separate copied owner/migration connection; production startup normalizes direct and pooler aliases, requires the runtime underlying role to be exactly `career_mcp_runtime`, and rejects configurations that reuse the runtime role. In Supabase **Database Settings → SSL Configuration**, download the project's CA certificate and store its complete PEM text as the Railway `DATABASE_CA_CERT` variable. Both connections require that CA and use verified TLS with hostname validation and finite timeouts; do not use `rejectUnauthorized=false`, and do not add TLS query parameters to either URL. Neither URL may override the application's timeout or connection-name parameters. Set `OIDC_ISSUER` to the exact derived value `SUPABASE_URL/auth/v1`. Set `OIDC_AUDIENCE` to exactly `BASE_URL`, including the same origin and no trailing slash. Set `ALLOWED_SUBJECT` to the UUID of the one permitted Supabase Auth user.
+
+Keep both switches false through deployment and all pre-rollout checks. `LINKEDIN_PUBLISH_ENABLED` is the master gate for text and image posts. `LINKEDIN_IMAGE_PUBLISH_ENABLED` is an additional gate required whenever a draft contains images. Enabling a switch makes the app-only path available; it never authorizes an individual post or makes publishing automatic.
 
 The active lines in [.env.example](../../.env.example) are copyable local-development defaults and require a local PostgreSQL server. Its production reference entries are commented; set their real values only in Railway. Leave `LINKEDIN_REDIRECT_URI` unset until the later LinkedIn authorization phase, then set it as host-only configuration (not a secret) to `BASE_URL/linkedin/callback`.
 
@@ -97,11 +99,42 @@ Use ChatGPT on the web. For Business, an admin or owner must enable Developer mo
 https://<railway-service-domain>/mcp
 ```
 
-Choose OAuth authentication, click **Scan Tools**, complete the browser login and explicit consent, and wait for the scan to finish before creating the private app. Confirm that ChatGPT can initialize it and list the approved tools. Then run a read-only YC search and a draft/preview flow. Keep `LINKEDIN_PUBLISH_ENABLED=false`; no LinkedIn authorization, publish, message, connection request, schedule, or automated posting is part of this deployment check.
+Choose OAuth authentication, click **Scan Tools**, complete the browser login and explicit consent, and wait for the scan to finish before creating the private app. Confirm that ChatGPT can initialize it and list the approved tools. Then run a read-only YC search and a private draft flow. Keep both publishing switches false; no LinkedIn publish, message, connection request, or automated posting is part of this deployment check.
+
+Confirm the tool boundary after every connector refresh:
+
+- Model-visible: research and pipeline tools, `draft_linkedin_post`, `revise_post`, `attach_linkedin_post_images`, `set_linkedin_post_images`, `list_post_history`, and the non-writing `open_linkedin_review_card` launcher.
+- App-only: `create_exact_linkedin_preview` and `publish_exact_linkedin_post`. Both must have `_meta.ui.visibility: ["app"]`; the legacy `preview_post` and `publish_linkedin_post` names must be absent.
+
+The launcher may render a selected immutable draft and short-lived private image URLs, but it must create no preview row, capability, LinkedIn image initialization, upload, or post. Exact preview creation occurs only after the user opens the interactive card and clicks its control. Publishing occurs only after a successful exact preview and a separate final confirmation.
 
 Supabase advertises the `refresh_token` grant and issues rotating refresh tokens, but its OAuth discovery does not currently advertise the standard `offline_access` scope that ChatGPT recommends for long-lived OIDC connections. Confirm in the live flow that ChatGPT remains connected after an access-token renewal without inspecting or logging token values. If renewal is not available, document that the private app requires reauthentication after expiry; do not broaden the accepted scopes or expose a refresh token to work around it.
 
 ChatGPT keeps an approved snapshot of tool definitions. If this branch's tool schemas change after the app is created, refresh the app's actions or recreate the draft before testing; do not assume server changes are picked up automatically.
+
+## 7. Verify the morning and interactive boundaries
+
+Use this exact schedule instruction:
+
+> Research today's approved topic and save a private LinkedIn draft in PMM Career MCP. You may prepare up to four draft images with alt text. Do not create an exact preview, do not upload anything to LinkedIn, and do not publish. Notify me when the private draft is ready, then stop.
+
+The scheduled flow may research, draft, revise, attach a ChatGPT-generated or user-uploaded image, save immutable versions, open/save the non-writing review-card draft boundary, and notify the user. It must finish with zero exact-preview rows and zero LinkedIn initialize, upload, or final-post calls.
+
+Scheduled image handoff is a capability gate, not a reason to add credentials. If the scheduled ChatGPT environment cannot hand a generated image file to the MCP file parameter, save the text draft plus a detailed image brief or generation prompt and stop. Generate or upload the image later in the interactive conversation. Do not add an OpenAI API key, paid image service, Supabase service-role key, or Supabase secret key.
+
+Drafts created before the versioned whole-post checksum remain readable but cannot enter exact review. Use `revise_post` to create a new immutable current-format version first. Any later text, visibility, image bytes, order, MIME type, or alt-text change also requires a new version and a new exact preview.
+
+Before requesting permission to enable either publishing switch, complete these checks in order:
+
+1. Create the private `linkedin-draft-media` bucket with the exact settings in section 2 and apply the reviewed database and Storage RLS migrations as owner.
+2. Deploy only `codex/supabase-migration`, with both switches false.
+3. Attach a harmless private image through the authenticated ChatGPT connector to prove the custom-audience user JWT passes owner-folder Storage RLS. If it fails, stop; never add a service-role/secret key.
+4. Refresh the ChatGPT app and verify the model-visible/app-only split above.
+5. Run the morning schedule smoke. Confirm the private draft exists and that no preview row or LinkedIn call exists.
+6. Interactively create an exact preview. With both switches still false, confirm publish is rejected before any LinkedIn request.
+7. Report the evidence and obtain explicit user approval before changing either switch. A first live post still requires a new exact preview, inspection of the locked card, explicit confirmation, and one deliberate publish attempt.
+
+The publish state machine does not automatically retry. `media_upload_failed` and `publish_failed` are definite terminal failures. `media_upload_unknown` and `publish_unknown` are terminal ambiguous outcomes. For `publish_unknown`, manually inspect the connected member's LinkedIn activity before creating a new draft version or attempt; the original capability is consumed and must never be retried.
 
 ## Failure diagnostics
 
@@ -112,6 +145,8 @@ ChatGPT keeps an approved snapshot of tool definitions. If this branch's tool sc
 | OAuth discovery or consent fails | Recheck `SUPABASE_URL`, the derived issuer, Site URL, Authorization Path `/oauth/consent`, OAuth 2.1/DCR settings, and `openid`/`email` scopes. |
 | Token is rejected | Run the private token verifier. Confirm the mandatory hook is enabled and check the exact issuer, canonical `BASE_URL` audience, expiry, one allowed subject, and `openid email` scopes. Do not bypass a mismatch. |
 | ChatGPT cannot initialize `/mcp` | Confirm the HTTPS connector URL, successful OAuth consent, protected-resource metadata, and a healthy `/ready` endpoint. |
+| Scheduled run cannot pass a generated image file | Save the text draft plus a detailed image brief and stop. Continue interactively; do not add an API key. |
+| `publish_unknown` | Do not retry. Inspect LinkedIn manually for the exact content before creating a new version and preview. |
 | Any secret appears in output | Revoke or rotate it using the provider, remove it from the exposed location, and repeat only the affected validation. |
 
-Do not mark the production deployment complete until the live smoke, OAuth audience, Railway readiness, and ChatGPT connector checks above have all succeeded with publishing disabled.
+Do not mark the production deployment complete until the live smoke, OAuth audience, Railway readiness, private Storage/JWT gate, ChatGPT connector refresh, morning boundary, and disabled-switch checks above have all succeeded with both publishing switches false.

@@ -1,6 +1,6 @@
 # PMM Career MCP
 
-A private, single-user MCP server for YC-company career research, a networking pipeline, and deliberately controlled text-only LinkedIn publishing. It is designed for ChatGPT Developer Mode. It does not scrape LinkedIn, send LinkedIn messages, make connection requests, or post without an explicit request for the exact preview in the current ChatGPT conversation.
+A private, single-user MCP server for YC-company career research, a networking pipeline, and deliberately controlled LinkedIn drafting with zero to four images. It is designed for ChatGPT Developer Mode. It does not scrape LinkedIn, send LinkedIn messages, make connection requests, or post from a scheduled/model-driven run. Publishing is available only through the human-operated review card after an exact preview and explicit final confirmation.
 
 ## Start locally
 
@@ -42,13 +42,28 @@ Repository changes do not create or configure a Supabase project, Railway servic
 
 Use Supabase managed backups for the production database and treat them as private career data because they can contain encrypted LinkedIn tokens. Follow the provider's restore procedure in a controlled environment.
 
-## LinkedIn is a later phase
+## Guarded LinkedIn workflow
 
-`LINKEDIN_PUBLISH_ENABLED=false` is the default and must remain false during deployment and connector checks. While it is false, the server cannot publish. There is no automated posting, retry, scheduling, messaging, or connection-request capability.
+Both publishing switches default to `false` and stay false through local verification, deployment, connector refresh, the scheduled-flow smoke, and the disabled-publish smoke:
+
+- `LINKEDIN_PUBLISH_ENABLED` is the master switch. When false, every text or image publish attempt is rejected before LinkedIn.
+- `LINKEDIN_IMAGE_PUBLISH_ENABLED` independently controls image upload/publishing. An image post requires both switches; a text-only post still requires the app-only exact-preview flow and the master switch.
+
+Enabling either switch never authorizes a post. There is no unattended posting, automatic retry, LinkedIn messaging, or connection-request capability.
 
 Only after the private deployment and read-only MCP flow are working should an operator create a LinkedIn app, set the host-only (non-secret) `LINKEDIN_REDIRECT_URI` to `https://your-host.example/linkedin/callback`, and add the LinkedIn client values plus a 64-character hexadecimal `TOKEN_ENCRYPTION_KEY` to the host's secret store. Leave the redirect URI unset before that later phase. Tokens are encrypted in managed PostgreSQL and are never returned by MCP tools.
 
-Every real post still requires the exact immutable draft version, checksum, visibility, and a fresh one-use preview token. If a publish result is unknown, do not retry: first check LinkedIn manually, then create a new draft version and preview before a new explicit request.
+The model-visible tools may research, save or revise a private draft, attach or reorder one to four validated images, update alt text, list history, and open the non-writing review card. `create_exact_linkedin_preview` and `publish_exact_linkedin_post` are app-only actions hidden from the model. Opening the card is not approval, and creating an exact preview is not publishing. Every real post requires the exact immutable text, visibility, image order, alt text, checksums, a fresh one-use capability, and a final human confirmation in the card.
+
+Drafts created before the whole-post checksum format remain readable, but exact review rejects them. Revise the legacy draft to create a new immutable current-format version before opening an exact preview.
+
+Use this exact instruction for the morning ChatGPT schedule:
+
+> Research today's approved topic and save a private LinkedIn draft in PMM Career MCP. You may prepare up to four draft images with alt text. Do not create an exact preview, do not upload anything to LinkedIn, and do not publish. Notify me when the private draft is ready, then stop.
+
+If a scheduled ChatGPT run cannot pass a generated image file to the MCP, it must save the text draft plus a detailed image brief and stop. Generate or upload the image later in the interactive conversation. Do not add an OpenAI API key, paid image service, or secret Supabase key as a workaround.
+
+Publishing uses one deliberate, no-retry attempt. `media_upload_failed` and `publish_failed` are definite terminal failures; create a new draft version and exact preview before another deliberate attempt. `media_upload_unknown` and `publish_unknown` are terminal ambiguous states. For `publish_unknown`, inspect LinkedIn manually before doing anything else—never retry the same capability.
 
 ## Operating rules
 
@@ -56,10 +71,10 @@ Every real post still requires the exact immutable draft version, checksum, visi
 - Research is limited to YC companies and allowed public company sources; people coverage is best-effort, never a complete directory.
 - YC company discovery uses an official server-rendered YC industry or location facet page selected from the query. Every MCP response includes a page-scoped coverage summary—even when no company matches—so an empty result is never presented as proof of complete YC-wide coverage.
 - Networking scores are calculated on the server from bounded person, source-evidence, opportunity, preference, and weight inputs. Ranking, explanation, and persistence never accept caller-authored numeric scores, and saving recalculates the score immediately before the private database write.
-- Every tool returns a typed success payload or a safe error code plus a short non-secret summary. Preview tokens and authorization URLs remain in structured results and are not copied into summary text.
+- Every tool returns a typed success payload or a safe error code plus a short non-secret summary. Approval capabilities remain widget-private, and authorization URLs are not copied into summary text.
 - Drafts, previews, shortlists, targets, and notes stay private in the managed database.
 - A failed or unknown publish attempt is not permission to retry automatically. Resolve it deliberately and create a fresh preview when needed.
 
 ## Verification status
 
-Local automated checks cover the database migration path, OAuth validation, readiness behavior, and publishing safety. A production deployment is not verified until the operator completes the runbook's live Supabase smoke, OAuth audience, Railway readiness, and ChatGPT connector checks with `LINKEDIN_PUBLISH_ENABLED=false`.
+Local automated checks cover the database migration path, OAuth validation, request-scoped private-media composition, scheduled-flow boundary, readiness behavior, and publishing safety. A production deployment is not verified until the operator completes the runbook's live Supabase Storage/JWT gate, OAuth audience, Railway readiness, ChatGPT connector, morning-schedule, and disabled-switch checks with both publishing switches false.

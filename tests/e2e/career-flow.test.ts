@@ -167,6 +167,28 @@ it("runs the private career flow and stops at the app-only exact-preview boundar
     data: { error: { code: "AUTH_REQUIRED" } }
   });
 
+  for (const call of [
+    {
+      name: "attach_linkedin_post_images",
+      arguments: {
+        postId: text(post.id),
+        expectedVersion: post.version,
+        images: [{ download_url: "https://files.example/image.png", file_id: "file-1" }],
+        altTexts: ["A private PMM image"]
+      }
+    },
+    {
+      name: "open_linkedin_review_card",
+      arguments: { postId: text(post.id), version: post.version }
+    }
+  ]) {
+    const result = await disabled.client.callTool(call);
+    expect(result.isError, call.name).toBe(true);
+    expect(result.structuredContent, call.name).toEqual({
+      data: { error: { code: "AUTH_REQUIRED" } }
+    });
+  }
+
   const legacyPreview = await disabled.client.callTool({
     name: "preview_post",
     arguments: { postId: text(post.id), version: post.version }

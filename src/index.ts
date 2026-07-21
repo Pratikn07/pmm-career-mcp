@@ -1,6 +1,8 @@
 import { fileURLToPath } from "node:url";
 import type { Express } from "express";
 import type { Server } from "node:http";
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { RequestAuthContext } from "./auth/request-context.js";
 import { loadConfig, type AppConfig } from "./config.js";
 import {
   createDatabase,
@@ -17,8 +19,13 @@ import {
   type LinkedInPublishingClient
 } from "./linkedin/publishing-client.js";
 import { createImagePublishService } from "./linkedin/image-publish-service.js";
+import { downloadOpenAiFile } from "./media/file-download.js";
+import { inspectLinkedInImage } from "./media/image-inspection.js";
 import { createPostMediaService } from "./media/post-media-service.js";
-import { createSupabaseDraftMediaStorage } from "./media/storage.js";
+import {
+  createSupabaseDraftMediaStorage,
+  type DraftMediaStorage
+} from "./media/storage.js";
 import { createCareerMcpServer } from "./mcp/server.js";
 import { createPipelineService } from "./pipeline/service.js";
 import { createPreviewService } from "./posts/preview-service.js";
@@ -33,6 +40,11 @@ import { createPublicYcSource, createYcProvider, type YcSource } from "./researc
 type FetchPage = (url: string, options: DiscoveryAdapterOptions) => Promise<FetchedPage>;
 type ResolveAddresses = (hostname: string, options: DiscoveryAdapterOptions) => Promise<string[]>;
 
+type MediaStorageFactory = (
+  config: AppConfig,
+  context: RequestAuthContext
+) => DraftMediaStorage;
+
 type ApplicationOptions = {
   config: AppConfig;
   database?: CareerDatabase;
@@ -42,11 +54,16 @@ type ApplicationOptions = {
   now?: () => Date;
   linkedinPublishingClient?: LinkedInPublishingClient;
   linkedinOAuth?: Pick<LinkedInOAuth, "createAuthorizationUrl" | "exchangeCallback">;
+  mediaStorageFactory?: MediaStorageFactory;
+  mediaDownloadFile?: typeof downloadOpenAiFile;
+  mediaInspectImage?: typeof inspectLinkedInImage;
 };
 
 export type CareerApplication = {
   app: Express;
   database: CareerDatabase;
+  /** Builds the same request-scoped server used by the stateless HTTP route. */
+  createMcpServer(context: RequestAuthContext | undefined): McpServer;
 };
 
 export function createLinkedInConnectionPreflight(
@@ -70,10 +87,13 @@ export function createLinkedInConnectionPreflight(
 }
 
 function unavailableLinkedInClient(): LinkedInPublishingClient {
+  const unavailable = (): never => {
+    throw new DomainError("OAUTH_PROVIDER_ERROR", "LinkedIn authorization is not configured");
+  };
   return {
-    async initializeImage() { return { outcome: "unknown" }; },
-    async uploadImage() { return { outcome: "unknown" }; },
-    async createPost() { return { outcome: "unknown" }; }
+    async initializeImage() { return unavailable(); },
+    async uploadImage() { return unavailable(); },
+    async createPost() { return unavailable(); }
   };
 }
 
@@ -136,6 +156,26 @@ function oauthFromEnvironment(
   });
 }
 
+function hasPrivateMediaConfiguration(config: AppConfig): boolean {
+  if (
+    config.supabaseUrl === undefined
+    || config.supabasePublishableKey === undefined
+    || config.supabasePublishableKey.length === 0
+  ) return false;
+  try {
+    const url = new URL(config.supabaseUrl);
+    return url.protocol === "https:"
+      && url.username === ""
+      && url.password === ""
+      && url.pathname === "/"
+      && url.search === ""
+      && url.hash === ""
+      && url.origin === config.supabaseUrl;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Composes the production server and also provides an injection seam for the
  * offline end-to-end test. No service is contacted until its MCP tool is called.
@@ -173,49 +213,59 @@ export async function createCareerApplication(
       linkedinVersion: options.config.linkedinVersion
     }));
   const linkedin = options.linkedinOAuth ?? unavailableLinkedInOAuth();
-  const app = createHttpApp({
-    config: options.config,
-    checkReady: () => database.checkReady(),
-    mcpServerFactory: (context) => {
-      const connectionValid = createLinkedInConnectionPreflight(database, {
-        ...(options.config.tokenEncryptionKey === undefined
-          ? {}
-          : { tokenEncryptionKey: options.config.tokenEncryptionKey }),
-        publishingClientAvailable: options.linkedinPublishingClient !== undefined
-          || options.config.tokenEncryptionKey !== undefined
-      });
-      let media;
-      let reviews;
-      let publish;
-      if (context !== undefined) {
-        try {
-          const storage = createSupabaseDraftMediaStorage(options.config, context);
-          media = createPostMediaService(database, { subject: context.subject, storage });
-          reviews = createReviewService(database, {
-            subject: context.subject,
-            storage,
-            clock: now
-          });
-          publish = createImagePublishService(database, {
-            subject: context.subject,
-            storage,
-            client,
-            publishEnabled: options.config.linkedinPublishEnabled,
-            imagePublishEnabled: options.config.linkedinImagePublishEnabled,
-            connectionValid,
-            clock: now
-          });
-        } catch {
-          // Authenticated tools return a generic unavailable error when private
-          // Storage is not configured; no credential or request token is exposed.
-        }
+  const mediaStorageFactory = options.mediaStorageFactory ?? createSupabaseDraftMediaStorage;
+  const createMcpServer = (context: RequestAuthContext | undefined): McpServer => {
+    const connectionValid = createLinkedInConnectionPreflight(database, {
+      ...(options.config.tokenEncryptionKey === undefined
+        ? {}
+        : { tokenEncryptionKey: options.config.tokenEncryptionKey }),
+      publishingClientAvailable: options.linkedinPublishingClient !== undefined
+        || options.config.tokenEncryptionKey !== undefined
+    });
+    let media;
+    let reviews;
+    let publish;
+    if (context !== undefined && hasPrivateMediaConfiguration(options.config)) {
+      try {
+        const storage = mediaStorageFactory(options.config, context);
+        media = createPostMediaService(database, {
+          subject: context.subject,
+          storage,
+          ...(options.mediaDownloadFile === undefined
+            ? {}
+            : { downloadFile: options.mediaDownloadFile }),
+          ...(options.mediaInspectImage === undefined
+            ? {}
+            : { inspectImage: options.mediaInspectImage })
+        });
+        reviews = createReviewService(database, {
+          subject: context.subject,
+          storage,
+          clock: now
+        });
+        publish = createImagePublishService(database, {
+          subject: context.subject,
+          storage,
+          client,
+          publishEnabled: options.config.linkedinPublishEnabled,
+          imagePublishEnabled: options.config.linkedinImagePublishEnabled,
+          connectionValid,
+          clock: now
+        });
+      } catch {
+        // Authenticated tools return only safe unavailable errors when private
+        // Storage cannot be composed; request credentials are never retained.
       }
-      const publisher = publish ?? {
-        async publish(): Promise<never> {
+    }
+    const publisher = publish ?? {
+      async publish(): Promise<never> {
+        if (context === undefined) {
           throw new DomainError("AUTH_REQUIRED", "Authenticated request identity is required");
         }
-      };
-      return createCareerMcpServer({
+        throw new DomainError("MEDIA_STORAGE_ERROR", "Draft media storage is unavailable");
+      }
+    };
+    return createCareerMcpServer({
       ycProvider,
       peopleDiscovery,
       jobDiscovery,
@@ -235,19 +285,23 @@ export async function createCareerApplication(
           imagePublishingEnabled: options.config.linkedinImagePublishEnabled
         };
       }
-      }, {
-        now,
-        ...(context === undefined ? {} : { requestAuthContext: context }),
-        ...(options.config.supabaseUrl === undefined
-          ? {}
-          : {
-              reviewCardResource: {
-                baseUrl: options.config.baseUrl,
-                supabaseUrl: options.config.supabaseUrl
-              }
-            })
-      });
-    }
+    }, {
+      now,
+      ...(context === undefined ? {} : { requestAuthContext: context }),
+      ...(options.config.supabaseUrl === undefined
+        ? {}
+        : {
+            reviewCardResource: {
+              baseUrl: options.config.baseUrl,
+              supabaseUrl: options.config.supabaseUrl
+            }
+          })
+    });
+  };
+  const app = createHttpApp({
+    config: options.config,
+    checkReady: () => database.checkReady(),
+    mcpServerFactory: createMcpServer
   });
   app.get("/linkedin/callback", async (request, response) => {
     const code = typeof request.query.code === "string" ? request.query.code : undefined;
@@ -263,7 +317,7 @@ export async function createCareerApplication(
       response.status(400).send("LinkedIn authorization could not be completed.");
     }
   });
-  return { app, database };
+  return { app, database, createMcpServer };
 }
 
 export type StartServerDependencies = {
