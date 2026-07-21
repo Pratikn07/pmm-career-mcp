@@ -40,19 +40,19 @@ Started: 2026-07-20
 
 | Task | Status | Implementation | Review | Commit |
 | --- | --- | --- | --- | --- |
-| 1. Configuration and build dependencies | In progress | — | — | — |
-| 2. Request-scoped Supabase identity | Pending | — | — | — |
-| 3. Media and publish-attempt persistence | Pending | — | — | — |
-| 4. Storage RLS and user-JWT adapter | Pending | — | — | — |
-| 5. Untrusted image ingestion | Pending | — | — | — |
-| 6. Immutable media drafts and checksums | Pending | — | — | — |
-| 7. Draft tools and review-card resource | Pending | — | — | — |
-| 8. App-only exact previews | Pending | — | — | — |
-| 9. Interactive review card | Pending | — | — | — |
-| 10. LinkedIn image transport | Pending | — | — | — |
-| 11. Durable app-only publishing | Pending | — | — | — |
-| 12. Schedule safety and release verification | Pending | — | — | — |
-| Final whole-branch review | Pending | — | — | — |
+| 1. Configuration and build dependencies | Complete | Complete | Approved | `9364dce` |
+| 2. Request-scoped Supabase identity | Complete | Complete | Approved | `8b64b09` |
+| 3. Media and publish-attempt persistence | Complete | Complete | Approved | `b077923` |
+| 4. Storage RLS and user-JWT adapter | Complete | Complete | Approved | `c4a3018` |
+| 5. Untrusted image ingestion | Complete | Complete | Approved; final minor closed | `616d7fb`, `ce610b3` |
+| 6. Immutable media drafts and checksums | Complete | Complete | Approved | `13879e7` |
+| 7. Draft tools and review-card resource | Complete | Complete | Approved | `0f14ac0` |
+| 8. App-only exact previews | Complete | Complete | Approved | `6b9e2ff` |
+| 9. Interactive review card | Complete | Complete | Approved | `5cf5230` |
+| 10. LinkedIn image transport | Complete | Complete | Approved | `834b313` |
+| 11. Durable app-only publishing | Complete | Complete | Approved | `33e3eaa` |
+| 12. Schedule safety and release verification | Complete | Complete | Approved | `92e3dd0` |
+| Final whole-branch review | Complete | Complete | Ready (0 findings) | `ce610b3` |
 
 ## LinkedIn image workflow constraints
 
@@ -61,3 +61,17 @@ Started: 2026-07-20
 - Scheduled runs may research and draft, but may never preview or publish.
 - No service-role key, database password, LinkedIn credential, bearer token, or approval capability may be logged or exposed.
 - Live Supabase/Railway changes wait at the explicit rollout checkpoint.
+
+Task 1: complete (commits `acf01f3..9364dce`, review clean; controller verification: 95 focused tests plus typecheck passed).
+Task 2: complete (commits `9364dce..8b64b09`, review clean; controller verification: 17 focused tests plus typecheck passed).
+Task 3: complete (commits `8b64b09..b077923`, review clean; controller verification: 90 focused database tests plus typecheck passed).
+Task 4: complete (commits `b077923..c4a3018`, review clean; controller verification: 16 focused Storage/auth tests plus typecheck passed).
+Task 5: complete (commits `c4a3018..616d7fb`, review approved; controller verification: 52 focused media-security tests plus typecheck passed). The recorded default-HTTPS transport test gap was closed in `ce610b3` with an offline regression covering address pinning, Host/SNI, both lookup callback forms, `agent:false`, abort propagation, hostname mismatch, and fresh redirect requests.
+Task 6: complete (commits `616d7fb..13879e7`, first review found two Important race/cleanup issues and two Minor contract/Unicode issues; all four were fixed and the re-review approved with no remaining findings; controller verification: 48 focused integration tests plus typecheck and diff check passed).
+Task 7: complete (commits `13879e7..0f14ac0`, first review found one Important and one Minor annotation mismatch; both were fixed and the re-review approved with no remaining findings; controller verification: 23 focused tool/resource tests plus typecheck and diff check passed).
+Task 8: complete (commits `0f14ac0..6b9e2ff`, first review found one Important snapshot-lock gap and one Minor concurrency-test gap; re-review then found one Minor cross-draft lock-order risk; all findings were fixed and final re-review approved with no remaining findings; controller verification: 96 focused database/preview/tool tests plus typecheck and diff check passed).
+Task 9: complete (commits `6b9e2ff..5cf5230`, first review found two Important metadata/result-handling issues and one Minor signed-URL issue; re-review found one residual Important legacy-correlation issue and one Minor malformed-error issue; all findings were fixed and final re-review approved with no remaining findings; controller verification: 49 focused review-card/static/Docker tests plus typecheck, production build, and diff check passed).
+Task 10: complete (commits `5cf5230..834b313`, first review found one Important redirect/one-shot issue and one Minor sparse-gallery issue; both were fixed and final re-review approved with no remaining findings; controller verification: 54 focused LinkedIn transport tests plus typecheck, production build, and diff check passed).
+Task 11: complete (commits `834b313..33e3eaa`, first review found three Important safety issues: preview checksum binding, complete gallery-byte preflight, and credential validation before approval claim; all were fixed and final re-review approved with no remaining findings; controller verification: 121 focused publishing/database/MCP/e2e tests plus typecheck, build, and diff check passed; full implementer suite: 877 tests).
+Task 12: complete (commits `33e3eaa..92e3dd0`, independent review approved with no findings; controller verification: 5 focused end-to-end tests plus production build passed; implementer verification: 881 tests, typecheck, build, production audit with 0 vulnerabilities, Docker build, and diff check passed; both publishing switches remained false and no live service was called).
+Final whole-branch review: complete (range `acf01f3..ce610b3`). The first independent security/data and product/MCP reviews found four Important cross-task blockers plus smaller Unicode, expiry, no-auth, and transport-test gaps. Commit `ce610b3` fixed every finding: production signed launcher URLs, new-draft v2 checksums, exact whitespace rendering, versioned LinkedIn scope evidence before approval claim, Unicode alt-text boundaries, expiry revocation/guidance, complete local no-auth checks, default HTTPS pinning coverage, and a production `sharp` smoke. Both original reviewers re-reviewed the fix and returned READY with 0 Critical, 0 Important, and 0 Minor findings. Fresh controller verification: 905 tests, typecheck, production build, production audit with 0 vulnerabilities, Docker build with `sharp` import, diff check, and both publishing defaults false. No live service, deployment variable, approval, image upload, or LinkedIn post was created.
