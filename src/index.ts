@@ -11,12 +11,18 @@ import { DomainError } from "./domain/errors.js";
 import { createDraftService } from "./drafts/service.js";
 import { createHttpApp } from "./http/app.js";
 import { createLinkedInOAuth, type LinkedInOAuth } from "./linkedin/oauth.js";
-import { createLinkedInPostsClient } from "./linkedin/posts-client.js";
-import type { LinkedInPostsClient } from "./linkedin/publish-service.js";
-import { createPublishService } from "./linkedin/publish-service.js";
+import { loadLinkedInCredential } from "./linkedin/posts-client.js";
+import {
+  createLinkedInPublishingClient,
+  type LinkedInPublishingClient
+} from "./linkedin/publishing-client.js";
+import { createImagePublishService } from "./linkedin/image-publish-service.js";
+import { createPostMediaService } from "./media/post-media-service.js";
+import { createSupabaseDraftMediaStorage } from "./media/storage.js";
 import { createCareerMcpServer } from "./mcp/server.js";
 import { createPipelineService } from "./pipeline/service.js";
 import { createPreviewService } from "./posts/preview-service.js";
+import { createReviewService } from "./posts/review-service.js";
 import { createJobDiscovery } from "./research/job-discovery.js";
 import { createPeopleDiscovery } from "./research/people-discovery.js";
 import type { DiscoveryAdapterOptions } from "./research/discovery-deadline.js";
@@ -34,7 +40,7 @@ type ApplicationOptions = {
   fetchPage?: FetchPage;
   resolveAddresses?: ResolveAddresses;
   now?: () => Date;
-  linkedinClient?: LinkedInPostsClient;
+  linkedinPublishingClient?: LinkedInPublishingClient;
   linkedinOAuth?: Pick<LinkedInOAuth, "createAuthorizationUrl" | "exchangeCallback">;
 };
 
@@ -43,11 +49,31 @@ export type CareerApplication = {
   database: CareerDatabase;
 };
 
-function unavailableLinkedInClient(): LinkedInPostsClient {
-  return {
-    async createTextPost() {
-      throw new DomainError("OAUTH_PROVIDER_ERROR", "LinkedIn authorization must be reconnected");
+export function createLinkedInConnectionPreflight(
+  database: CareerDatabase,
+  options: Readonly<{
+    tokenEncryptionKey?: string;
+    publishingClientAvailable: boolean;
+  }>
+): () => Promise<boolean> {
+  return async () => {
+    if (!options.publishingClientAvailable || options.tokenEncryptionKey === undefined) {
+      return false;
     }
+    try {
+      await loadLinkedInCredential(database, options.tokenEncryptionKey);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+}
+
+function unavailableLinkedInClient(): LinkedInPublishingClient {
+  return {
+    async initializeImage() { return { outcome: "unknown" }; },
+    async uploadImage() { return { outcome: "unknown" }; },
+    async createPost() { return { outcome: "unknown" }; }
   };
 }
 
@@ -140,40 +166,88 @@ export async function createCareerApplication(
   const pipeline = createPipelineService(database);
   const drafts = createDraftService(database);
   const previews = createPreviewService(database, { clock: now });
-  const client = options.linkedinClient ?? (options.config.tokenEncryptionKey === undefined
+  const client = options.linkedinPublishingClient ?? (options.config.tokenEncryptionKey === undefined
     ? unavailableLinkedInClient()
-    : createLinkedInPostsClient(database, {
+    : createLinkedInPublishingClient(database, {
       tokenEncryptionKey: options.config.tokenEncryptionKey,
       linkedinVersion: options.config.linkedinVersion
     }));
-  const publish = createPublishService(database, {
-    previewService: previews,
-    client,
-    publishEnabled: options.config.linkedinPublishEnabled,
-    clock: now
-  });
   const linkedin = options.linkedinOAuth ?? unavailableLinkedInOAuth();
   const app = createHttpApp({
     config: options.config,
     checkReady: () => database.checkReady(),
-    mcpServerFactory: (_context) => createCareerMcpServer({
+    mcpServerFactory: (context) => {
+      const connectionValid = createLinkedInConnectionPreflight(database, {
+        ...(options.config.tokenEncryptionKey === undefined
+          ? {}
+          : { tokenEncryptionKey: options.config.tokenEncryptionKey }),
+        publishingClientAvailable: options.linkedinPublishingClient !== undefined
+          || options.config.tokenEncryptionKey !== undefined
+      });
+      let media;
+      let reviews;
+      let publish;
+      if (context !== undefined) {
+        try {
+          const storage = createSupabaseDraftMediaStorage(options.config, context);
+          media = createPostMediaService(database, { subject: context.subject, storage });
+          reviews = createReviewService(database, {
+            subject: context.subject,
+            storage,
+            clock: now
+          });
+          publish = createImagePublishService(database, {
+            subject: context.subject,
+            storage,
+            client,
+            publishEnabled: options.config.linkedinPublishEnabled,
+            imagePublishEnabled: options.config.linkedinImagePublishEnabled,
+            connectionValid,
+            clock: now
+          });
+        } catch {
+          // Authenticated tools return a generic unavailable error when private
+          // Storage is not configured; no credential or request token is exposed.
+        }
+      }
+      const publisher = publish ?? {
+        async publish(): Promise<never> {
+          throw new DomainError("AUTH_REQUIRED", "Authenticated request identity is required");
+        }
+      };
+      return createCareerMcpServer({
       ycProvider,
       peopleDiscovery,
       jobDiscovery,
       pipeline,
       drafts,
       previews,
-      publish,
+      ...(reviews === undefined ? {} : { reviews }),
+      ...(media === undefined ? {} : { media }),
+      publish: publisher,
       linkedin,
       getLinkedInConnectionStatus: async () => {
         const token = await database.oauthTokens.getByProvider("linkedin");
         return {
           connected: token !== undefined,
           valid: token !== undefined && (token.expiresAt === null || Date.parse(token.expiresAt) > now().getTime()),
-          publishingEnabled: options.config.linkedinPublishEnabled
+          publishingEnabled: options.config.linkedinPublishEnabled,
+          imagePublishingEnabled: options.config.linkedinImagePublishEnabled
         };
       }
-    }, { now })
+      }, {
+        now,
+        ...(context === undefined ? {} : { requestAuthContext: context }),
+        ...(options.config.supabaseUrl === undefined
+          ? {}
+          : {
+              reviewCardResource: {
+                baseUrl: options.config.baseUrl,
+                supabaseUrl: options.config.supabaseUrl
+              }
+            })
+      });
+    }
   });
   app.get("/linkedin/callback", async (request, response) => {
     const code = typeof request.query.code === "string" ? request.query.code : undefined;

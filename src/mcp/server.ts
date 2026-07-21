@@ -5,10 +5,10 @@ import { SUPABASE_OAUTH_SCOPES } from "../auth/resource-auth.js";
 import type { DraftService } from "../drafts/service.js";
 import { DomainError } from "../domain/errors.js";
 import type { LinkedInOAuth } from "../linkedin/oauth.js";
-import type { PublishService } from "../linkedin/publish-service.js";
+import type { ImagePublishService } from "../linkedin/image-publish-service.js";
 import type { MediaPostDraftVersion, PostMediaService } from "../media/post-media-service.js";
 import type { PipelineService } from "../pipeline/service.js";
-import type { PreviewExpected, PreviewService } from "../posts/preview-service.js";
+import type { PreviewService } from "../posts/preview-service.js";
 import type { ReviewService } from "../posts/review-service.js";
 import {
   explainTargetMatch,
@@ -52,8 +52,8 @@ import {
   openLinkedInReviewCardInput,
   openLinkedInReviewCardOutput,
   pipelineStatusSchema,
-  publishLinkedInPostInput,
-  publishLinkedInPostOutput,
+  publishExactLinkedInPostInput,
+  publishExactLinkedInPostOutput,
   rankNetworkingTargetsInput,
   rankNetworkingTargetsOutput,
   recordNoteInput,
@@ -92,7 +92,7 @@ export type CareerMcpDependencies = {
   drafts: Pick<DraftService, "createOutreach" | "createPost" | "revisePost" | "getPostHistory">;
   previews: Pick<PreviewService, "create">;
   reviews?: Pick<ReviewService, "createExact">;
-  publish: Pick<PublishService, "publish">;
+  publish: Pick<ImagePublishService, "publish">;
   linkedin: Pick<LinkedInOAuth, "createAuthorizationUrl">;
   getLinkedInConnectionStatus: () => Promise<ConnectionStatus>;
   media?: ModelMediaService;
@@ -223,6 +223,13 @@ export function createCareerMcpServer(
       throw new DomainError("DATA_INTEGRITY", "Exact review service is unavailable");
     }
     return deps.reviews;
+  }
+
+  function authenticatedPublisher(): Pick<ImagePublishService, "publish"> {
+    if (options.requestAuthContext === undefined) {
+      throw new DomainError("AUTH_REQUIRED", "Authenticated request identity is required");
+    }
+    return deps.publish;
   }
 
   server.registerTool("search_yc_companies", {
@@ -505,15 +512,15 @@ export function createCareerMcpServer(
     authorizationUrl: deps.linkedin.createAuthorizationUrl()
   }), () => "Created a short-lived LinkedIn authorization URL; no post was published.")());
 
-  server.registerTool("publish_linkedin_post", {
+  server.registerTool("publish_exact_linkedin_post", {
     title: "Publish exact LinkedIn post",
-    description: "External write: call only when the current user explicitly asks to publish the exact displayed preview. Never batch or retry. Requires an exact fresh one-use preview token.",
-    inputSchema: publishLinkedInPostInput,
-    outputSchema: publishLinkedInPostOutput,
+    description: "App-only external write: publish the exact locked preview after explicit human confirmation. Never batch or retry.",
+    inputSchema: publishExactLinkedInPostInput,
+    outputSchema: publishExactLinkedInPostOutput,
     annotations: externalWrite,
     _meta: appOnlyToolMetadata
-  }, async (input) => guarded(async () => ({
-    result: await deps.publish.publish(input as PreviewExpected & { previewToken: string })
+  }, async ({ approvalCapability }) => guarded(async () => ({
+    result: await authenticatedPublisher().publish(approvalCapability)
   }), ({ result }) => `LinkedIn publish attempt finished with state ${result.state}; it was not retried.`)());
 
   return server;

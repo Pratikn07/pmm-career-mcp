@@ -7,7 +7,7 @@ import type { DraftMediaStorage } from "../media/storage.js";
 import { checksumLinkedInPost } from "./post-checksum.js";
 import {
   APPROVAL_CAPABILITY_HASH_CONTEXT,
-  hashApprovalCapability
+  hashApprovalCapabilityForSubject
 } from "./preview-service.js";
 
 export { APPROVAL_CAPABILITY_HASH_CONTEXT };
@@ -281,7 +281,7 @@ export function createReviewService(
       const version = validVersion(versionInput);
       const now = exactNow(clock);
       const capability = approvalCapability(randomBytes);
-      const tokenHash = hashApprovalCapability(capability);
+      const tokenHash = hashApprovalCapabilityForSubject(capability, subject);
       const expiresAt = new Date(now.getTime() + PREVIEW_LIFETIME_MS).toISOString();
 
       const versions = await database.postDrafts.listVersions(postId);
@@ -330,6 +330,7 @@ export function createReviewService(
           allowedStates: REVIEWABLE_STATES,
           expectedVersionId: selected.id,
           expectedChecksum: canonical.checksum,
+          snapshotChecksum: canonical.checksum,
           expectedSnapshot: {
             subject,
             post: {

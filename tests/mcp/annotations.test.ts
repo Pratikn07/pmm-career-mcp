@@ -44,7 +44,7 @@ it("uses complete, safe tool annotations", async () => {
     openWorldHint: true,
     destructiveHint: false
   });
-  expect(annotationsFor("publish_linkedin_post")).toMatchObject({ readOnlyHint: false, openWorldHint: true, destructiveHint: false });
+  expect(annotationsFor("publish_exact_linkedin_post")).toEqual({ readOnlyHint: false, openWorldHint: true, destructiveHint: false });
   expect([...byName.values()].every((tool) => tool.annotations !== undefined && tool.annotations !== null)).toBe(true);
   for (const tool of byName.values()) {
     expect(tool._meta).toMatchObject({
@@ -63,13 +63,15 @@ it("uses complete, safe tool annotations", async () => {
     ui: { visibility: ["app"] },
     "openai/widgetAccessible": true
   });
-  expect(byName.get("publish_linkedin_post")?._meta).toMatchObject({
-    ui: { visibility: ["app"] }
+  expect(byName.get("publish_exact_linkedin_post")?._meta).toMatchObject({
+    ui: { visibility: ["app"] },
+    "openai/widgetAccessible": true
   });
 
   const modelVisibleNames = tools
     .filter((tool) => !((tool._meta?.ui as { visibility?: string[] } | undefined)?.visibility?.includes("app") ?? false))
     .map((tool) => tool.name);
   expect(modelVisibleNames).not.toContain("create_exact_linkedin_preview");
+  expect(modelVisibleNames).not.toContain("publish_exact_linkedin_post");
   expect(modelVisibleNames).not.toContain("publish_linkedin_post");
 });

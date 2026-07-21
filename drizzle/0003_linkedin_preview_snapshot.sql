@@ -1,0 +1,1 @@
+ALTER TABLE "career_mcp"."post_previews" ADD COLUMN "snapshot_checksum" text;

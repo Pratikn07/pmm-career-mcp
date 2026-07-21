@@ -176,13 +176,8 @@ export const listPipelineInput = z.object({ companyId: id.optional(), status: pi
 export const recordNoteInput = z.object({ targetId: id, text: z.string().trim().min(1).max(4_000) }).strict();
 export const listPostHistoryInput = z.object({ postId: id }).strict();
 export const emptyInputSchema = z.object({}).strict();
-export const publishLinkedInPostInput = z.object({
-  postId: id,
-  versionId: id,
-  version: z.number().int().positive(),
-  checksum,
-  previewToken: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
-  visibility: visibilitySchema
+export const publishExactLinkedInPostInput = z.object({
+  approvalCapability: z.string().regex(/^[A-Za-z0-9_-]{43}$/)
 }).strict();
 
 const companySchema = z.object({
@@ -426,9 +421,11 @@ export const getLinkedInConnectionStatusOutput = outputSchema(z.object({
 export const createLinkedInAuthorizationUrlOutput = outputSchema(z.object({
   authorizationUrl: url
 }).strict());
-export const publishLinkedInPostOutput = outputSchema(z.object({
+export const publishExactLinkedInPostOutput = outputSchema(z.object({
   result: z.discriminatedUnion("state", [
     z.object({ state: z.literal("published"), postUrn: z.string().regex(/^urn:li:(?:share|ugcPost):[0-9]+$/) }).strict(),
+    z.object({ state: z.literal("media_upload_failed") }).strict(),
+    z.object({ state: z.literal("media_upload_unknown") }).strict(),
     z.object({ state: z.literal("publish_failed") }).strict(),
     z.object({ state: z.literal("publish_unknown") }).strict()
   ])

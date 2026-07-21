@@ -222,33 +222,6 @@ describe("post previews", () => {
     }
   });
 
-  it("rolls back preview consumption when the exact post-state claim fails", async () => {
-    const post = await drafts.createPost({ text: "Reject claim state", visibility: "PUBLIC" });
-    const preview = await previews.create(post.id, post.version);
-    await queryTestDatabase(db, `
-      alter table career_mcp.post_drafts
-      add constraint post_drafts_reject_publishing
-      check (state <> 'publishing')
-    `);
-
-    try {
-      await expect(previews.consumeForPublish(
-        preview.previewToken,
-        expectedFor(preview),
-        "2026-07-16T12:00:00.000Z"
-      )).rejects.toMatchObject({ code: "DATA_INTEGRITY" });
-
-      expect((await db.previews.listForPostDraft(post.versionId))[0]?.consumedAt).toBeNull();
-      expect(await db.postDrafts.getVersion(post.id, post.version)).toMatchObject({ state: "draft" });
-      expect(await db.publishAttempts.listForPostDraft(post.versionId)).toEqual([]);
-    } finally {
-      await queryTestDatabase(db, `
-        alter table career_mcp.post_drafts
-        drop constraint post_drafts_reject_publishing
-      `);
-    }
-  });
-
   it("uses a 15-minute lifetime and treats the exact expiry instant as expired", async () => {
     const post = (await drafts.createPost({ text: "Boundary", visibility: "PUBLIC" }));
     const beforeBoundary = (await previews.create(post.id, post.version));

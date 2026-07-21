@@ -211,6 +211,30 @@ export type PublishClaimRecordResult =
     }
   | Exclude<PreviewConsumptionResult, { outcome: "consumed" }>;
 
+export type ExactPublishSnapshotMedia = PostDraftMediaWithMetadata;
+
+export type ExactPublishClaimResult =
+  | {
+      outcome: "recorded";
+      post: PostDraft;
+      preview: PostPreview;
+      attempt: PublishAttempt;
+      attemptMedia: PublishAttemptMedia[];
+      media: ExactPublishSnapshotMedia[];
+    }
+  | {
+      outcome:
+        | "not_found"
+        | "already_consumed"
+        | "expired"
+        | "stale"
+        | "invalid_state"
+        | "wrong_owner"
+        | "image_disabled"
+        | "integrity_mismatch"
+        | "race";
+    };
+
 const SERIALIZABLE_RETRY_DELAYS_MS = Object.freeze([5, 15]);
 
 function postgresErrorField(error: unknown, field: "code" | "constraint_name"): string | undefined {
@@ -564,6 +588,175 @@ export function createRepositories(database: Database) {
       }
     }
     return { outcome: "consumed", post, preview: consumed };
+  }
+
+  async function claimExactPublish(input: {
+    tokenHash: string;
+    consumedAt: string;
+    subject: string;
+    imagePublishEnabled: boolean;
+  }): Promise<ExactPublishClaimResult> {
+    const consumedAt = assertIsoTimestamp("preview.consumedAt", input.consumedAt);
+    if (!isUuid(input.subject) || !SHA256_PATTERN.test(input.tokenHash)) {
+      return { outcome: "not_found" };
+    }
+    const subject = input.subject.toLowerCase();
+    return serializableTransaction(database, async (transaction) => {
+      const [previewRow] = await transaction.select().from(postPreviews).where(
+        eq(postPreviews.tokenHash, input.tokenHash)
+      ).for("update");
+      if (
+        previewRow === undefined
+        || !timingSafeTextEqual(previewRow.tokenHash, input.tokenHash)
+      ) {
+        return { outcome: "not_found" as const };
+      }
+      const preview = normalizeRowTimestamps(previewRow);
+      if (preview.consumedAt !== null) return { outcome: "already_consumed" as const };
+      if (consumedAt >= preview.expiresAt) return { outcome: "expired" as const };
+
+      const [postRow] = await transaction.select().from(postDrafts).where(and(
+        eq(postDrafts.id, preview.postDraftId),
+        eq(postDrafts.version, preview.version)
+      )).for("update");
+      if (postRow === undefined) return { outcome: "stale" as const };
+      const post = normalizeRowTimestamps(postRow);
+      if (
+        !isUuid(post.id)
+        || !isUuid(post.draftId)
+        || !Number.isSafeInteger(post.version)
+        || post.version < 1
+        || typeof post.text !== "string"
+        || [...post.text].length < 1
+        || [...post.text].length > 3_000
+        || !["PUBLIC", "CONNECTIONS"].includes(post.visibility)
+      ) return { outcome: "integrity_mismatch" as const };
+      const [latestRow] = await transaction.select().from(postDrafts).where(
+        eq(postDrafts.draftId, post.draftId)
+      ).orderBy(desc(postDrafts.version)).limit(1).for("update");
+      if (latestRow === undefined || latestRow.id !== post.id) {
+        return { outcome: "stale" as const };
+      }
+      if (post.state !== "previewed") return { outcome: "invalid_state" as const };
+
+      const media = await lockPostDraftMediaForVersion(transaction, post.id, post.version);
+      if (media.length > 4) return { outcome: "integrity_mismatch" as const };
+      if (media.length > 0 && !input.imagePublishEnabled) {
+        return { outcome: "image_disabled" as const };
+      }
+      const mediaIds = new Set<string>();
+      for (let position = 0; position < media.length; position += 1) {
+        const item = media[position]!;
+        if (
+          item.ownerSubject.toLowerCase() !== subject
+          || !item.objectPath.startsWith(`${subject}/`)
+        ) {
+          return { outcome: "wrong_owner" as const };
+        }
+        if (
+          item.position !== position
+          || item.postDraftId !== post.id
+          || item.version !== post.version
+          || !isUuid(item.mediaId)
+          || mediaIds.has(item.mediaId.toLowerCase())
+          || !SHA256_PATTERN.test(item.sha256)
+          || !["image/jpeg", "image/png", "image/gif"].includes(item.mimeType)
+          || !Number.isSafeInteger(item.byteSize)
+          || item.byteSize < 1
+          || item.byteSize > 20 * 1024 * 1024
+          || !Number.isSafeInteger(item.width)
+          || !Number.isSafeInteger(item.height)
+          || item.width < 1
+          || item.height < 1
+          || item.width * item.height >= 36_152_320
+          || !Number.isSafeInteger(item.frameCount)
+          || item.frameCount < 1
+          || item.frameCount > 250
+          || [...item.altText].length < 1
+          || [...item.altText].length > 120
+          || /[\r\n\u2028\u2029]/u.test(item.altText)
+        ) {
+          return { outcome: "integrity_mismatch" as const };
+        }
+        mediaIds.add(item.mediaId.toLowerCase());
+      }
+      let checksum: string;
+      try {
+        checksum = checksumLinkedInPost({
+          draftId: post.draftId,
+          version: post.version,
+          text: post.text,
+          visibility: post.visibility as "PUBLIC" | "CONNECTIONS",
+          media: media.map(({ position, sha256, mimeType, altText }) => ({
+            position,
+            sha256,
+            mimeType: mimeType as "image/jpeg" | "image/png" | "image/gif",
+            altText
+          }))
+        });
+      } catch {
+        return { outcome: "integrity_mismatch" as const };
+      }
+      if (
+        !SHA256_PATTERN.test(post.checksum)
+        || !timingSafeTextEqual(checksum, post.checksum)
+        || preview.snapshotChecksum === null
+        || !SHA256_PATTERN.test(preview.snapshotChecksum)
+        || !timingSafeTextEqual(checksum, preview.snapshotChecksum)
+      ) {
+        return { outcome: "integrity_mismatch" as const };
+      }
+
+      const [consumedRow] = await transaction.update(postPreviews).set({ consumedAt }).where(and(
+        eq(postPreviews.id, preview.id),
+        isNull(postPreviews.consumedAt)
+      )).returning();
+      if (consumedRow === undefined) return { outcome: "race" as const };
+
+      const phase = media.length === 0 ? "creating_post" : "uploading_media";
+      const nextState = media.length === 0 ? "publishing" : "uploading_media";
+      const [attemptRow] = await transaction.insert(publishAttempts).values({
+        id: randomUUID(),
+        postDraftId: post.id,
+        version: post.version,
+        requestedAt: consumedAt,
+        phase,
+        mediaCount: media.length,
+        responseCategory: "pending"
+      }).returning();
+      const attempt = requiredRow(attemptRow, "publish attempt");
+      let attemptMedia: PublishAttemptMedia[] = [];
+      if (media.length > 0) {
+        attemptMedia = normalizeRows(await transaction.insert(publishAttemptMedia).values(
+          media.map((item) => ({
+            id: randomUUID(),
+            publishAttemptId: attempt.id,
+            mediaId: item.mediaId,
+            position: item.position,
+            state: "pending"
+          }))
+        ).returning()).sort((left, right) => left.position - right.position);
+      }
+      const [claimedPost] = await transaction.update(postDrafts).set({
+        state: nextState,
+        updatedAt: consumedAt
+      }).where(and(
+        eq(postDrafts.id, post.id),
+        eq(postDrafts.version, post.version),
+        eq(postDrafts.state, "previewed")
+      )).returning();
+      if (claimedPost === undefined) {
+        throw new Error("Post draft state changed before exact publish claim completed");
+      }
+      return {
+        outcome: "recorded" as const,
+        post: normalizeRowTimestamps(claimedPost),
+        preview: normalizeRowTimestamps(consumedRow),
+        attempt,
+        attemptMedia,
+        media
+      };
+    });
   }
 
   function recordPublishAttempt(input: PublishAttemptRecordInput): Promise<PublishAttempt>;
@@ -1356,6 +1549,7 @@ export function createRepositories(database: Database) {
         allowedStates: readonly string[];
         expectedVersionId?: string;
         expectedChecksum?: string;
+        snapshotChecksum?: string;
         replaceUnconsumedAt?: string;
         nextState?: string;
         expectedSnapshot?: ExactPreviewSnapshotExpected;
@@ -1420,6 +1614,9 @@ export function createRepositories(database: Database) {
             postDraftId: post.id,
             version: post.version,
             tokenHash: input.tokenHash,
+            ...(input.snapshotChecksum === undefined
+              ? {}
+              : { snapshotChecksum: input.snapshotChecksum }),
             expiresAt
           }).returning();
           const preview = requiredRow(previewRow, "post preview");
@@ -1499,6 +1696,81 @@ export function createRepositories(database: Database) {
     },
     publishAttempts: {
       record: recordPublishAttempt,
+      claimExact: claimExactPublish,
+      async transitionToCreatingPost(input: {
+        id: string;
+        postDraftId: string;
+        version: number;
+      }): Promise<boolean> {
+        if (!isUuid(input.id) || !isUuid(input.postDraftId)) return false;
+        return serializableTransaction(database, async (transaction) => {
+          const [attempt] = await transaction.update(publishAttempts).set({
+            phase: "creating_post"
+          }).where(and(
+            eq(publishAttempts.id, input.id),
+            eq(publishAttempts.postDraftId, input.postDraftId),
+            eq(publishAttempts.version, input.version),
+            eq(publishAttempts.phase, "uploading_media"),
+            eq(publishAttempts.responseCategory, "pending")
+          )).returning();
+          if (attempt === undefined) return false;
+          const [post] = await transaction.update(postDrafts).set({
+            state: "publishing",
+            updatedAt: nowIso()
+          }).where(and(
+            eq(postDrafts.id, input.postDraftId),
+            eq(postDrafts.version, input.version),
+            eq(postDrafts.state, "uploading_media")
+          )).returning();
+          if (post === undefined) {
+            throw new Error("Post draft state changed before final publish phase");
+          }
+          return true;
+        });
+      },
+      async complete(input: {
+        id: string;
+        postDraftId: string;
+        version: number;
+        expectedPhase: "uploading_media" | "creating_post";
+        expectedPostState: "uploading_media" | "publishing";
+        nextPostState: "media_upload_failed" | "media_upload_unknown" | "published" | "publish_failed" | "publish_unknown";
+        responseCategory: "published" | "definite_rejection" | "ambiguous" | "media_definite_rejection" | "media_ambiguous";
+        completedAt: string;
+        postUrn?: string;
+        sanitizedError?: string;
+      }): Promise<boolean> {
+        const completedAt = assertIsoTimestamp("publishAttempt.completedAt", input.completedAt);
+        if (!isUuid(input.id) || !isUuid(input.postDraftId)) return false;
+        return serializableTransaction(database, async (transaction) => {
+          const [attempt] = await transaction.update(publishAttempts).set({
+            phase: "complete",
+            responseCategory: input.responseCategory,
+            completedAt,
+            ...(input.postUrn === undefined ? {} : { postUrn: input.postUrn }),
+            ...(input.sanitizedError === undefined ? {} : { sanitizedError: input.sanitizedError })
+          }).where(and(
+            eq(publishAttempts.id, input.id),
+            eq(publishAttempts.postDraftId, input.postDraftId),
+            eq(publishAttempts.version, input.version),
+            eq(publishAttempts.phase, input.expectedPhase),
+            eq(publishAttempts.responseCategory, "pending")
+          )).returning();
+          if (attempt === undefined) return false;
+          const [post] = await transaction.update(postDrafts).set({
+            state: input.nextPostState,
+            updatedAt: completedAt
+          }).where(and(
+            eq(postDrafts.id, input.postDraftId),
+            eq(postDrafts.version, input.version),
+            eq(postDrafts.state, input.expectedPostState)
+          )).returning();
+          if (post === undefined) {
+            throw new Error("Post draft state changed before publish completion");
+          }
+          return true;
+        });
+      },
       async updateResult(id: string, input: {
         responseCategory: string;
         postUrn?: string;

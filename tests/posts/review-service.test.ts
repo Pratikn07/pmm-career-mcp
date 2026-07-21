@@ -1,15 +1,11 @@
 import { Buffer } from "node:buffer";
-import { createHash } from "node:crypto";
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { createDraftService } from "../../src/drafts/service.js";
 import { DomainError } from "../../src/domain/errors.js";
 import type { DraftMediaStorage } from "../../src/media/storage.js";
 import { checksumLinkedInPost } from "../../src/posts/post-checksum.js";
-import {
-  APPROVAL_CAPABILITY_HASH_CONTEXT,
-  createReviewService
-} from "../../src/posts/review-service.js";
-import { hashApprovalCapability } from "../../src/posts/preview-service.js";
+import { createReviewService } from "../../src/posts/review-service.js";
+import { hashApprovalCapabilityForSubject } from "../../src/posts/preview-service.js";
 import { createTestDatabase, queryTestDatabase } from "../support/database.js";
 
 const db = await createTestDatabase();
@@ -162,15 +158,12 @@ describe("exact LinkedIn review creation", () => {
     expect(result.signedMediaUrls).toEqual([]);
 
     const previews = await db.previews.listForPostDraft(created.post.id);
-    const expectedHash = createHash("sha256")
-      .update(APPROVAL_CAPABILITY_HASH_CONTEXT, "utf8")
-      .update("\0", "utf8")
-      .update(entropy)
-      .digest("hex");
+    const expectedHash = hashApprovalCapabilityForSubject(result.approvalCapability, SUBJECT);
     expect(previews).toHaveLength(1);
     expect(previews[0]).toMatchObject({
       postDraftId: created.post.id,
       version: created.post.version,
+      snapshotChecksum: created.post.checksum,
       tokenHash: expectedHash,
       expiresAt: result.preview.expiresAt,
       consumedAt: null
@@ -434,7 +427,7 @@ describe("exact LinkedIn review creation", () => {
     expect(rows.filter(({ consumedAt }) => consumedAt === null)).toHaveLength(1);
     expect(rows.filter(({ consumedAt }) => consumedAt === NOW)).toHaveLength(1);
     const capabilityRows = await Promise.all([first, second].map(async ({ approvalCapability }) => (
-      db.previews.getByTokenHash(hashApprovalCapability(approvalCapability))
+      db.previews.getByTokenHash(hashApprovalCapabilityForSubject(approvalCapability, SUBJECT))
     )));
     expect(capabilityRows.filter((row) => row?.consumedAt === null)).toHaveLength(1);
     expect(capabilityRows.filter((row) => row?.consumedAt === NOW)).toHaveLength(1);

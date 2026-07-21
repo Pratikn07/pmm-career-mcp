@@ -42,7 +42,7 @@ const expectedTools = [
   "list_post_history",
   "get_linkedin_connection_status",
   "create_linkedin_authorization_url",
-  "publish_linkedin_post"
+  "publish_exact_linkedin_post"
 ] as const;
 
 const FIXED_NOW = new Date("2026-07-17T00:00:00.000Z");
@@ -282,6 +282,39 @@ it("registers exactly the approved Career MCP tools", async () => {
   expect(tools.every((tool) => tool.outputSchema !== undefined)).toBe(true);
 });
 
+it("keeps exact publishing app-only with capability-only input and secret-free output", async () => {
+  const capability = "Q".repeat(43);
+  const deps = dependencies();
+  const publish = vi.fn(async () => ({ state: "publish_failed" as const }));
+  deps.publish = { publish };
+  const server = createCareerMcpServer(deps, {
+    requestAuthContext: Object.freeze({
+      subject: "123e4567-e89b-12d3-a456-426614174000",
+      accessToken: "request-token"
+    })
+  });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "test", version: "1.0.0" });
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  const tools = await client.listTools();
+  const tool = tools.tools.find(({ name }) => name === "publish_exact_linkedin_post");
+  expect(tool?.inputSchema).toMatchObject({
+    additionalProperties: false,
+    required: ["approvalCapability"],
+    properties: { approvalCapability: { type: "string", pattern: "^[A-Za-z0-9_-]{43}$" } }
+  });
+  expect(Object.keys(tool?.inputSchema.properties ?? {})).toEqual(["approvalCapability"]);
+
+  const result = await client.callTool({
+    name: "publish_exact_linkedin_post",
+    arguments: { approvalCapability: capability }
+  });
+  expect(publish).toHaveBeenCalledWith(capability);
+  expect(JSON.stringify(result)).not.toContain(capability);
+  expect(result.structuredContent).toEqual({ data: { result: { state: "publish_failed" } } });
+  await Promise.all([client.close(), server.close()]);
+});
+
 it("publishes an explicit success and safe-error output contract for every tool", async () => {
   const tools = await listTools();
   const successKeys: Record<(typeof expectedTools)[number], string> = {
@@ -305,7 +338,7 @@ it("publishes an explicit success and safe-error output contract for every tool"
     list_post_history: "posts",
     get_linkedin_connection_status: "connection",
     create_linkedin_authorization_url: "authorizationUrl",
-    publish_linkedin_post: "result"
+    publish_exact_linkedin_post: "result"
   };
 
   for (const tool of tools) {
@@ -470,15 +503,8 @@ it("returns schema-valid structured data and bounded summaries from every regist
     { name: "get_linkedin_connection_status", arguments: {} },
     { name: "create_linkedin_authorization_url", arguments: {} },
     {
-      name: "publish_linkedin_post",
-      arguments: {
-        postId: "post-1",
-        versionId: "post-version-1",
-        version: 1,
-        checksum: "a".repeat(64),
-        previewToken: "A".repeat(43),
-        visibility: "PUBLIC"
-      }
+      name: "publish_exact_linkedin_post",
+      arguments: { approvalCapability: "A".repeat(43) }
     }
   ];
 

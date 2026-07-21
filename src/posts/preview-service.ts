@@ -1,12 +1,14 @@
 import { createHash, randomBytes as secureRandomBytes } from "node:crypto";
 import type { CareerDatabase } from "../db/client.js";
-import type { PostDraft, PreviewConsumptionResult } from "../db/repositories.js";
+import type { PreviewConsumptionResult } from "../db/repositories.js";
 import type { PostVisibility } from "../drafts/service.js";
 import { DomainError, postgresErrorKind } from "../domain/errors.js";
 
 export const PREVIEW_TOKEN_HASH_CONTEXT = "pmm-career-mcp.preview-token.sha256.v1";
 export const APPROVAL_CAPABILITY_HASH_CONTEXT =
   "pmm-career-mcp.linkedin-preview-capability.sha256.v1";
+export const APPROVAL_CAPABILITY_OWNER_HASH_CONTEXT =
+  "pmm-career-mcp.linkedin-preview-capability-owner.sha256.v1";
 const TOKEN_BYTES = 32;
 const TOKEN_LIFETIME_MS = 15 * 60 * 1_000;
 const MAX_ID_LENGTH = 256;
@@ -31,16 +33,6 @@ export type PreviewExpected = {
   version: number;
   checksum: string;
   visibility: PostVisibility;
-};
-
-export type PreviewPublishClaim = {
-  attemptId: string;
-  postId: string;
-  versionId: string;
-  version: number;
-  checksum: string;
-  visibility: PostVisibility;
-  text: string;
 };
 
 export type PreviewServiceDependencies = {
@@ -104,6 +96,20 @@ export function hashApprovalCapability(capability: string): string {
   const bytes = parseApprovalCapability(capability);
   return createHash("sha256")
     .update(APPROVAL_CAPABILITY_HASH_CONTEXT, "utf8")
+    .update("\0", "utf8")
+    .update(bytes)
+    .digest("hex");
+}
+
+export function hashApprovalCapabilityForSubject(capability: string, subject: string): string {
+  const bytes = parseApprovalCapability(capability);
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(subject)) {
+    throw new DomainError("AUTH_REQUIRED", "Authenticated request identity is required");
+  }
+  return createHash("sha256")
+    .update(APPROVAL_CAPABILITY_OWNER_HASH_CONTEXT, "utf8")
+    .update("\0", "utf8")
+    .update(subject.toLowerCase(), "utf8")
     .update("\0", "utf8")
     .update(bytes)
     .digest("hex");
@@ -288,56 +294,7 @@ export function createPreviewService(
       } catch (error) {
         return mapPreviewPersistenceError(error);
       }
-    },
-
-    async consumeForPublish(
-      tokenInput: string,
-      expectedInput: PreviewExpected,
-      requestedAt: string
-    ): Promise<PreviewPublishClaim> {
-      const tokenHash = hashPreviewToken(tokenInput);
-      const expected = parseExpected(expectedInput);
-      const consumedAt = canonicalNow(clock).toISOString();
-      try {
-        const result = await database.publishAttempts.record({
-          postDraftId: expected.versionId,
-          version: expected.version,
-          requestedAt,
-          responseCategory: "pending"
-        }, {
-          tokenHash,
-          consumedAt,
-          expected,
-          allowedStates: PUBLISHABLE_STATES,
-          claimState: "publishing"
-        });
-        if (result.outcome !== "recorded") {
-          throwConsumptionOutcome(result);
-        }
-        return {
-          ...publicPublishClaim(result.post),
-          attemptId: result.attempt.id
-        };
-      } catch (error) {
-        return mapPreviewPersistenceError(error);
-      }
     }
-  };
-}
-
-function publicPublishClaim(post: PostDraft): Omit<PreviewPublishClaim, "attemptId"> {
-  if (!POST_VISIBILITIES.has(post.visibility)) {
-    throw new DomainError("DATA_INTEGRITY", "Stored post visibility is invalid", {
-      entity: "post_draft"
-    });
-  }
-  return {
-    postId: post.draftId,
-    versionId: post.id,
-    version: post.version,
-    checksum: post.checksum,
-    visibility: post.visibility as PostVisibility,
-    text: post.text
   };
 }
 

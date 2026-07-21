@@ -159,6 +159,7 @@ describe("database lifecycle", () => {
           or (table_name = 'evidence' and column_name = 'confidence')
           or (table_name = 'outreach_drafts' and column_name = 'version')
           or (table_name = 'post_drafts' and column_name = 'version')
+          or (table_name = 'post_previews' and column_name = 'snapshot_checksum')
           or (table_name = 'post_media' and column_name in ('owner_subject', 'byte_size', 'created_at'))
           or (table_name = 'publish_attempts' and column_name in ('phase', 'media_count'))
         )
@@ -173,6 +174,7 @@ describe("database lifecycle", () => {
       { table_name: "post_media", column_name: "byte_size", data_type: "bigint" },
       { table_name: "post_media", column_name: "created_at", data_type: "timestamp with time zone" },
       { table_name: "post_media", column_name: "owner_subject", data_type: "uuid" },
+      { table_name: "post_previews", column_name: "snapshot_checksum", data_type: "text" },
       { table_name: "publish_attempts", column_name: "media_count", data_type: "integer" },
       { table_name: "publish_attempts", column_name: "phase", data_type: "text" },
       { table_name: "settings", column_name: "id", data_type: "uuid" },

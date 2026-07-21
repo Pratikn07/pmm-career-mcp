@@ -275,6 +275,7 @@ export const postPreviews = careerMcp.table("post_previews", {
   postDraftId: uuid("post_draft_id").notNull(),
   version: integer("version").notNull(),
   tokenHash: text("token_hash").notNull().unique(),
+  snapshotChecksum: text("snapshot_checksum"),
   expiresAt: timestamptz("expires_at").notNull(),
   consumedAt: timestamptz("consumed_at")
 }, (table) => [
