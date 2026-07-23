@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import type { CareerDatabase } from "../db/client.js";
 import { PostDraftVersionConflictError } from "../db/repositories.js";
 import {
@@ -13,7 +12,11 @@ import {
   type LinkedInPostChecksumMedia
 } from "../posts/post-checksum.js";
 import { downloadOpenAiFile, type OpenAiFileRef } from "./file-download.js";
-import { inspectLinkedInImage, type ImageInspection } from "./image-inspection.js";
+import { inspectLinkedInImage } from "./image-inspection.js";
+import {
+  createPrivateMediaStore,
+  type StoredPrivateMedia
+} from "./private-media-store.js";
 import type { DraftMediaStorage } from "./storage.js";
 
 export type AttachPostFilesInput = Readonly<{
@@ -79,14 +82,6 @@ function postId(value: string): string {
   return value;
 }
 
-function extensionFor(mimeType: ImageInspection["mimeType"]): "gif" | "jpg" | "png" {
-  switch (mimeType) {
-    case "image/gif": return "gif";
-    case "image/jpeg": return "jpg";
-    case "image/png": return "png";
-  }
-}
-
 function isPostVisibility(value: string): value is PostVisibility {
   return value === "PUBLIC" || value === "CONNECTIONS";
 }
@@ -105,9 +100,7 @@ export function createPostMediaService(
     throw new DomainError("AUTH_REQUIRED", "Authenticated request identity is required");
   }
   const subject = dependencies.subject.toLowerCase();
-  const downloadFile = dependencies.downloadFile ?? downloadOpenAiFile;
-  const inspectImage = dependencies.inspectImage ?? inspectLinkedInImage;
-  const createId = dependencies.createId ?? randomUUID;
+  const privateMedia = createPrivateMediaStore(database, dependencies);
   const drafts = createDraftService(database);
 
   function withMedia(version: PostDraftVersion): MediaPostDraftVersion {
@@ -176,35 +169,6 @@ export function createPostMediaService(
     return withMedia(result);
   }
 
-  async function removeBestEffort(
-    uploaded: readonly Readonly<{ mediaId?: string; objectPath: string }>[]
-  ): Promise<void> {
-    if (uploaded.length === 0) return;
-    const withoutRow = uploaded.filter(({ mediaId }) => mediaId === undefined);
-    const withRow = uploaded.filter((item): item is { mediaId: string; objectPath: string } => (
-      item.mediaId !== undefined
-    ));
-    let removable = [...withoutRow.map(({ objectPath }) => objectPath)];
-    try {
-      const deletedIds = await database.postMedia.deleteOwnedUnreferenced(
-        subject,
-        withRow.map(({ mediaId }) => mediaId)
-      );
-      const deleted = new Set(deletedIds.map((id) => id.toLowerCase()));
-      removable = removable.concat(withRow
-        .filter(({ mediaId }) => deleted.has(mediaId.toLowerCase()))
-        .map(({ objectPath }) => objectPath));
-    } catch {
-      // Keep objects whose database rows could not safely be removed.
-    }
-    if (removable.length === 0) return;
-    try {
-      await dependencies.storage.remove(removable);
-    } catch {
-      // Cleanup must never replace the original safe ingestion or persistence error.
-    }
-  }
-
   return {
     async attachFiles(input: AttachPostFilesInput): Promise<MediaPostDraftVersion> {
       const id = postId(input.postId);
@@ -220,40 +184,19 @@ export function createPostMediaService(
       }
       const altTexts = input.altTexts.map(normalizedAltText);
       const current = await latestVersion(id, expected);
-      const uploaded: Array<{ mediaId?: string; objectPath: string }> = [];
+      const uploaded: StoredPrivateMedia[] = [];
 
       try {
         const requestedMedia: Array<{ mediaId: string; altText: string }> = [];
         for (let index = 0; index < input.images.length; index += 1) {
           const file = input.images[index]!;
-          const bytes = await downloadFile(file);
-          const inspected = await inspectImage(bytes, file.mime_type);
-          let media = await database.postMedia.getByOwnerAndSha(subject, inspected.sha256);
-          if (media === undefined) {
-            const mediaId = createId();
-            const objectPath = `${subject}/${inspected.sha256.slice(0, 2)}/${mediaId}.${extensionFor(inspected.mimeType)}`;
-            const uploadedObject: { mediaId?: string; objectPath: string } = { objectPath };
-            uploaded.push(uploadedObject);
-            await dependencies.storage.upload(objectPath, bytes, inspected.mimeType);
-            media = await database.postMedia.create({
-              id: mediaId,
-              ownerSubject: subject,
-              objectPath,
-              sha256: inspected.sha256,
-              mimeType: inspected.mimeType,
-              byteSize: inspected.byteSize,
-              width: inspected.width,
-              height: inspected.height,
-              frameCount: inspected.frameCount,
-              originalFilename: file.file_name ?? null
-            });
-            uploadedObject.mediaId = media.id;
-          }
-          requestedMedia.push({ mediaId: media.id, altText: altTexts[index]! });
+          const stored = await privateMedia.ingestOpenAiFile(file);
+          uploaded.push(stored);
+          requestedMedia.push({ mediaId: stored.media.id, altText: altTexts[index]! });
         }
         return await createVersion(current, requestedMedia);
       } catch (error) {
-        await removeBestEffort(uploaded);
+        await privateMedia.removeBestEffort(uploaded);
         if (error instanceof PostDraftVersionConflictError) {
           throw new DomainError("CONFLICT", "Post draft version is stale", {
             entity: "post_draft"

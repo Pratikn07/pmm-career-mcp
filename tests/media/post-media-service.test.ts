@@ -195,7 +195,7 @@ describe("post media service", () => {
       expect(upload.mock.calls[index]?.[0]).toMatch(
         new RegExp(`^${subject}/${index + 1}${index + 1}/[0-9a-f-]{36}\\.(png|jpg)$`)
       );
-      expect(upload.mock.calls[index]?.[1]).toEqual(originals[index]);
+      expect(Buffer.from(upload.mock.calls[index]?.[1] ?? []).equals(originals[index]!)).toBe(true);
     }
   });
 
