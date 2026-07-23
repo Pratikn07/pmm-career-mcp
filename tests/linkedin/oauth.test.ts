@@ -101,7 +101,7 @@ describe("LinkedIn OAuth", () => {
 
   it.each([
     ["a partial grant", "openid profile"],
-    ["an unknown extra grant", "openid profile w_member_social email r_liteprofile"],
+    ["an unexpected grant", "openid profile w_member_social email"],
     ["a duplicate grant", "openid profile w_member_social profile"],
     ["an empty grant", ""]
   ])("rejects %s reported by the token endpoint before identity lookup or persistence", async (_label, scope) => {
@@ -121,14 +121,14 @@ describe("LinkedIn OAuth", () => {
     expect(await db.oauthTokens.getByProvider("linkedin")).toBeUndefined();
   });
 
-  it("accepts LinkedIn's known optional email grant while storing only required publishing scopes", async () => {
+  it("accepts LinkedIn's comma-delimited token scope response", async () => {
     const fetch = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify({
-        access_token: "optional-email-scope-token",
+        access_token: "comma-delimited-scope-token",
         expires_in: 3600,
-        scope: "openid profile email w_member_social"
+        scope: "openid,profile,w_member_social"
       }), { status: 200, headers: { "content-type": "application/json" } }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ sub: "optional-email-person" }), {
+      .mockResolvedValueOnce(new Response(JSON.stringify({ sub: "comma-delimited-person" }), {
         status: 200,
         headers: { "content-type": "application/json" }
       }));
