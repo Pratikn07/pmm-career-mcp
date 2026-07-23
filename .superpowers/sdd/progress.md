@@ -91,8 +91,8 @@ Started: 2026-07-22
 | 4. Brand visual brief service | Complete | Complete | Approved | `0f142e6`, `8c01973` |
 | 5. Fonts and deterministic renderer | Complete | Complete | Approved | `1a407c2`, `ca79fda`, `567a220` |
 | 6. Reusable private-media ingestion | Complete | Complete | Approved | `1fae568`, `ee05259`, `ccc4dd9`, `572aa1e` |
-| 7. Persisted branded render and atomic attachment | In progress | In progress | Pending | — |
-| 8. Brand Studio MCP tools | Pending | Pending | Pending | — |
+| 7. Persisted branded render and atomic attachment | Complete | Complete | Approved | `cc6b0ea`, `1b06075`, `8e903a6`, `ecde433` |
+| 8. Brand Studio MCP tools | In progress | In progress | Pending | — |
 | 9. Request wiring and review-card provenance | Pending | Pending | Pending | — |
 | 10. Scheduled-flow safety and operator docs | Pending | Pending | Pending | — |
 | 11. Full release verification | Pending | Pending | Pending | — |
@@ -119,3 +119,5 @@ Task 4: complete (commits `0f142e6`, `8c01973`). The owner-scoped visual-brief s
 Task 5: complete (commits `1a407c2`, `ca79fda`, `567a220`). Exact checksum-pinned Cormorant/Inter fonts and licenses, Resvg 2.6.2, deterministic SVG/Sharp rendering, safe asset resolution, source-raster bounds, text fitting, XML safety, and two-stage Docker packaging are implemented. Reviews found resource-bound, word-tier, topic-fit, mutable-input, cache, XML, Docker-assertion, and pre-copy memory issues; all were fixed. Final review returned 0 Critical, 0 Important, and 0 Minor findings. Verification: 988 full-suite tests plus 35 focused renderer/Docker tests passed; Docker daemon validation remains deferred to Task 11.
 
 Task 6: complete (commits `1fae568`, `ee05259`, `ccc4dd9`, `572aa1e`). The existing hardened media path was extracted into one reusable private store with bounded immutable snapshots, inspected metadata, owner-scoped dedupe, ambiguous-write reconciliation, strict canonical row validation, and unforgeable same-store cleanup provenance. Multiple reviews found byte-bound, cleanup, race, reconciliation, pixel-accounting, and adapter-aliasing gaps; all were fixed. Final review returned 0 Critical, 0 Important, and 0 Minor findings. Verification: 1,049 full-suite tests plus 100 focused media/e2e tests passed; no live service was called.
+
+Task 7: complete (commits `cc6b0ea`, `1b06075`, `8e903a6`, `ecde433`). The request-scoped render service now deterministically renders, privately stores, and atomically attaches one final branded cover to a new immutable post version while preserving exact profile/template/hook/checksum provenance and keeping source art unattached. Reviews found owner-isolation, lock-order, ambiguous-cleanup, mixed-isolation exclusivity, stale-version disclosure, and claim-ledger privilege gaps; every finding was fixed. PostgreSQL now arbitrates attachment-versus-brand-source use through a persistent claim row, and the runtime role can read but cannot directly mutate that ledger; only narrowly scoped trigger functions may maintain it. Final re-review returned 0 Critical, 0 Important, and 0 Minor findings. Verification: 1,099 full-suite tests plus 136 final focused tests passed, with four explicitly guarded loopback-only PostgreSQL tests deferred to Task 11; no live service was called.
