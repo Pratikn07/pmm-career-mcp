@@ -4,9 +4,11 @@ import { spawn } from "node:child_process";
 import express from "express";
 import { once } from "node:events";
 import type { Server } from "node:http";
+import request from "supertest";
 import { afterEach, expect, it, vi } from "vitest";
 import type { CareerDatabase } from "../../src/db/client.js";
 import type { Company } from "../../src/db/repositories.js";
+import { DomainError } from "../../src/domain/errors.js";
 import { createCareerApplication, startServer } from "../../src/index.js";
 
 function deferred<T>() {
@@ -220,6 +222,36 @@ it("does not open an HTTP listener when database creation fails", async () => {
     runtime = await startup.catch(() => undefined);
     await closeUnexpectedRuntime(runtime);
   }
+});
+
+it("logs only a safe LinkedIn OAuth failure stage at the browser callback boundary", async () => {
+  const privateProviderValue = "provider-secret-that-must-not-be-logged";
+  const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  const runtime = await createCareerApplication({
+    config: testConfig(),
+    database: fakeDatabase(),
+    linkedinOAuth: {
+      createAuthorizationUrl: () => "https://www.linkedin.com/oauth/v2/authorization",
+      exchangeCallback: async () => {
+        throw new DomainError(
+          "OAUTH_PROVIDER_ERROR",
+          privateProviderValue,
+          { stage: "token_scope", unsafe: privateProviderValue }
+        );
+      }
+    }
+  });
+
+  await request(runtime.app)
+    .get("/linkedin/callback?code=one-use-code&state=one-use-state")
+    .expect(400, "LinkedIn authorization could not be completed.");
+
+  expect(warning).toHaveBeenCalledWith(JSON.stringify({
+    event: "linkedin_oauth_callback_failed",
+    code: "OAUTH_PROVIDER_ERROR",
+    stage: "token_scope"
+  }));
+  expect(JSON.stringify(warning.mock.calls)).not.toContain(privateProviderValue);
 });
 
 it("waits for every imported YC company upsert before returning search results", async () => {

@@ -40,6 +40,17 @@ import { createPublicYcSource, createYcProvider, type YcSource } from "./researc
 type FetchPage = (url: string, options: DiscoveryAdapterOptions) => Promise<FetchedPage>;
 type ResolveAddresses = (hostname: string, options: DiscoveryAdapterOptions) => Promise<string[]>;
 
+const SAFE_LINKEDIN_OAUTH_FAILURE_STAGES: ReadonlySet<string> = new Set([
+  "token_network",
+  "token_http",
+  "token_body",
+  "token_expiry",
+  "token_scope",
+  "userinfo_network",
+  "userinfo_http",
+  "userinfo_identity"
+]);
+
 type MediaStorageFactory = (
   config: AppConfig,
   context: RequestAuthContext
@@ -313,7 +324,16 @@ export async function createCareerApplication(
     try {
       await linkedin.exchangeCallback({ code, state });
       response.status(200).send("LinkedIn is connected. You can close this window.");
-    } catch {
+    } catch (error) {
+      const code = error instanceof DomainError ? error.code : "DATA_INTEGRITY";
+      const reportedStage = error instanceof DomainError ? error.details.stage : undefined;
+      const stage = typeof reportedStage === "string"
+        && SAFE_LINKEDIN_OAUTH_FAILURE_STAGES.has(reportedStage)
+        ? reportedStage
+        : code === "OAUTH_STATE_INVALID"
+          ? "state"
+          : "unknown";
+      console.warn(JSON.stringify({ event: "linkedin_oauth_callback_failed", code, stage }));
       response.status(400).send("LinkedIn authorization could not be completed.");
     }
   });

@@ -114,7 +114,8 @@ describe("LinkedIn OAuth", () => {
     const state = new URL(service.createAuthorizationUrl()).searchParams.get("state")!;
 
     await expect(service.exchangeCallback({ code: "authorization-code", state })).rejects.toMatchObject({
-      code: "OAUTH_PROVIDER_ERROR"
+      code: "OAUTH_PROVIDER_ERROR",
+      details: { stage: "token_scope" }
     });
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(await db.oauthTokens.getByProvider("linkedin")).toBeUndefined();
@@ -172,6 +173,7 @@ describe("LinkedIn OAuth", () => {
       error = caught as DomainError;
     }
     expect(error).toMatchObject({ code: "OAUTH_PROVIDER_ERROR" });
+    expect(error).toMatchObject({ details: { stage: "token_http" } });
     expect(error?.message).not.toContain(privateValue);
     expect(JSON.stringify(error)).not.toContain(privateValue);
   });
@@ -190,7 +192,8 @@ describe("LinkedIn OAuth", () => {
     const state = new URL(service.createAuthorizationUrl()).searchParams.get("state")!;
 
     await expect(service.exchangeCallback({ code: "authorization-code", state })).rejects.toMatchObject({
-      code: "OAUTH_PROVIDER_ERROR"
+      code: "OAUTH_PROVIDER_ERROR",
+      details: { stage: "userinfo_identity" }
     });
     expect((await db.oauthTokens.getByProvider("linkedin"))).toBeUndefined();
   });

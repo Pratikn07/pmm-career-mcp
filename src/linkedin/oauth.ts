@@ -26,8 +26,22 @@ export type LinkedInOAuthDependencies = {
 
 export type OAuthCallbackInput = Readonly<{ code: string; state: string }>;
 
-function providerError(): DomainError {
-  return new DomainError("OAUTH_PROVIDER_ERROR", "LinkedIn authorization could not be completed");
+type OAuthProviderFailureStage =
+  | "token_network"
+  | "token_http"
+  | "token_body"
+  | "token_expiry"
+  | "token_scope"
+  | "userinfo_network"
+  | "userinfo_http"
+  | "userinfo_identity";
+
+function providerError(stage: OAuthProviderFailureStage): DomainError {
+  return new DomainError(
+    "OAUTH_PROVIDER_ERROR",
+    "LinkedIn authorization could not be completed",
+    { stage }
+  );
 }
 
 function stateError(): DomainError {
@@ -134,22 +148,22 @@ export function createLinkedInOAuth(database: CareerDatabase, dependencies: Link
         }).toString()
       });
     } catch {
-      throw providerError();
+      throw providerError("token_network");
     }
     if (!tokenResponse.ok) {
-      throw providerError();
+      throw providerError("token_http");
     }
     const token = await jsonObject(tokenResponse);
     if (token === undefined || !nonEmptyString(token.access_token)) {
-      throw providerError();
+      throw providerError("token_body");
     }
     const expiresIn = token.expires_in;
     if (typeof expiresIn !== "number" || !Number.isSafeInteger(expiresIn) || expiresIn <= 0) {
-      throw providerError();
+      throw providerError("token_expiry");
     }
     const grantedScopes = scopesFromTokenResponse(token.scope);
     if (grantedScopes === undefined) {
-      throw providerError();
+      throw providerError("token_scope");
     }
 
     let identityResponse: Response;
@@ -158,10 +172,10 @@ export function createLinkedInOAuth(database: CareerDatabase, dependencies: Link
         headers: { authorization: `Bearer ${token.access_token}` }
       });
     } catch {
-      throw providerError();
+      throw providerError("userinfo_network");
     }
     if (!identityResponse.ok) {
-      throw providerError();
+      throw providerError("userinfo_http");
     }
     const identity = await jsonObject(identityResponse);
     if (
@@ -169,7 +183,7 @@ export function createLinkedInOAuth(database: CareerDatabase, dependencies: Link
       || !nonEmptyString(identity.sub, 512)
       || !/^[A-Za-z0-9_-]+$/.test(identity.sub)
     ) {
-      throw providerError();
+      throw providerError("userinfo_identity");
     }
 
     const authorUrn = `urn:li:person:${identity.sub}`;
