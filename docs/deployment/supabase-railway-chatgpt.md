@@ -118,11 +118,24 @@ This release requires encrypted, versioned LinkedIn scope evidence. After deploy
 
 Use this exact schedule instruction:
 
-> Research today's approved topic and save a private LinkedIn draft in PMM Career MCP. You may prepare up to four draft images with alt text. Do not create an exact preview, do not upload anything to LinkedIn, and do not publish. Notify me when the private draft is ready, then stop.
+> Research today's approved PMM topic and save a private LinkedIn draft in PMM
+> Career MCP. Use the active PMM FIELD NOTES brand profile. Create a short,
+> curiosity-driven cover hook that does not explain the post. Save a branded
+> visual brief and render one private editorial cover. If metaphor source-image
+> generation is unavailable in this scheduled run, save the brief and stop.
+> Do not create an exact preview, do not upload anything to LinkedIn, and do not
+> publish. Notify me when the private draft is ready, then stop.
 
-The scheduled flow may research, draft, revise, attach a ChatGPT-generated or user-uploaded image, save immutable versions, open/save the non-writing review-card draft boundary, and notify the user. It must finish with zero exact-preview rows and zero LinkedIn initialize, upload, or final-post calls.
+The two supported Brand Studio sequences are:
 
-Scheduled image handoff is a capability gate, not a reason to add credentials. If the scheduled ChatGPT environment cannot hand a generated image file to the MCP file parameter, save the text draft plus a detailed image brief or generation prompt and stop. Generate or upload the image later in the interactive conversation. Do not add an OpenAI API key, paid image service, Supabase service-role key, or Supabase secret key.
+```text
+Statement: draft → brief → render → open review card
+Metaphor: draft → brief → ChatGPT image → render with source → open review card
+```
+
+The scheduled flow may research, draft, save a branded visual brief, render one private editorial cover, save immutable versions, open the non-writing review-card boundary, and notify the user. It must finish with zero exact-preview rows and zero LinkedIn initialize, upload, or final-post calls. Only the final branded PNG is attached to the post draft; metaphor source art remains private and is never attached or published.
+
+Scheduled image handoff is a capability gate, not a reason to add credentials. If the scheduled ChatGPT environment cannot hand a generated metaphor source image to the MCP file parameter, save the text draft plus the branded visual brief and stop. Generate or upload the source image later in the interactive conversation. Do not add an OpenAI API key, paid image service, Supabase service-role key, or Supabase secret key.
 
 Every new initial draft, including a text-only draft with no images, uses the versioned whole-post checksum and can enter exact review directly. Drafts stored before that checksum remain readable but cannot enter exact review; use `revise_post` to create a new immutable current-format version first. Any later text, visibility, image bytes, order, MIME type, or alt-text change also requires a new version and a new exact preview.
 

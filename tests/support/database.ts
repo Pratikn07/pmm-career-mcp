@@ -82,6 +82,7 @@ export async function createTestDatabase(options: {
           career_mcp.post_draft_media,
           career_mcp.brand_visual_renders,
           career_mcp.media_usage_claims,
+          career_mcp.brand_brief_source_claims,
           career_mcp.brand_visual_briefs,
           career_mcp.brand_profiles,
           career_mcp.post_media,

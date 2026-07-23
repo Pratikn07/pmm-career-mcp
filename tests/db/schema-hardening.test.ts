@@ -442,6 +442,59 @@ describe("brand source-media exclusivity", () => {
   });
 });
 
+describe("brand brief source claims", () => {
+  it("backfills exact immutable owner and post-version lineage for legacy briefs", async () => {
+    const client = await createPreClaimDatabase();
+    try {
+      await seedPreClaimUsage(client);
+      await client.exec(
+        await readFile(resolve("drizzle/0005_brand_source_media_exclusive.sql"), "utf8")
+      );
+      await client.exec(
+        await readFile(resolve("drizzle/0006_brand_brief_source_claims.sql"), "utf8")
+      );
+
+      const claims = await client.query<{
+        brief_id: string;
+        owner_subject: string;
+        post_draft_id: string;
+        post_version: number;
+      }>(`
+        select
+          claim.brief_id,
+          claim.owner_subject,
+          claim.post_draft_id,
+          claim.post_version
+        from career_mcp.brand_brief_source_claims claim
+        join career_mcp.brand_visual_briefs brief on brief.id = claim.brief_id
+        where claim.owner_subject = brief.owner_subject
+          and claim.post_draft_id = brief.post_draft_id
+          and claim.post_version = brief.post_version
+        order by claim.brief_id
+      `);
+      expect(claims.rows).toHaveLength(2);
+
+      await expect(client.exec(`
+        update career_mcp.brand_visual_briefs
+        set post_version = post_version + 1
+        where id = '${claims.rows[0]!.brief_id}'
+      `)).rejects.toMatchObject({
+        code: "23514",
+        constraint: "brand_brief_source_immutable"
+      });
+      await expect(client.exec(`
+        delete from career_mcp.brand_brief_source_claims
+        where brief_id = '${claims.rows[0]!.brief_id}'
+      `)).rejects.toMatchObject({
+        code: "23514",
+        constraint: "brand_brief_source_claim_immutable"
+      });
+    } finally {
+      await client.close();
+    }
+  });
+});
+
 describe("database domain constraints", () => {
   it.each([-0.01, 1.01])("rejects evidence confidence %s outside 0..1", async (confidence) => {
     const { person } = await seedConstraintGraph();

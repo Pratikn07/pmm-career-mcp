@@ -1,7 +1,13 @@
 import type { FetchedPage } from "../../src/research/fetch-page.js";
 import type { YcSourcePage } from "../../src/research/yc-provider.js";
+import type { RequestAuthContext } from "../../src/auth/request-context.js";
 
 export const E2E_NOW = "2026-07-17T12:00:00.000Z";
+export const E2E_SUBJECT = "123e4567-e89b-42d3-a456-426614174000";
+export const E2E_AUTH_CONTEXT: RequestAuthContext = Object.freeze({
+  subject: E2E_SUBJECT,
+  accessToken: "private-request-token"
+});
 
 export const YC_DIRECTORY_FIXTURE: YcSourcePage = {
   url: "https://www.ycombinator.com/companies",

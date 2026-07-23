@@ -109,7 +109,7 @@ it("persists a target with evidence provenance", async () => {
 });
 
 describe("database lifecycle", () => {
-  it("migrates exactly the twenty application tables into the private schema", async () => {
+  it("migrates exactly the twenty-one application tables into the private schema", async () => {
     const tables = await queryTestDatabase<{ table_name: string }>(db, `
       select table_name
       from information_schema.tables
@@ -119,6 +119,7 @@ describe("database lifecycle", () => {
     `);
 
     expect(tables.map((row) => row.table_name)).toEqual([
+      "brand_brief_source_claims",
       "brand_profiles",
       "brand_visual_briefs",
       "brand_visual_renders",
@@ -293,7 +294,8 @@ describe("database lifecycle", () => {
         and table_name in (
           'settings', 'companies', 'people', 'evidence', 'targets', 'target_notes',
           'outreach_drafts', 'shortlists', 'shortlist_entries', 'post_drafts',
-          'brand_profiles', 'brand_visual_briefs', 'brand_visual_renders',
+          'brand_brief_source_claims', 'brand_profiles', 'brand_visual_briefs',
+          'brand_visual_renders',
           'post_draft_media', 'post_media', 'post_previews', 'publish_attempt_media',
           'publish_attempts', 'oauth_tokens'
         )
@@ -1502,11 +1504,19 @@ describe("Brand Studio repositories", () => {
           media: foreignMedia.map(({ mediaId, altText }) => ({ mediaId, altText }))
         });
         expectedDraftId = foreignFirst.draftId;
+        await queryTestDatabase(
+          db,
+          "alter table career_mcp.brand_visual_briefs disable trigger all"
+        );
         await queryTestDatabase(db, `
           update career_mcp.brand_visual_briefs
           set post_draft_id = '${foreignFirst.id}', post_version = 1
           where id = '${source.brief.id}'
         `);
+        await queryTestDatabase(
+          db,
+          "alter table career_mcp.brand_visual_briefs enable trigger all"
+        );
       } else if (lineage === "unattached_exact") {
         const unattachedFirst = await db.postDrafts.createVersion({
           text: "Unattached exact source",
@@ -1522,11 +1532,19 @@ describe("Brand Studio repositories", () => {
           checksum: "unattached-latest"
         });
         expectedDraftId = unattachedFirst.draftId;
+        await queryTestDatabase(
+          db,
+          "alter table career_mcp.brand_visual_briefs disable trigger all"
+        );
         await queryTestDatabase(db, `
           update career_mcp.brand_visual_briefs
           set post_draft_id = '${unattachedFirst.id}', post_version = 1
           where id = '${source.brief.id}'
         `);
+        await queryTestDatabase(
+          db,
+          "alter table career_mcp.brand_visual_briefs enable trigger all"
+        );
       } else if (lineage === "absent_exact") {
         const absentPostId = randomUUID();
         expectedDraftId = randomUUID();
@@ -1601,6 +1619,43 @@ describe("Brand Studio repositories", () => {
       message: "Brand visual brief source was not found",
       details: { entity: "post_draft" }
     });
+  });
+
+  it("blocks raw brief-source reassignment and direct claim mutation", async () => {
+    const owner = randomUUID();
+    const source = await readyBrandedRender(owner);
+    const replacement = await addOwnedPost(owner);
+
+    await expect(queryTestDatabase(db, `
+      update career_mcp.brand_visual_briefs
+      set post_draft_id = '${replacement.id}', post_version = ${replacement.version}
+      where id = '${source.brief.id}'
+    `)).rejects.toMatchObject({
+      code: "23514",
+      constraint: "brand_brief_source_immutable"
+    });
+    await expect(queryTestDatabase(db, `
+      update career_mcp.brand_brief_source_claims
+      set owner_subject = '${randomUUID()}'
+      where brief_id = '${source.brief.id}'
+    `)).rejects.toMatchObject({
+      code: "23514",
+      constraint: "brand_brief_source_claim_immutable"
+    });
+    await expect(queryTestDatabase(db, `
+      delete from career_mcp.brand_brief_source_claims
+      where brief_id = '${source.brief.id}'
+    `)).rejects.toMatchObject({
+      code: "23514",
+      constraint: "brand_brief_source_claim_immutable"
+    });
+
+    expect(await db.brandVisualBriefs.getOwned(source.brief.id, owner))
+      .toMatchObject({
+        postDraftId: source.post.id,
+        postVersion: source.post.version,
+        state: "ready"
+      });
   });
 
   it.each([

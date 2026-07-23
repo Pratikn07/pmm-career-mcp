@@ -319,6 +319,26 @@ export const brandVisualBriefs = careerMcp.table("brand_visual_briefs", {
   check("brand_visual_briefs_state_check", sql`${table.state} in ('ready','rendered')`)
 ]);
 
+export const brandBriefSourceClaims = careerMcp.table("brand_brief_source_claims", {
+  briefId: uuid("brief_id").primaryKey().references(
+    () => brandVisualBriefs.id,
+    { onDelete: "cascade" }
+  ),
+  ownerSubject: uuid("owner_subject").notNull(),
+  postDraftId: uuid("post_draft_id").notNull(),
+  postVersion: integer("post_version").notNull(),
+  createdAt: timestamptz("created_at").notNull()
+}, (table) => [
+  foreignKey({
+    name: "brand_brief_source_claims_post_version_fk",
+    columns: [table.postDraftId, table.postVersion],
+    foreignColumns: [postDrafts.id, postDrafts.version]
+  }),
+  index("brand_brief_source_claims_owner_subject_idx").on(table.ownerSubject),
+  index("brand_brief_source_claims_post_version_idx")
+    .on(table.postDraftId, table.postVersion)
+]);
+
 export const brandVisualRenders = careerMcp.table("brand_visual_renders", {
   id: uuid("id").primaryKey(),
   ownerSubject: uuid("owner_subject").notNull(),
@@ -488,6 +508,7 @@ export const schema = {
   mediaUsageClaims,
   postDrafts,
   brandVisualBriefs,
+  brandBriefSourceClaims,
   brandVisualRenders,
   postDraftMedia,
   postPreviews,

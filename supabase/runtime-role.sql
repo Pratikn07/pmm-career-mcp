@@ -97,6 +97,32 @@ begin
     execute 'revoke all on function career_mcp.claim_brand_source_media_usage() from public';
     execute 'grant execute on function career_mcp.claim_brand_source_media_usage() to career_mcp_runtime';
   end if;
+
+  if pg_catalog.to_regclass('career_mcp.brand_brief_source_claims') is not null then
+    execute 'revoke insert, update, delete, truncate on table career_mcp.brand_brief_source_claims from career_mcp_runtime';
+    execute 'grant select on table career_mcp.brand_brief_source_claims to career_mcp_runtime';
+  end if;
+
+  if pg_catalog.to_regprocedure(
+    'career_mcp.claim_brand_brief_source()'
+  ) is not null then
+    execute 'revoke all on function career_mcp.claim_brand_brief_source() from public';
+    execute 'grant execute on function career_mcp.claim_brand_brief_source() to career_mcp_runtime';
+  end if;
+
+  if pg_catalog.to_regprocedure(
+    'career_mcp.keep_brand_brief_source_immutable()'
+  ) is not null then
+    execute 'revoke all on function career_mcp.keep_brand_brief_source_immutable() from public';
+    execute 'grant execute on function career_mcp.keep_brand_brief_source_immutable() to career_mcp_runtime';
+  end if;
+
+  if pg_catalog.to_regprocedure(
+    'career_mcp.reject_brand_brief_source_claim_mutation()'
+  ) is not null then
+    execute 'revoke all on function career_mcp.reject_brand_brief_source_claim_mutation() from public';
+    execute 'grant execute on function career_mcp.reject_brand_brief_source_claim_mutation() to career_mcp_runtime';
+  end if;
 end
 $ledger_privileges$;
 

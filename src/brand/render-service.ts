@@ -256,10 +256,7 @@ export function createBrandRenderService(
       exact.id,
       exact.version
     );
-    if (
-      exactMedia.length === 0
-      || exactMedia.some((item) => !isOwnedMedia(item, subject))
-    ) {
+    if (exactMedia.some((item) => !isOwnedMedia(item, subject))) {
       throw postNotFound();
     }
 
@@ -271,10 +268,7 @@ export function createBrandRenderService(
       latest.id,
       latest.version
     );
-    if (
-      latestMedia.length === 0
-      || latestMedia.some((item) => !isOwnedMedia(item, subject))
-    ) {
+    if (latestMedia.some((item) => !isOwnedMedia(item, subject))) {
       throw postNotFound();
     }
     if (

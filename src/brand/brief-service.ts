@@ -235,10 +235,9 @@ export function createBrandBriefService(
       exact.id,
       exact.version
     );
-    if (
-      exactMedia.length === 0
-      || exactMedia.some(({ ownerSubject }) => ownerSubject.toLowerCase() !== subject)
-    ) {
+    if (exactMedia.some(
+      ({ ownerSubject }) => ownerSubject.toLowerCase() !== subject
+    )) {
       throw notFound();
     }
 
@@ -250,10 +249,9 @@ export function createBrandBriefService(
       latest.id,
       latest.version
     );
-    if (
-      latestMedia.length === 0
-      || latestMedia.some(({ ownerSubject }) => ownerSubject.toLowerCase() !== subject)
-    ) {
+    if (latestMedia.some(
+      ({ ownerSubject }) => ownerSubject.toLowerCase() !== subject
+    )) {
       throw notFound();
     }
     if (latest.id !== exact.id || latest.version !== expectedVersion) {

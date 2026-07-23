@@ -61,9 +61,22 @@ Every newly created draft, including its first text-only version, uses the whole
 
 Use this exact instruction for the morning ChatGPT schedule:
 
-> Research today's approved topic and save a private LinkedIn draft in PMM Career MCP. You may prepare up to four draft images with alt text. Do not create an exact preview, do not upload anything to LinkedIn, and do not publish. Notify me when the private draft is ready, then stop.
+> Research today's approved PMM topic and save a private LinkedIn draft in PMM
+> Career MCP. Use the active PMM FIELD NOTES brand profile. Create a short,
+> curiosity-driven cover hook that does not explain the post. Save a branded
+> visual brief and render one private editorial cover. If metaphor source-image
+> generation is unavailable in this scheduled run, save the brief and stop.
+> Do not create an exact preview, do not upload anything to LinkedIn, and do not
+> publish. Notify me when the private draft is ready, then stop.
 
-If a scheduled ChatGPT run cannot pass a generated image file to the MCP, it must save the text draft plus a detailed image brief and stop. Generate or upload the image later in the interactive conversation. Do not add an OpenAI API key, paid image service, or secret Supabase key as a workaround.
+Use the Brand Studio tools in these orders:
+
+```text
+Statement: draft → brief → render → open review card
+Metaphor: draft → brief → ChatGPT image → render with source → open review card
+```
+
+For either sequence, only the final branded PNG is attached to the post draft. Source art is kept private and is never attached or published. If a scheduled ChatGPT run cannot pass a generated metaphor source image to the MCP, it must save the text draft plus the branded visual brief and stop. Generate or upload the source image later in the interactive conversation. Do not add an OpenAI API key, paid image service, or secret Supabase key as a workaround.
 
 Publishing uses one deliberate, no-retry attempt. `media_upload_failed` and `publish_failed` are definite terminal failures; create a new draft version and exact preview before another deliberate attempt. `media_upload_unknown` and `publish_unknown` are terminal ambiguous states. For `publish_unknown`, inspect LinkedIn manually before doing anything else—never retry the same capability.
 

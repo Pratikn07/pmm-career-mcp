@@ -3,6 +3,7 @@ import { isDeepStrictEqual } from "node:util";
 import { and, asc, desc, eq, inArray, isNull, notExists, or, sql } from "drizzle-orm";
 import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
 import {
+  brandBriefSourceClaims,
   brandProfiles,
   brandVisualBriefs,
   brandVisualRenders,
@@ -536,7 +537,7 @@ async function validateOwnedBrandPostMedia(
     eq(postDraftMedia.version, input.version)
   )).orderBy(asc(postDraftMedia.position));
   if (draftMedia.length === 0) {
-    throw brandBriefSourceNotFound();
+    return;
   }
 
   const mediaIds = draftMedia.map(({ mediaId }) => mediaId.toLowerCase()).sort();
@@ -567,7 +568,7 @@ async function lockBrandBriefMediaOwners(
   transaction: Database,
   postDraftId: string,
   version: number
-): Promise<string[]> {
+): Promise<string[] | undefined> {
   const draftMedia = await transaction.select({
     mediaId: postDraftMedia.mediaId
   }).from(postDraftMedia).where(and(
@@ -581,7 +582,7 @@ async function lockBrandBriefMediaOwners(
     .map(({ mediaId }) => mediaId.toLowerCase())
     .sort();
   if (new Set(sortedMediaIds).size !== sortedMediaIds.length) {
-    return [];
+    return undefined;
   }
   const media = await transaction.select({
     id: postMedia.id,
@@ -590,7 +591,7 @@ async function lockBrandBriefMediaOwners(
     inArray(postMedia.id, sortedMediaIds)
   ).orderBy(asc(postMedia.id)).for("update");
   if (media.length !== sortedMediaIds.length) {
-    return [];
+    return undefined;
   }
   return media.map(({ ownerSubject }) => ownerSubject);
 }
@@ -634,7 +635,7 @@ async function lockLatestOwnedBrandBriefSource(
     input.postVersion
   );
   if (
-    sourceMediaOwners.length === 0
+    sourceMediaOwners === undefined
     || sourceMediaOwners.some((ownerSubject) => (
       ownerSubject.toLowerCase() !== input.ownerSubject.toLowerCase()
     ))
@@ -646,7 +647,7 @@ async function lockLatestOwnedBrandBriefSource(
     ? sourceMediaOwners
     : await lockBrandBriefMediaOwners(transaction, latest.id, latest.version);
   if (
-    latestMediaOwners.length === 0
+    latestMediaOwners === undefined
     || latestMediaOwners.some((ownerSubject) => (
       ownerSubject.toLowerCase() !== input.ownerSubject.toLowerCase()
     ))
@@ -1795,6 +1796,18 @@ export function createRepositories(database: Database) {
           }
           const initialBrief = normalizeRowTimestamps(initialBriefRow);
 
+          const [sourceClaim] = await transaction.select({
+            briefId: brandBriefSourceClaims.briefId
+          }).from(brandBriefSourceClaims).where(and(
+            eq(brandBriefSourceClaims.briefId, initialBrief.id),
+            eq(brandBriefSourceClaims.ownerSubject, ownerSubject),
+            eq(brandBriefSourceClaims.postDraftId, initialBrief.postDraftId),
+            eq(brandBriefSourceClaims.postVersion, initialBrief.postVersion)
+          )).limit(1);
+          if (sourceClaim === undefined) {
+            throw postNotFound();
+          }
+
           const [reference] = await transaction.select().from(postDrafts).where(and(
             eq(postDrafts.id, initialBrief.postDraftId),
             eq(postDrafts.version, initialBrief.postVersion)
@@ -1863,9 +1876,6 @@ export function createRepositories(database: Database) {
             eq(postDraftMedia.version, exact.version)
           )).orderBy(asc(postDraftMedia.position)).for("update");
           const latestDraftMedia = exactDraftMedia;
-          if (exactDraftMedia.length === 0 || latestDraftMedia.length === 0) {
-            throw postNotFound();
-          }
 
           const sortedMediaIds = [...new Set([
             ...exactDraftMedia.map(({ mediaId }) => mediaId.toLowerCase()),
