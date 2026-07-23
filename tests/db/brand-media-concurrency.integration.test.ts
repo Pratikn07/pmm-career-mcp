@@ -147,6 +147,69 @@ describe("Task 7 PostgreSQL integration safety gate", () => {
     expect(() => runtimePasswordDdl("unquoted"))
       .toThrow(/quoted PostgreSQL literal/i);
   });
+
+  it("attempts restoration after close and cleanup failures without losing errors", async () => {
+    const closeError = new Error("runtime close failed");
+    const cleanupError = new Error("row cleanup failed");
+    const restoreError = new Error("password restore failed");
+    const order: string[] = [];
+
+    const failure = await runCleanupSteps([
+      {
+        label: "runtime client close",
+        run: async () => {
+          order.push("close");
+          throw closeError;
+        }
+      },
+      {
+        label: "row cleanup",
+        run: async () => {
+          order.push("cleanup");
+          throw cleanupError;
+        }
+      },
+      {
+        label: "password restore",
+        run: async () => {
+          order.push("restore");
+          throw restoreError;
+        }
+      },
+      {
+        label: "owner client close",
+        run: async () => {
+          order.push("owner-close");
+        }
+      }
+    ]).then(
+      () => undefined,
+      (error: unknown) => error
+    );
+
+    expect(order).toEqual(["close", "cleanup", "restore", "owner-close"]);
+    expect(failure).toBeInstanceOf(AggregateError);
+    expect((failure as AggregateError).errors)
+      .toEqual([closeError, cleanupError, restoreError]);
+    expect((failure as AggregateError).message)
+      .toMatch(/runtime client close.*row cleanup.*password restore/i);
+    const bodyError = new Error("guarded assertion failed");
+    const combinedFailure = combinePrimaryAndCleanupFailures(bodyError, failure);
+    expect(combinedFailure).toBeInstanceOf(AggregateError);
+    expect((combinedFailure as AggregateError).errors)
+      .toEqual([bodyError, closeError, cleanupError, restoreError]);
+
+    const primaryFailure = await runCleanupSteps([{
+      label: "runtime client close",
+      run: async () => {
+        throw closeError;
+      }
+    }]).then(
+      () => undefined,
+      (error: unknown) => error
+    );
+    expect(primaryFailure).toBe(closeError);
+  });
 });
 
 async function createClients() {
@@ -212,6 +275,47 @@ export function runtimePasswordDdl(quotedPasswordLiteral: string | null): string
     throw new Error("Runtime password must be a quoted PostgreSQL literal");
   }
   return `alter role career_mcp_runtime password ${quotedPasswordLiteral}`;
+}
+
+type CleanupStep = Readonly<{
+  label: string;
+  run: () => Promise<unknown>;
+}>;
+
+export async function runCleanupSteps(
+  steps: readonly CleanupStep[]
+): Promise<void> {
+  const failures: Array<{ label: string; error: unknown }> = [];
+  for (const step of steps) {
+    try {
+      await step.run();
+    } catch (error) {
+      failures.push({ label: step.label, error });
+    }
+  }
+  if (failures.length === 0) return;
+  if (failures.length === 1) throw failures[0]!.error;
+  throw new AggregateError(
+    failures.map((failure) => failure.error),
+    `Cleanup steps failed: ${failures.map((failure) => failure.label).join(", ")}`
+  );
+}
+
+export function combinePrimaryAndCleanupFailures(
+  primaryFailure: unknown | undefined,
+  cleanupFailure: unknown | undefined
+): unknown | undefined {
+  if (primaryFailure === undefined) return cleanupFailure;
+  if (cleanupFailure === undefined) return primaryFailure;
+  return new AggregateError(
+    [
+      primaryFailure,
+      ...(cleanupFailure instanceof AggregateError
+        ? cleanupFailure.errors
+        : [cleanupFailure])
+    ],
+    "Guarded operation failed and cleanup also failed"
+  );
 }
 
 async function setRuntimePassword(sql: Sql, passwordOrHash: string | null): Promise<void> {
@@ -289,19 +393,33 @@ async function createAuthenticatedRuntimeLogin(sql: Sql): Promise<RuntimeLogin> 
     await client`set statement_timeout = '3s'`;
     return login;
   } catch (error) {
-    await client.end({ timeout: 1 }).catch(() => undefined);
-    if (login.insertedOwnerMapping) {
-      await sql.begin(async (transaction) => {
-        await transaction`set local session_replication_role = replica`;
-        await transaction`
-          delete from career_mcp.runtime_role_owners
-          where role_name = 'career_mcp_runtime'
-            and owner_subject = ${login.ownerSubject}
-        `;
-      });
-    }
-    await restoreRuntimePassword(sql, login);
-    throw error;
+    const cleanupFailure = await runCleanupSteps([
+      {
+        label: "failed runtime client close",
+        run: () => client.end({ timeout: 1 })
+      },
+      ...(login.insertedOwnerMapping
+        ? [{
+            label: "failed runtime owner mapping cleanup",
+            run: () => sql.begin(async (transaction) => {
+              await transaction`set local session_replication_role = replica`;
+              await transaction`
+                delete from career_mcp.runtime_role_owners
+                where role_name = 'career_mcp_runtime'
+                  and owner_subject = ${login.ownerSubject}
+              `;
+            })
+          }]
+        : []),
+      {
+        label: "failed runtime password restore",
+        run: () => restoreRuntimePassword(sql, login)
+      }
+    ]).then(
+      () => undefined,
+      (cleanupError: unknown) => cleanupError
+    );
+    throw combinePrimaryAndCleanupFailures(error, cleanupFailure);
   }
 }
 
@@ -517,6 +635,7 @@ liveDescribe("Task 7 real PostgreSQL concurrency", () => {
     const forgedBriefId = randomUUID();
     const otherOwner = randomUUID();
     let login: RuntimeLogin | undefined;
+    let primaryFailure: unknown | undefined;
     try {
       await assertMigrationApplied(clients.observer);
       login = await createAuthenticatedRuntimeLogin(clients.observer);
@@ -813,13 +932,20 @@ liveDescribe("Task 7 real PostgreSQL concurrency", () => {
         );
         expect(postgresField(error, "code"), label).toBe("42501");
       }
-    } finally {
-      try {
-        if (login !== undefined) {
-          const currentLogin = login;
-          await currentLogin.client.end({ timeout: 1 });
-          try {
-            await clients.observer.begin(async (transaction) => {
+    } catch (error) {
+      primaryFailure = error;
+    }
+
+    const cleanupPromise = login === undefined
+      ? closeClients(clients)
+      : runCleanupSteps([
+          {
+            label: "runtime client close",
+            run: () => login.client.end({ timeout: 1 })
+          },
+          {
+            label: "row cleanup",
+            run: () => clients.observer.begin(async (transaction) => {
               await transaction`set local session_replication_role = replica`;
               await transaction`
                 delete from career_mcp.brand_brief_source_claims
@@ -841,21 +967,34 @@ liveDescribe("Task 7 real PostgreSQL concurrency", () => {
                 delete from career_mcp.post_draft_owners
                 where draft_id in (${draftId}, ${forgedDraftId})
               `;
-              if (currentLogin.insertedOwnerMapping) {
+              if (login.insertedOwnerMapping) {
                 await transaction`
                   delete from career_mcp.runtime_role_owners
                   where role_name = 'career_mcp_runtime'
-                    and owner_subject = ${currentLogin.ownerSubject}
+                    and owner_subject = ${login.ownerSubject}
                 `;
               }
-            });
-          } finally {
-            await restoreRuntimePassword(clients.observer, currentLogin);
+            })
+          },
+          {
+            label: "password restore",
+            run: () => restoreRuntimePassword(clients.observer, login)
+          },
+          {
+            label: "owner clients close",
+            run: () => closeClients(clients)
           }
-        }
-      } finally {
-        await closeClients(clients);
-      }
+        ]);
+    const cleanupFailure = await cleanupPromise.then(
+      () => undefined,
+      (error: unknown) => error
+    );
+    const combinedFailure = combinePrimaryAndCleanupFailures(
+      primaryFailure,
+      cleanupFailure
+    );
+    if (combinedFailure !== undefined) {
+      throw combinedFailure;
     }
   });
 
