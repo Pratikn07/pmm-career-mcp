@@ -4,12 +4,20 @@ import sharp from "sharp";
 import { describe, expect, it } from "vitest";
 import { DomainError } from "../../src/domain/errors.js";
 import { fontPath } from "../../src/brand/assets.js";
-import { DEFAULT_PMM_BRAND_PROFILE } from "../../src/brand/profile.js";
+import {
+  DEFAULT_PMM_BRAND_PROFILE,
+  type PmmBrandProfile
+} from "../../src/brand/profile.js";
 import {
   buildCoverSvg,
   renderBrandedCover
 } from "../../src/brand/renderer.js";
-import { templateForMode } from "../../src/brand/templates.js";
+import {
+  templateForMode,
+  type BrandTemplate
+} from "../../src/brand/templates.js";
+
+const MAX_SOURCE_BYTES = 20 * 1024 * 1024;
 
 const FONT_CHECKSUMS = {
   "CormorantGaramond-SemiBold.ttf":
@@ -32,6 +40,67 @@ const statementInput = {
   coverHook: "Clarity beats capability.",
   topicLabel: "POSITIONING"
 } as const;
+
+function crc32(bytes: Uint8Array): number {
+  let crc = 0xffffffff;
+  for (const value of bytes) {
+    crc ^= value;
+    for (let bit = 0; bit < 8; bit += 1) {
+      crc = (crc >>> 1) ^ ((crc & 1) === 1 ? 0xedb88320 : 0);
+    }
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function pngWithDimensions(
+  source: Uint8Array,
+  width: number,
+  height: number
+): Buffer {
+  const bytes = Buffer.from(source);
+  bytes.writeUInt32BE(width, 16);
+  bytes.writeUInt32BE(height, 20);
+  bytes.writeUInt32BE(crc32(bytes.subarray(12, 29)), 29);
+  return bytes;
+}
+
+async function animatedGif(frameCount: number): Promise<Buffer> {
+  const width = 2;
+  const pageHeight = 2;
+  const height = pageHeight * frameCount;
+  const pixels = Buffer.alloc(width * height * 4);
+  for (let frame = 0; frame < frameCount; frame += 1) {
+    for (let pixel = 0; pixel < width * pageHeight; pixel += 1) {
+      const offset = (frame * width * pageHeight + pixel) * 4;
+      pixels[offset] = frame * 40;
+      pixels[offset + 1] = frame * 80;
+      pixels[offset + 2] = frame * 120;
+      pixels[offset + 3] = 255;
+    }
+  }
+  return await sharp(pixels, {
+    raw: { width, height, channels: 4, pageHeight }
+  }).gif({
+    delay: Array.from({ length: frameCount }, () => 10),
+    loop: 0
+  }).toBuffer();
+}
+
+async function expectSourceValidationReason(
+  sourceImageBytes: Buffer,
+  reason: string
+): Promise<void> {
+  await expect(renderBrandedCover({
+    profile: DEFAULT_PMM_BRAND_PROFILE,
+    template: templateForMode("EDITORIAL_METAPHOR"),
+    coverHook: "Clarity changes the frame.",
+    sourceImageBytes
+  })).rejects.toEqual(expect.objectContaining({
+    code: "MEDIA_VALIDATION_ERROR",
+    message: "Brand source image validation failed",
+    details: { field: "sourceImageBytes", reason }
+  }));
+}
 
 describe("bundled renderer assets", () => {
   it("pins every production font and license to its reviewed upstream bytes", async () => {
@@ -70,6 +139,59 @@ describe("buildCoverSvg", () => {
     expect(svg).toContain(`data-hook-tier="${tier}"`);
     expect(svg.match(/data-hook-line="/gu)?.length).toBeLessThanOrEqual(2);
     expect(svg.match(/data-hook-line="/gu)?.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it.each([
+    "Solitude",
+    "One two three four five six seven eight nine"
+  ])("rejects hooks outside the exact two-to-eight-word tiers: %j", (coverHook) => {
+    expect(() => buildCoverSvg({
+      ...statementInput,
+      coverHook
+    })).toThrowError(expect.objectContaining({
+      code: "VALIDATION_ERROR",
+      details: { field: "coverHook", reason: "word_count" }
+    }));
+  });
+
+  it("accepts a topic label whose final Inter run fits the topic safe area", () => {
+    expect(buildCoverSvg({
+      ...statementInput,
+      topicLabel: "GO-TO-MARKET"
+    })).toContain(">GO-TO-MARKET</text>");
+  });
+
+  it("rejects a topic label whose final Inter run cannot fit", () => {
+    expect(() => buildCoverSvg({
+      ...statementInput,
+      topicLabel: "W".repeat(24)
+    })).toThrowError(expect.objectContaining({
+      code: "VALIDATION_ERROR",
+      details: { field: "topicLabel", reason: "text_fit" }
+    }));
+  });
+
+  it.each([
+    ["coverHook", { coverHook: "Clarity\u0000 wins." }],
+    ["topicLabel", { topicLabel: "POSITION\u0001ING" }]
+  ])("rejects XML 1.0-invalid controls in %s", (field, override) => {
+    expect(() => buildCoverSvg({
+      ...statementInput,
+      ...override
+    })).toThrowError(expect.objectContaining({
+      code: "VALIDATION_ERROR",
+      details: { field, reason: "xml_control" }
+    }));
+  });
+
+  it("keeps caller text measurement caches local to one SVG build", async () => {
+    const source = await readFile(
+      new URL("../../src/brand/renderer.ts", import.meta.url),
+      "utf8"
+    );
+
+    expect(source).not.toMatch(/^const measuredWidths = new Map/um);
+    expect(source).toContain("function createTextMeasurer");
   });
 
   it("rejects a valid-length hook when no safe two-line layout exists", () => {
@@ -120,6 +242,49 @@ describe("renderBrandedCover", () => {
     ]);
 
     expect(first.bytes).toEqual(second.bytes);
+  }, 30_000);
+
+  it("snapshots canonical configuration and source bytes before an async boundary", async () => {
+    const originalSource = await sharp({
+      create: {
+        width: 64,
+        height: 64,
+        channels: 4,
+        background: { r: 185, g: 120, b: 80, alpha: 1 }
+      }
+    }).png().toBuffer();
+    const callerSource = Buffer.from(originalSource);
+    const callerProfile = structuredClone(
+      DEFAULT_PMM_BRAND_PROFILE
+    ) as PmmBrandProfile;
+    const callerTemplate = structuredClone(
+      templateForMode("EDITORIAL_METAPHOR")
+    ) as BrandTemplate;
+
+    const rendering = renderBrandedCover({
+      profile: callerProfile,
+      template: callerTemplate,
+      coverHook: "Clarity changes the frame.",
+      sourceImageBytes: callerSource
+    });
+    queueMicrotask(() => {
+      (callerProfile.palette as { ivory: string }).ivory = "#000000";
+      (callerTemplate.imageZone as { x: number }).x = 0;
+      callerSource.fill(0);
+    });
+
+    const [actual, expected] = await Promise.all([
+      rendering,
+      renderBrandedCover({
+        profile: DEFAULT_PMM_BRAND_PROFILE,
+        template: templateForMode("EDITORIAL_METAPHOR"),
+        coverHook: "Clarity changes the frame.",
+        sourceImageBytes: originalSource
+      })
+    ]);
+
+    expect(actual.bytes).toEqual(expected.bytes);
+    expect(actual.validation.sourceImageUsed).toBe(true);
   }, 30_000);
 
   it("requires and composites source art only for the metaphor template", async () => {
@@ -186,5 +351,72 @@ describe("renderBrandedCover", () => {
       code: "MEDIA_VALIDATION_ERROR",
       message: "Brand source image validation failed"
     }));
+  });
+
+  it("rejects encoded source bytes above 20 MiB before decoding", async () => {
+    const oversized = Buffer.allocUnsafe(MAX_SOURCE_BYTES + 1);
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+      .copy(oversized);
+
+    await expectSourceValidationReason(oversized, "byte_size");
+  });
+
+  it("rejects malformed raster signatures before decoding", async () => {
+    await expectSourceValidationReason(
+      Buffer.from("private malformed image body"),
+      "signature"
+    );
+  });
+
+  it("rejects source dimensions above 8192 pixels per axis", async () => {
+    const png = await sharp({
+      create: {
+        width: 2,
+        height: 2,
+        channels: 4,
+        background: "#14233A"
+      }
+    }).png().toBuffer();
+
+    await expectSourceValidationReason(
+      pngWithDimensions(png, 8193, 1025),
+      "dimensions"
+    );
+  });
+
+  it("rejects source images above the decoded pixel limit", async () => {
+    const png = await sharp({
+      create: {
+        width: 2,
+        height: 2,
+        channels: 4,
+        background: "#14233A"
+      }
+    }).png().toBuffer();
+
+    await expectSourceValidationReason(
+      pngWithDimensions(png, 7000, 5200),
+      "pixel_count"
+    );
+  });
+
+  it("rejects source images with an aspect ratio above 8 to 1", async () => {
+    const png = await sharp({
+      create: {
+        width: 2,
+        height: 2,
+        channels: 4,
+        background: "#14233A"
+      }
+    }).png().toBuffer();
+
+    await expectSourceValidationReason(
+      pngWithDimensions(png, 8192, 1000),
+      "aspect_ratio"
+    );
+  });
+
+  it("rejects animated or multipage source images", async () => {
+    await expectSourceValidationReason(await animatedGif(2), "frame_count");
   });
 });

@@ -1,6 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
 import { Resvg } from "@resvg/resvg-js";
-import sharp, { type OverlayOptions } from "sharp";
+import sharp, { type Metadata, type OverlayOptions } from "sharp";
 import { DomainError } from "../domain/errors.js";
 import { fontPath } from "./assets.js";
 import {
@@ -16,8 +16,13 @@ import {
 const WIDTH = 1080 as const;
 const HEIGHT = 1350 as const;
 const MAX_TOPIC_CHARACTERS = 24;
+const MAX_SOURCE_BYTES = 20 * 1024 * 1024;
+const MAX_SOURCE_AXIS = 8192;
+const MAX_SOURCE_PIXELS = 36_152_319;
+const MAX_SOURCE_ASPECT_RATIO = 8;
 const HEADLINE_FONT = "Cormorant Garamond";
 const LABEL_FONT = "Inter";
+const XML_INVALID_CONTROL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/u;
 const FONT_FILES = [
   "CormorantGaramond-SemiBold.ttf",
   "CormorantGaramond-SemiBoldItalic.ttf",
@@ -32,6 +37,7 @@ const PNG_OPTIONS = Object.freeze({
 });
 
 type HookTier = "2-4" | "5-6" | "7-8";
+type SourceImageFormat = "gif" | "jpeg" | "png";
 
 type HookLayout = Readonly<{
   fontSize: number;
@@ -77,6 +83,19 @@ type HookLines = Readonly<{
   lines: readonly string[];
 }>;
 
+type TextMeasurementStyle = Readonly<{
+  fontFamily: typeof HEADLINE_FONT | typeof LABEL_FONT;
+  fontSize: number;
+  fontWeight: 500 | 600;
+  italic?: boolean;
+  letterSpacing?: number;
+}>;
+
+type TextMeasurer = (
+  text: string,
+  style: TextMeasurementStyle
+) => number;
+
 function validationError(field: string, reason: string): DomainError {
   return new DomainError(
     "VALIDATION_ERROR",
@@ -85,10 +104,21 @@ function validationError(field: string, reason: string): DomainError {
   );
 }
 
-function assertCanonicalConfiguration(
+function sourceImageValidationError(reason: string): DomainError {
+  return new DomainError(
+    "MEDIA_VALIDATION_ERROR",
+    "Brand source image validation failed",
+    { field: "sourceImageBytes", reason }
+  );
+}
+
+function canonicalBrandConfiguration(
   profile: PmmBrandProfile,
   template: BrandTemplate
-): void {
+): Readonly<{
+  profile: PmmBrandProfile;
+  template: BrandTemplate;
+}> {
   if (!isDeepStrictEqual(profile, DEFAULT_PMM_BRAND_PROFILE)) {
     throw new DomainError(
       "DATA_INTEGRITY",
@@ -105,11 +135,48 @@ function assertCanonicalConfiguration(
       { entity: "brand_template" }
     );
   }
+  return Object.freeze({
+    profile: DEFAULT_PMM_BRAND_PROFILE,
+    template: canonicalTemplate
+  });
+}
+
+function canonicalTextInput(
+  input: RenderBrandedCoverInput
+): RenderBrandedCoverInput {
+  const { profile, template } = canonicalBrandConfiguration(
+    input.profile,
+    input.template
+  );
+  const coverHook = input.coverHook;
+  const topicLabel = input.topicLabel;
+  return Object.freeze({
+    profile,
+    template,
+    coverHook,
+    ...(topicLabel === undefined ? {} : { topicLabel })
+  });
+}
+
+function canonicalRenderInput(
+  input: RenderBrandedCoverInput
+): RenderBrandedCoverInput {
+  const textInput = canonicalTextInput(input);
+  const sourceImageBytes = input.sourceImageBytes === undefined
+    ? undefined
+    : Buffer.from(input.sourceImageBytes);
+  return Object.freeze({
+    ...textInput,
+    ...(sourceImageBytes === undefined ? {} : { sourceImageBytes })
+  });
 }
 
 function normalizeInline(value: string, field: string): string {
   if (typeof value !== "string") {
     throw validationError(field, "type");
+  }
+  if (XML_INVALID_CONTROL.test(value)) {
+    throw validationError(field, "xml_control");
   }
   return value.normalize("NFC").trim().replace(/\s+/gu, " ");
 }
@@ -132,7 +199,10 @@ function explicitFontOptions() {
 }
 
 function tierForWordCount(wordCount: number): HookTier {
-  if (wordCount >= 2 && wordCount <= 4) {
+  if (wordCount < 2 || wordCount > 8) {
+    throw validationError("coverHook", "word_count");
+  }
+  if (wordCount <= 4) {
     return "2-4";
   }
   if (wordCount <= 6) {
@@ -144,53 +214,66 @@ function tierForWordCount(wordCount: number): HookTier {
   throw validationError("coverHook", "word_count");
 }
 
-const measuredWidths = new Map<string, number>();
+function createTextMeasurer(): TextMeasurer {
+  const measuredWidths = new Map<string, number>();
+  return (text, style) => {
+    const cacheKey = [
+      style.fontFamily,
+      style.fontSize,
+      style.fontWeight,
+      style.italic === true ? "italic" : "normal",
+      style.letterSpacing ?? 0,
+      text
+    ].join(":");
+    const cached = measuredWidths.get(cacheKey);
+    if (cached !== undefined) {
+      return cached;
+    }
 
-function measuredHeadlineWidth(
-  text: string,
-  fontSize: number,
-  italic: boolean
-): number {
-  const cacheKey = `${fontSize}:${italic ? "italic" : "normal"}:${text}`;
-  const cached = measuredWidths.get(cacheKey);
-  if (cached !== undefined) {
-    return cached;
-  }
-
-  const measurementSvg = [
-    `<svg xmlns="http://www.w3.org/2000/svg" width="4096" height="512">`,
-    `<text x="8" y="${fontSize + 24}"`,
-    ` font-family="${HEADLINE_FONT}" font-size="${fontSize}" font-weight="600"`,
-    italic ? ` font-style="italic"` : "",
-    `>${escapeXml(text)}</text></svg>`
-  ].join("");
-  const measurement = new Resvg(measurementSvg, {
-    font: explicitFontOptions(),
-    fitTo: { mode: "original" },
-    textRendering: 2
-  });
-  const width = measurement.getBBox()?.width;
-  if (width === undefined || !Number.isFinite(width)) {
-    throw new DomainError(
-      "DATA_INTEGRITY",
-      "Brand typography could not be measured",
-      { entity: "brand_renderer" }
-    );
-  }
-  measuredWidths.set(cacheKey, width);
-  return width;
+    const measurementSvg = [
+      `<svg xmlns="http://www.w3.org/2000/svg" width="4096" height="512">`,
+      `<text x="8" y="${style.fontSize + 24}"`,
+      ` font-family="${style.fontFamily}" font-size="${style.fontSize}" font-weight="${style.fontWeight}"`,
+      style.italic === true ? ` font-style="italic"` : "",
+      style.letterSpacing === undefined
+        ? ""
+        : ` letter-spacing="${style.letterSpacing}"`,
+      `>${escapeXml(text)}</text></svg>`
+    ].join("");
+    const measurement = new Resvg(measurementSvg, {
+      font: explicitFontOptions(),
+      fitTo: { mode: "original" },
+      textRendering: 2
+    });
+    const width = measurement.getBBox()?.width;
+    if (width === undefined || !Number.isFinite(width)) {
+      throw new DomainError(
+        "DATA_INTEGRITY",
+        "Brand typography could not be measured",
+        { entity: "brand_renderer" }
+      );
+    }
+    measuredWidths.set(cacheKey, width);
+    return width;
+  };
 }
 
 function hookLines(
   template: BrandTemplate,
-  normalizedHook: string
+  normalizedHook: string,
+  measureText: TextMeasurer
 ): HookLines {
   const words = normalizedHook.split(" ");
   const tier = tierForWordCount(words.length);
   const layout = HOOK_LAYOUTS[template.id][tier];
   const safeWidth = template.safeTextRectangles.hook.width - 8;
 
-  if (measuredHeadlineWidth(normalizedHook, layout.fontSize, false) <= safeWidth) {
+  const headlineStyle = {
+    fontFamily: HEADLINE_FONT,
+    fontSize: layout.fontSize,
+    fontWeight: 600
+  } as const;
+  if (measureText(normalizedHook, headlineStyle) <= safeWidth) {
     return Object.freeze({ layout, lines: Object.freeze([normalizedHook]) });
   }
 
@@ -200,8 +283,11 @@ function hookLines(
   for (let split = 1; split < words.length; split += 1) {
     const first = words.slice(0, split).join(" ");
     const second = words.slice(split).join(" ");
-    const firstWidth = measuredHeadlineWidth(first, layout.fontSize, false);
-    const secondWidth = measuredHeadlineWidth(second, layout.fontSize, true);
+    const firstWidth = measureText(first, headlineStyle);
+    const secondWidth = measureText(second, {
+      ...headlineStyle,
+      italic: true
+    });
     if (firstWidth > safeWidth || secondWidth > safeWidth) {
       continue;
     }
@@ -232,12 +318,14 @@ function clipPath(id: string, rectangle: BrandRectangle): string {
   return `<clipPath id="${id}"><rect x="${rectangle.x}" y="${rectangle.y}" width="${rectangle.width}" height="${rectangle.height}"/></clipPath>`;
 }
 
-function validatedSvgInput(input: RenderBrandedCoverInput): Readonly<{
+function validatedSvgInput(
+  input: RenderBrandedCoverInput,
+  measureText: TextMeasurer
+): Readonly<{
   hook: string;
   topic?: string;
   hookLines: HookLines;
 }> {
-  assertCanonicalConfiguration(input.profile, input.template);
   const hook = normalizeInline(input.coverHook, "coverHook");
   const characterCount = [...hook].length;
   if (
@@ -256,16 +344,30 @@ function validatedSvgInput(input: RenderBrandedCoverInput): Readonly<{
   ) {
     throw validationError("topicLabel", "character_count");
   }
+  if (
+    topic !== undefined
+    && measureText(topic, {
+      fontFamily: LABEL_FONT,
+      fontSize: 20,
+      fontWeight: 500,
+      letterSpacing: 3
+    }) > input.template.safeTextRectangles.topic.width
+  ) {
+    throw validationError("topicLabel", "text_fit");
+  }
 
   return Object.freeze({
     hook,
     ...(topic === undefined ? {} : { topic }),
-    hookLines: hookLines(input.template, hook)
+    hookLines: hookLines(input.template, hook, measureText)
   });
 }
 
-export function buildCoverSvg(input: RenderBrandedCoverInput): string {
-  const { hookLines: fitted, topic } = validatedSvgInput(input);
+function buildCanonicalCoverSvg(input: RenderBrandedCoverInput): string {
+  const { hookLines: fitted, topic } = validatedSvgInput(
+    input,
+    createTextMeasurer()
+  );
   const { profile, template } = input;
   const rectangles = template.safeTextRectangles;
   const blockHeight = fitted.layout.fontSize
@@ -308,6 +410,10 @@ export function buildCoverSvg(input: RenderBrandedCoverInput): string {
     `</g>`,
     `</g></svg>`
   ].join("");
+}
+
+export function buildCoverSvg(input: RenderBrandedCoverInput): string {
+  return buildCanonicalCoverSvg(canonicalTextInput(input));
 }
 
 function textureBytes(template: BrandTemplate): Buffer {
@@ -359,45 +465,118 @@ function geometrySvg(input: RenderBrandedCoverInput): Buffer {
   ].join(""));
 }
 
+function sourceImageFormat(sourceImageBytes: Buffer): SourceImageFormat {
+  if (sourceImageBytes.byteLength === 0) {
+    throw sourceImageValidationError("required");
+  }
+  if (sourceImageBytes.byteLength > MAX_SOURCE_BYTES) {
+    throw sourceImageValidationError("byte_size");
+  }
+  if (
+    sourceImageBytes.byteLength >= 8
+    && sourceImageBytes.subarray(0, 8).equals(
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+    )
+  ) {
+    return "png";
+  }
+  if (
+    sourceImageBytes.byteLength >= 3
+    && sourceImageBytes[0] === 0xff
+    && sourceImageBytes[1] === 0xd8
+    && sourceImageBytes[2] === 0xff
+  ) {
+    return "jpeg";
+  }
+  const gifSignature = sourceImageBytes.subarray(0, 6).toString("ascii");
+  if (gifSignature === "GIF87a" || gifSignature === "GIF89a") {
+    return "gif";
+  }
+  throw sourceImageValidationError("signature");
+}
+
+function positiveInteger(value: number | undefined): value is number {
+  return value !== undefined && Number.isInteger(value) && value > 0;
+}
+
+function validateSourceMetadata(
+  metadata: Metadata,
+  expectedFormat: SourceImageFormat
+): void {
+  if (metadata.format !== expectedFormat) {
+    throw sourceImageValidationError("signature");
+  }
+  if (
+    !positiveInteger(metadata.width)
+    || !positiveInteger(metadata.height)
+    || metadata.width > MAX_SOURCE_AXIS
+    || metadata.height > MAX_SOURCE_AXIS
+  ) {
+    throw sourceImageValidationError("dimensions");
+  }
+
+  const decodedPixels = metadata.width * metadata.height;
+  if (
+    !Number.isSafeInteger(decodedPixels)
+    || decodedPixels > MAX_SOURCE_PIXELS
+  ) {
+    throw sourceImageValidationError("pixel_count");
+  }
+  if (
+    metadata.width > metadata.height * MAX_SOURCE_ASPECT_RATIO
+    || metadata.height > metadata.width * MAX_SOURCE_ASPECT_RATIO
+  ) {
+    throw sourceImageValidationError("aspect_ratio");
+  }
+
+  const pageCount = metadata.pages ?? 1;
+  if (
+    pageCount !== 1
+    || (metadata.pageHeight !== undefined && metadata.pageHeight !== metadata.height)
+  ) {
+    throw sourceImageValidationError("frame_count");
+  }
+}
+
 async function preparedSourceImage(
   sourceImageBytes: Buffer,
   imageZone: BrandRectangle,
   palette: PmmBrandProfile["palette"]
 ): Promise<Buffer> {
-  if (sourceImageBytes.byteLength === 0) {
-    throw validationError("sourceImageBytes", "invalid");
+  const expectedFormat = sourceImageFormat(sourceImageBytes);
+  let metadata: Metadata;
+  try {
+    metadata = await sharp(sourceImageBytes, {
+      animated: true,
+      failOn: "error",
+      limitInputPixels: false,
+      sequentialRead: true,
+      unlimited: false
+    }).metadata();
+  } catch {
+    throw sourceImageValidationError("decode");
   }
-
+  validateSourceMetadata(metadata, expectedFormat);
   const mask = Buffer.from(
     `<svg xmlns="http://www.w3.org/2000/svg" width="${imageZone.width}" height="${imageZone.height}"><rect width="${imageZone.width}" height="${imageZone.height}" rx="18" fill="#fff"/></svg>`
   );
-  const tint = await sharp({
-    create: {
-      width: imageZone.width,
-      height: imageZone.height,
-      channels: 4,
-      background: `${palette.copper}1f`
-    }
-  }).png(PNG_OPTIONS).toBuffer();
 
   try {
-    const source = sharp(sourceImageBytes, {
+    const tint = await sharp({
+      create: {
+        width: imageZone.width,
+        height: imageZone.height,
+        channels: 4,
+        background: `${palette.copper}1f`
+      }
+    }).png(PNG_OPTIONS).toBuffer();
+    return await sharp(sourceImageBytes, {
       animated: false,
       failOn: "error",
-      limitInputPixels: 36_152_319,
+      limitInputPixels: MAX_SOURCE_PIXELS,
       sequentialRead: true,
       unlimited: false
-    });
-    const metadata = await source.metadata();
-    if (
-      metadata.format !== "jpeg"
-      && metadata.format !== "png"
-      && metadata.format !== "gif"
-    ) {
-      throw new Error("Unsupported source image format");
-    }
-
-    return await source
+    })
       .rotate()
       .resize(imageZone.width, imageZone.height, {
         fastShrinkOnLoad: false,
@@ -415,10 +594,7 @@ async function preparedSourceImage(
       .png(PNG_OPTIONS)
       .toBuffer();
   } catch {
-    throw new DomainError(
-      "MEDIA_VALIDATION_ERROR",
-      "Brand source image validation failed"
-    );
+    throw sourceImageValidationError("decode");
   }
 }
 
@@ -435,9 +611,9 @@ function assertSourceImageMode(input: RenderBrandedCoverInput): void {
 export async function renderBrandedCover(
   input: RenderBrandedCoverInput
 ): Promise<RenderedBrandCover> {
-  assertCanonicalConfiguration(input.profile, input.template);
-  assertSourceImageMode(input);
-  const svg = buildCoverSvg(input);
+  const canonicalInput = canonicalRenderInput(input);
+  assertSourceImageMode(canonicalInput);
+  const svg = buildCanonicalCoverSvg(canonicalInput);
   const typography = new Resvg(svg, {
     fitTo: { mode: "width", value: WIDTH },
     font: explicitFontOptions(),
@@ -445,24 +621,24 @@ export async function renderBrandedCover(
     textRendering: 2
   });
   const typographyPng = Buffer.from(typography.render().asPng());
-  const texturePng = await sharp(textureBytes(input.template), {
+  const texturePng = await sharp(textureBytes(canonicalInput.template), {
     raw: { width: WIDTH, height: HEIGHT, channels: 4 }
   }).png(PNG_OPTIONS).toBuffer();
   const composites: OverlayOptions[] = [
     { input: texturePng, left: 0, top: 0 },
-    { input: geometrySvg(input), left: 0, top: 0 }
+    { input: geometrySvg(canonicalInput), left: 0, top: 0 }
   ];
 
-  if (input.sourceImageBytes !== undefined) {
+  if (canonicalInput.sourceImageBytes !== undefined) {
     const source = await preparedSourceImage(
-      input.sourceImageBytes,
-      input.template.imageZone,
-      input.profile.palette
+      canonicalInput.sourceImageBytes,
+      canonicalInput.template.imageZone,
+      canonicalInput.profile.palette
     );
     composites.push({
       input: source,
-      left: input.template.imageZone.x,
-      top: input.template.imageZone.y
+      left: canonicalInput.template.imageZone.x,
+      top: canonicalInput.template.imageZone.y
     });
   }
   composites.push({ input: typographyPng, left: 0, top: 0 });
@@ -472,7 +648,7 @@ export async function renderBrandedCover(
       width: WIDTH,
       height: HEIGHT,
       channels: 4,
-      background: input.profile.palette.ivory
+      background: canonicalInput.profile.palette.ivory
     }
   })
     .composite(composites)
@@ -502,7 +678,7 @@ export async function renderBrandedCover(
     validation: Object.freeze({
       fixedLabelsPresent: true,
       textWithinSafeArea: true,
-      sourceImageUsed: input.sourceImageBytes !== undefined
+      sourceImageUsed: canonicalInput.sourceImageBytes !== undefined
     })
   });
 }

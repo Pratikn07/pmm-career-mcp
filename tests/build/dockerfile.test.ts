@@ -17,10 +17,27 @@ it("pins the native SVG renderer and ships brand assets in both Docker stages", 
     dependencies?: Record<string, string>;
   };
   const dockerfile = await readFile(resolve(process.cwd(), "Dockerfile"), "utf8");
+  const stages = dockerfile.split(/(?=^FROM )/gmu).filter((stage) => stage.length > 0);
+  const buildStage = stages.find((stage) => /^FROM [^\n]+ AS build$/mu.test(stage));
+  const runtimeStage = stages.find((stage) => /^FROM [^\n]+ AS runtime$/mu.test(stage));
 
   expect(packageJson.dependencies?.["@resvg/resvg-js"]).toBe("2.6.2");
-  expect(dockerfile.match(/^COPY assets \.\/assets$/gmu)).toHaveLength(2);
-  expect(dockerfile).toMatch(/node -e ["']import\(['"]@resvg\/resvg-js['"]\)["']/);
+  expect(buildStage).toBeDefined();
+  expect(runtimeStage).toBeDefined();
+  expect(buildStage?.match(/^COPY assets \.\/assets$/gmu)).toHaveLength(1);
+  expect(runtimeStage?.match(/^COPY assets \.\/assets$/gmu)).toHaveLength(1);
+
+  const prune = buildStage?.indexOf("npm prune --omit=dev") ?? -1;
+  const sharpImport = buildStage?.indexOf(`node -e "import('sharp')"`) ?? -1;
+  const resvgImport =
+    buildStage?.indexOf(`node -e "import('@resvg/resvg-js')"`) ?? -1;
+  expect(prune).toBeGreaterThan(-1);
+  expect(sharpImport).toBeGreaterThan(prune);
+  expect(resvgImport).toBeGreaterThan(prune);
+  expect(runtimeStage).toContain(
+    "COPY --from=build --chown=node:node /app/node_modules ./node_modules"
+  );
+  expect(runtimeStage).toContain("COPY assets ./assets");
 });
 
 it("copies the consent build script before building the Docker image", async () => {
