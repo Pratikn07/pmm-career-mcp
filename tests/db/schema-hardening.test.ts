@@ -151,7 +151,7 @@ describe("foreign-key indexing", () => {
     expect(missing).toEqual([]);
   });
 
-  it("uses exact-version composite foreign keys for immutable draft, preview, and publish rows", async () => {
+  it("uses exact-version composite foreign keys for immutable draft, preview, publish, and Brand Studio rows", async () => {
     const foreignKeys = await queryTestDatabase<{
       table_name: string;
       constraint_name: string;
@@ -170,6 +170,7 @@ describe("foreign-key indexing", () => {
       where constraint_row.contype = 'f'
         and constraint_row.connamespace = 'career_mcp'::regnamespace
         and constraint_row.conrelid in (
+          'career_mcp.brand_visual_briefs'::regclass,
           'career_mcp.post_draft_media'::regclass,
           'career_mcp.post_previews'::regclass,
           'career_mcp.publish_attempts'::regclass
@@ -179,6 +180,16 @@ describe("foreign-key indexing", () => {
     `);
 
     expect(foreignKeys).toEqual([
+      {
+        table_name: "career_mcp.brand_visual_briefs",
+        constraint_name: "brand_visual_briefs_post_version_fk",
+        columns: "post_draft_id,post_version"
+      },
+      {
+        table_name: "career_mcp.brand_visual_briefs",
+        constraint_name: "brand_visual_briefs_profile_version_fk",
+        columns: "brand_profile_id,brand_profile_version"
+      },
       {
         table_name: "career_mcp.post_draft_media",
         constraint_name: "post_draft_media_exact_version_fk",

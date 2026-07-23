@@ -95,7 +95,7 @@ it("persists a target with evidence provenance", async () => {
 });
 
 describe("database lifecycle", () => {
-  it("migrates exactly the sixteen application tables into the private schema", async () => {
+  it("migrates exactly the nineteen application tables into the private schema", async () => {
     const tables = await queryTestDatabase<{ table_name: string }>(db, `
       select table_name
       from information_schema.tables
@@ -105,6 +105,9 @@ describe("database lifecycle", () => {
     `);
 
     expect(tables.map((row) => row.table_name)).toEqual([
+      "brand_profiles",
+      "brand_visual_briefs",
+      "brand_visual_renders",
       "companies",
       "evidence",
       "oauth_tokens",
@@ -193,7 +196,7 @@ describe("database lifecycle", () => {
       from information_schema.columns
       where table_schema = 'career_mcp'
         and (column_name = 'id' or column_name like '%\\_id' escape '\\')
-        and column_name <> 'yc_id'
+        and column_name not in ('yc_id', 'template_id')
         and data_type <> 'uuid'
       order by table_name, column_name
     `);
@@ -220,13 +223,25 @@ describe("database lifecycle", () => {
           'post_draft_row_version_unique',
           'post_draft_media_exact_version_fk',
           'post_previews_exact_version_fk',
-          'publish_attempts_exact_version_fk'
+          'publish_attempts_exact_version_fk',
+          'brand_visual_briefs_post_version_fk',
+          'brand_visual_briefs_profile_version_fk'
         )
       group by tc.constraint_name, tc.constraint_type
       order by tc.constraint_name
     `);
 
-    expect(constraints).toEqual([
+    expect(constraints).toEqual(expect.arrayContaining([
+      {
+        constraint_name: "brand_visual_briefs_post_version_fk",
+        constraint_type: "FOREIGN KEY",
+        columns: "post_draft_id,post_version"
+      },
+      {
+        constraint_name: "brand_visual_briefs_profile_version_fk",
+        constraint_type: "FOREIGN KEY",
+        columns: "brand_profile_id,brand_profile_version"
+      },
       {
         constraint_name: "post_draft_media_exact_version_fk",
         constraint_type: "FOREIGN KEY",
@@ -252,7 +267,7 @@ describe("database lifecycle", () => {
         constraint_type: "FOREIGN KEY",
         columns: "post_draft_id,version"
       }
-    ]);
+    ]));
   });
 
   it("keeps application tables out of the public schema", async () => {

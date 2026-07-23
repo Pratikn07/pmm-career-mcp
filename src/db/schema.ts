@@ -172,6 +172,29 @@ export const shortlistEntries = careerMcp.table("shortlist_entries", {
   check("shortlist_entries_position_check", sql`${table.position} >= 0`)
 ]);
 
+export const brandProfiles = careerMcp.table("brand_profiles", {
+  id: uuid("id").primaryKey(),
+  ownerSubject: uuid("owner_subject").notNull(),
+  version: integer("version").notNull(),
+  state: text("state").notNull(),
+  publicName: text("public_name").notNull(),
+  roleLine: text("role_line").notNull(),
+  seriesName: text("series_name").notNull(),
+  monogram: text("monogram").notNull(),
+  voiceJson: jsonb("voice_json").$type<Record<string, unknown>>().notNull(),
+  paletteJson: jsonb("palette_json").$type<Record<string, string>>().notNull(),
+  hookRulesJson: jsonb("hook_rules_json").$type<Record<string, unknown>>().notNull(),
+  createdAt: timestamptz("created_at").notNull()
+}, (table) => [
+  unique("brand_profiles_row_version_unique").on(table.id, table.version),
+  unique("brand_profiles_owner_version_unique").on(table.ownerSubject, table.version),
+  uniqueIndex("brand_profiles_one_active_owner_unique")
+    .on(table.ownerSubject)
+    .where(sql`${table.state} = 'active'`),
+  check("brand_profiles_version_check", sql`${table.version} >= 1`),
+  check("brand_profiles_state_check", sql`${table.state} in ('active','retired')`)
+]);
+
 export const postMedia = careerMcp.table("post_media", {
   id: uuid("id").primaryKey(),
   ownerSubject: uuid("owner_subject").notNull(),
@@ -234,6 +257,68 @@ export const postDrafts = careerMcp.table("post_drafts", {
       'publish_unknown'
     )`
   )
+]);
+
+export const brandVisualBriefs = careerMcp.table("brand_visual_briefs", {
+  id: uuid("id").primaryKey(),
+  ownerSubject: uuid("owner_subject").notNull(),
+  postDraftId: uuid("post_draft_id").notNull(),
+  postVersion: integer("post_version").notNull(),
+  brandProfileId: uuid("brand_profile_id").notNull(),
+  brandProfileVersion: integer("brand_profile_version").notNull(),
+  templateId: text("template_id").notNull(),
+  templateVersion: integer("template_version").notNull(),
+  promptFormatVersion: integer("prompt_format_version").notNull(),
+  visualMode: text("visual_mode").notNull(),
+  coverHook: text("cover_hook").notNull(),
+  conceptSummary: text("concept_summary").notNull(),
+  topicLabel: text("topic_label"),
+  generationPrompt: text("generation_prompt").notNull(),
+  negativeConstraintsJson: jsonb("negative_constraints_json").$type<string[]>().notNull(),
+  state: text("state").notNull(),
+  createdAt: timestamptz("created_at").notNull()
+}, (table) => [
+  foreignKey({
+    name: "brand_visual_briefs_post_version_fk",
+    columns: [table.postDraftId, table.postVersion],
+    foreignColumns: [postDrafts.id, postDrafts.version]
+  }),
+  foreignKey({
+    name: "brand_visual_briefs_profile_version_fk",
+    columns: [table.brandProfileId, table.brandProfileVersion],
+    foreignColumns: [brandProfiles.id, brandProfiles.version]
+  }),
+  index("brand_visual_briefs_post_version_idx").on(table.postDraftId, table.postVersion),
+  index("brand_visual_briefs_profile_version_idx")
+    .on(table.brandProfileId, table.brandProfileVersion),
+  index("brand_visual_briefs_owner_created_idx").on(table.ownerSubject, table.createdAt),
+  check("brand_visual_briefs_mode_check",
+    sql`${table.visualMode} in ('EDITORIAL_STATEMENT','EDITORIAL_METAPHOR')`),
+  check("brand_visual_briefs_state_check", sql`${table.state} in ('ready','rendered')`)
+]);
+
+export const brandVisualRenders = careerMcp.table("brand_visual_renders", {
+  id: uuid("id").primaryKey(),
+  ownerSubject: uuid("owner_subject").notNull(),
+  briefId: uuid("brief_id").notNull().references(() => brandVisualBriefs.id),
+  version: integer("version").notNull(),
+  sourceMediaId: uuid("source_media_id").references(() => postMedia.id),
+  renderedMediaId: uuid("rendered_media_id").notNull().references(() => postMedia.id),
+  altText: text("alt_text").notNull(),
+  renderChecksum: text("render_checksum").notNull(),
+  rendererVersion: integer("renderer_version").notNull(),
+  createdAt: timestamptz("created_at").notNull()
+}, (table) => [
+  unique("brand_visual_renders_brief_version_unique").on(table.briefId, table.version),
+  index("brand_visual_renders_brief_id_idx").on(table.briefId),
+  index("brand_visual_renders_source_media_id_idx").on(table.sourceMediaId),
+  index("brand_visual_renders_rendered_media_id_idx").on(table.renderedMediaId),
+  check("brand_visual_renders_version_check", sql`${table.version} >= 1`),
+  check("brand_visual_renders_renderer_version_check", sql`${table.rendererVersion} >= 1`),
+  check("brand_visual_renders_checksum_check",
+    sql`${table.renderChecksum} ~ '^[0-9a-f]{64}$'`),
+  check("brand_visual_renders_alt_text_check",
+    sql`char_length(${table.altText}) between 1 and 120`)
 ]);
 
 export const postDraftMedia = careerMcp.table("post_draft_media", {
@@ -376,8 +461,11 @@ export const schema = {
   outreachDrafts,
   shortlists,
   shortlistEntries,
+  brandProfiles,
   postMedia,
   postDrafts,
+  brandVisualBriefs,
+  brandVisualRenders,
   postDraftMedia,
   postPreviews,
   publishAttempts,
