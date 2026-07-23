@@ -162,13 +162,39 @@ function canonicalRenderInput(
   input: RenderBrandedCoverInput
 ): RenderBrandedCoverInput {
   const textInput = canonicalTextInput(input);
-  const sourceImageBytes = input.sourceImageBytes === undefined
-    ? undefined
-    : Buffer.from(input.sourceImageBytes);
+  const sourceImageBytes = validatedSourceImageSnapshot(
+    input.sourceImageBytes,
+    textInput.template
+  );
   return Object.freeze({
     ...textInput,
     ...(sourceImageBytes === undefined ? {} : { sourceImageBytes })
   });
+}
+
+function validatedSourceImageSnapshot(
+  sourceImageBytes: Buffer | undefined,
+  template: BrandTemplate
+): Buffer | undefined {
+  if (!template.requiresSourceImage) {
+    if (sourceImageBytes !== undefined) {
+      throw validationError("sourceImageBytes", "not_allowed");
+    }
+    return undefined;
+  }
+  if (sourceImageBytes === undefined) {
+    throw validationError("sourceImageBytes", "required");
+  }
+  if (!Buffer.isBuffer(sourceImageBytes)) {
+    throw validationError("sourceImageBytes", "type");
+  }
+  if (sourceImageBytes.byteLength === 0) {
+    throw sourceImageValidationError("required");
+  }
+  if (sourceImageBytes.byteLength > MAX_SOURCE_BYTES) {
+    throw sourceImageValidationError("byte_size");
+  }
+  return Buffer.from(sourceImageBytes);
 }
 
 function normalizeInline(value: string, field: string): string {
@@ -466,12 +492,6 @@ function geometrySvg(input: RenderBrandedCoverInput): Buffer {
 }
 
 function sourceImageFormat(sourceImageBytes: Buffer): SourceImageFormat {
-  if (sourceImageBytes.byteLength === 0) {
-    throw sourceImageValidationError("required");
-  }
-  if (sourceImageBytes.byteLength > MAX_SOURCE_BYTES) {
-    throw sourceImageValidationError("byte_size");
-  }
   if (
     sourceImageBytes.byteLength >= 8
     && sourceImageBytes.subarray(0, 8).equals(
@@ -540,10 +560,10 @@ function validateSourceMetadata(
 
 async function preparedSourceImage(
   sourceImageBytes: Buffer,
+  expectedFormat: SourceImageFormat,
   imageZone: BrandRectangle,
   palette: PmmBrandProfile["palette"]
 ): Promise<Buffer> {
-  const expectedFormat = sourceImageFormat(sourceImageBytes);
   let metadata: Metadata;
   try {
     metadata = await sharp(sourceImageBytes, {
@@ -598,21 +618,13 @@ async function preparedSourceImage(
   }
 }
 
-function assertSourceImageMode(input: RenderBrandedCoverInput): void {
-  const supplied = input.sourceImageBytes !== undefined;
-  if (input.template.requiresSourceImage && !supplied) {
-    throw validationError("sourceImageBytes", "required");
-  }
-  if (!input.template.requiresSourceImage && supplied) {
-    throw validationError("sourceImageBytes", "not_allowed");
-  }
-}
-
 export async function renderBrandedCover(
   input: RenderBrandedCoverInput
 ): Promise<RenderedBrandCover> {
   const canonicalInput = canonicalRenderInput(input);
-  assertSourceImageMode(canonicalInput);
+  const sourceFormat = canonicalInput.sourceImageBytes === undefined
+    ? undefined
+    : sourceImageFormat(canonicalInput.sourceImageBytes);
   const svg = buildCanonicalCoverSvg(canonicalInput);
   const typography = new Resvg(svg, {
     fitTo: { mode: "width", value: WIDTH },
@@ -629,9 +641,13 @@ export async function renderBrandedCover(
     { input: geometrySvg(canonicalInput), left: 0, top: 0 }
   ];
 
-  if (canonicalInput.sourceImageBytes !== undefined) {
+  if (
+    canonicalInput.sourceImageBytes !== undefined
+    && sourceFormat !== undefined
+  ) {
     const source = await preparedSourceImage(
       canonicalInput.sourceImageBytes,
+      sourceFormat,
       canonicalInput.template.imageZone,
       canonicalInput.profile.palette
     );

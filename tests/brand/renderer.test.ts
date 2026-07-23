@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import sharp from "sharp";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { DomainError } from "../../src/domain/errors.js";
 import { fontPath } from "../../src/brand/assets.js";
 import {
@@ -10,7 +10,8 @@ import {
 } from "../../src/brand/profile.js";
 import {
   buildCoverSvg,
-  renderBrandedCover
+  renderBrandedCover,
+  type RenderBrandedCoverInput
 } from "../../src/brand/renderer.js";
 import {
   templateForMode,
@@ -100,6 +101,24 @@ async function expectSourceValidationReason(
     message: "Brand source image validation failed",
     details: { field: "sourceImageBytes", reason }
   }));
+}
+
+async function rejectionBeforeSourceSnapshot(
+  input: RenderBrandedCoverInput
+): Promise<unknown> {
+  const snapshotSpy = vi.spyOn(Buffer, "from").mockImplementation(() => {
+    throw new Error("source snapshot reached");
+  });
+  let rejection: unknown;
+  try {
+    await renderBrandedCover(input);
+  } catch (error) {
+    rejection = error;
+  }
+  const snapshotCalls = snapshotSpy.mock.calls.length;
+  snapshotSpy.mockRestore();
+  expect(snapshotCalls).toBe(0);
+  return rejection;
 }
 
 describe("bundled renderer assets", () => {
@@ -318,7 +337,7 @@ describe("renderBrandedCover", () => {
     });
   }, 30_000);
 
-  it("rejects source art for the statement template", async () => {
+  it("rejects statement-mode source bytes before snapshotting them", async () => {
     const sourceImageBytes = await sharp({
       create: {
         width: 2,
@@ -328,10 +347,10 @@ describe("renderBrandedCover", () => {
       }
     }).png().toBuffer();
 
-    await expect(renderBrandedCover({
+    await expect(rejectionBeforeSourceSnapshot({
       ...statementInput,
       sourceImageBytes
-    })).rejects.toEqual(expect.objectContaining<Partial<DomainError>>({
+    })).resolves.toEqual(expect.objectContaining<Partial<DomainError>>({
       code: "VALIDATION_ERROR",
       details: { field: "sourceImageBytes", reason: "not_allowed" }
     }));
@@ -353,12 +372,49 @@ describe("renderBrandedCover", () => {
     }));
   });
 
-  it("rejects encoded source bytes above 20 MiB before decoding", async () => {
-    const oversized = Buffer.allocUnsafe(MAX_SOURCE_BYTES + 1);
-    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
-      .copy(oversized);
+  it.each([
+    [
+      "a non-Buffer value",
+      "not a buffer" as unknown as Buffer,
+      "VALIDATION_ERROR",
+      "type"
+    ],
+    [
+      "an empty Buffer",
+      Buffer.alloc(0),
+      "MEDIA_VALIDATION_ERROR",
+      "required"
+    ]
+  ])("rejects %s before snapshotting it", async (
+    _case,
+    sourceImageBytes,
+    code,
+    reason
+  ) => {
+    await expect(rejectionBeforeSourceSnapshot({
+      profile: DEFAULT_PMM_BRAND_PROFILE,
+      template: templateForMode("EDITORIAL_METAPHOR"),
+      coverHook: "Clarity changes the frame.",
+      sourceImageBytes
+    })).resolves.toEqual(expect.objectContaining({
+      code,
+      details: { field: "sourceImageBytes", reason }
+    }));
+  });
 
-    await expectSourceValidationReason(oversized, "byte_size");
+  it("rejects encoded source bytes above 20 MiB before snapshotting or decoding", async () => {
+    const oversized = Buffer.allocUnsafe(MAX_SOURCE_BYTES + 1);
+
+    await expect(rejectionBeforeSourceSnapshot({
+      profile: DEFAULT_PMM_BRAND_PROFILE,
+      template: templateForMode("EDITORIAL_METAPHOR"),
+      coverHook: "Clarity changes the frame.",
+      sourceImageBytes: oversized
+    })).resolves.toEqual(expect.objectContaining({
+      code: "MEDIA_VALIDATION_ERROR",
+      message: "Brand source image validation failed",
+      details: { field: "sourceImageBytes", reason: "byte_size" }
+    }));
   });
 
   it("rejects malformed raster signatures before decoding", async () => {
