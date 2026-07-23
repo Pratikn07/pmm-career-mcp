@@ -75,3 +75,35 @@ Task 10: complete (commits `5cf5230..834b313`, first review found one Important 
 Task 11: complete (commits `834b313..33e3eaa`, first review found three Important safety issues: preview checksum binding, complete gallery-byte preflight, and credential validation before approval claim; all were fixed and final re-review approved with no remaining findings; controller verification: 121 focused publishing/database/MCP/e2e tests plus typecheck, build, and diff check passed; full implementer suite: 877 tests).
 Task 12: complete (commits `33e3eaa..92e3dd0`, independent review approved with no findings; controller verification: 5 focused end-to-end tests plus production build passed; implementer verification: 881 tests, typecheck, build, production audit with 0 vulnerabilities, Docker build, and diff check passed; both publishing switches remained false and no live service was called).
 Final whole-branch review: complete (range `acf01f3..ce610b3`). The first independent security/data and product/MCP reviews found four Important cross-task blockers plus smaller Unicode, expiry, no-auth, and transport-test gaps. Commit `ce610b3` fixed every finding: production signed launcher URLs, new-draft v2 checksums, exact whitespace rendering, versioned LinkedIn scope evidence before approval claim, Unicode alt-text boundaries, expiry revocation/guidance, complete local no-auth checks, default HTTPS pinning coverage, and a production `sharp` smoke. Both original reviewers re-reviewed the fix and returned READY with 0 Critical, 0 Important, and 0 Minor findings. Fresh controller verification: 905 tests, typecheck, production build, production audit with 0 vulnerabilities, Docker build with `sharp` import, diff check, and both publishing defaults false. No live service, deployment variable, approval, image upload, or LinkedIn post was created.
+
+---
+
+Plan: `docs/superpowers/plans/2026-07-22-pmm-brand-studio.md`
+Branch: `codex/supabase-migration`
+Workspace: `/Users/pratik.nandoskar/Documents/Codex/2026-07-16/what/pmm-career-mcp`
+Started: 2026-07-22
+
+| Task | Status | Implementation | Review | Commit |
+| --- | --- | --- | --- | --- |
+| 1. Brand Studio database schema | In progress | In progress | Pending | — |
+| 2. Brand Studio repositories | Pending | Pending | Pending | — |
+| 3. Brand profile, hook, templates, and prompt | Pending | Pending | Pending | — |
+| 4. Brand visual brief service | Pending | Pending | Pending | — |
+| 5. Fonts and deterministic renderer | Pending | Pending | Pending | — |
+| 6. Reusable private-media ingestion | Pending | Pending | Pending | — |
+| 7. Persisted branded render and atomic attachment | Pending | Pending | Pending | — |
+| 8. Brand Studio MCP tools | Pending | Pending | Pending | — |
+| 9. Request wiring and review-card provenance | Pending | Pending | Pending | — |
+| 10. Scheduled-flow safety and operator docs | Pending | Pending | Pending | — |
+| 11. Full release verification | Pending | Pending | Pending | — |
+| 12. Push, deploy, production smoke, and connector refresh | Pending | Pending | Pending | — |
+
+## PMM Brand Studio constraints
+
+- Keep the approved identity: `PMM FIELD NOTES`, `BHAGYASHREE NANDOSKAR`, `PRODUCT MARKETING`, and `BN`.
+- Covers create curiosity; they do not summarize or explain the whole LinkedIn post.
+- Scheduled/model-visible tools may research, save briefs, render images, and attach private draft media only.
+- Exact preview and publish remain app-only, checksum-bound, version-bound, and explicitly human-confirmed.
+- Never expose database passwords, service-role keys, LinkedIn credentials, bearer tokens, or approval capabilities.
+- Deploy only `codex/supabase-migration`; do not merge or deploy `main`.
+- Do not initiate a paid Railway plan or billable upgrade.
