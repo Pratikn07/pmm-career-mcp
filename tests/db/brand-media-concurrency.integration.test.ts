@@ -132,6 +132,21 @@ describe("Task 7 PostgreSQL integration safety gate", () => {
       TASK7_POSTGRES_TEST_ACK: "local-docker-only"
     }, "temporary runtime password")).toBeUndefined();
   });
+
+  it("builds parseable fixed-target password DDL without bind placeholders", () => {
+    const passwordDdl = runtimePasswordDdl("'temporary''runtime-password'");
+    expect(passwordDdl).toBe(
+      "alter role career_mcp_runtime password 'temporary''runtime-password'"
+    );
+    expect(passwordDdl).not.toMatch(/\$\d+/);
+    expect(passwordDdl).toMatch(
+      /^alter role career_mcp_runtime password '(?:[^']|'')*'$/
+    );
+    expect(runtimePasswordDdl(null))
+      .toBe("alter role career_mcp_runtime password null");
+    expect(() => runtimePasswordDdl("unquoted"))
+      .toThrow(/quoted PostgreSQL literal/i);
+  });
 });
 
 async function createClients() {
@@ -189,12 +204,35 @@ type RuntimeLogin = Readonly<{
   previousPasswordHash: string | null;
 }>;
 
-async function restoreRuntimePassword(sql: Sql, login: RuntimeLogin): Promise<void> {
-  if (!login.roleExisted || login.previousPasswordHash === null) {
-    await sql.unsafe("alter role career_mcp_runtime password null", [], { prepare: false });
+export function runtimePasswordDdl(quotedPasswordLiteral: string | null): string {
+  if (quotedPasswordLiteral === null) {
+    return "alter role career_mcp_runtime password null";
+  }
+  if (!/^'(?:[^']|'')*'$/.test(quotedPasswordLiteral)) {
+    throw new Error("Runtime password must be a quoted PostgreSQL literal");
+  }
+  return `alter role career_mcp_runtime password ${quotedPasswordLiteral}`;
+}
+
+async function setRuntimePassword(sql: Sql, passwordOrHash: string | null): Promise<void> {
+  if (passwordOrHash === null) {
+    await sql.unsafe(runtimePasswordDdl(null), [], { prepare: false });
     return;
   }
-  await sql`alter role career_mcp_runtime password ${login.previousPasswordHash}`;
+  const [row] = await sql<{ literal: string | null }[]>`
+    select pg_catalog.quote_literal(${passwordOrHash})::text as literal
+  `;
+  if (typeof row?.literal !== "string") {
+    throw new Error("PostgreSQL did not return a quoted runtime password literal");
+  }
+  await sql.unsafe(runtimePasswordDdl(row.literal), [], { prepare: false });
+}
+
+async function restoreRuntimePassword(sql: Sql, login: RuntimeLogin): Promise<void> {
+  await setRuntimePassword(
+    sql,
+    !login.roleExisted ? null : login.previousPasswordHash
+  );
 }
 
 async function createAuthenticatedRuntimeLogin(sql: Sql): Promise<RuntimeLogin> {
@@ -238,7 +276,7 @@ async function createAuthenticatedRuntimeLogin(sql: Sql): Promise<RuntimeLogin> 
   if (runtimeUrl === undefined) {
     throw new Error("Runtime login requires the acknowledged loopback PostgreSQL target");
   }
-  await sql`alter role career_mcp_runtime password ${temporaryPassword}`;
+  await setRuntimePassword(sql, temporaryPassword);
   const client = postgres(runtimeUrl, localClientOptions);
   const login: RuntimeLogin = {
     client,
@@ -496,6 +534,78 @@ liveDescribe("Task 7 real PostgreSQL concurrency", () => {
         currentUser: "career_mcp_runtime"
       });
 
+      await applyRuntimeRoleTemplate(clients.observer);
+      const functions = await clients.observer<{
+        name: string;
+        securityDefiner: boolean;
+        owner: string;
+        acl: string | null;
+        publicCanExecute: boolean;
+        runtimeCanExecute: boolean;
+        hasEmptySearchPath: boolean;
+      }[]>`
+        select
+          procedure_row.proname as name,
+          procedure_row.prosecdef as "securityDefiner",
+          pg_catalog.pg_get_userbyid(procedure_row.proowner) as owner,
+          procedure_row.proacl::text as acl,
+          coalesce((
+            select pg_catalog.bool_or(
+              privilege.grantee = 0
+              and privilege.privilege_type = 'EXECUTE'
+            )
+            from pg_catalog.aclexplode(
+              coalesce(
+                procedure_row.proacl,
+                pg_catalog.acldefault('f', procedure_row.proowner)
+              )
+            ) privilege
+          ), false) as "publicCanExecute",
+          pg_catalog.has_function_privilege(
+            'career_mcp_runtime',
+            procedure_row.oid,
+            'EXECUTE'
+          ) as "runtimeCanExecute",
+          coalesce((
+            select pg_catalog.bool_or(
+              function_setting.value in ('search_path=', 'search_path=""')
+            )
+            from pg_catalog.unnest(procedure_row.proconfig)
+              as function_setting(value)
+          ), false) as "hasEmptySearchPath"
+        from pg_catalog.pg_proc procedure_row
+        join pg_catalog.pg_namespace namespace_row
+          on namespace_row.oid = procedure_row.pronamespace
+        where namespace_row.nspname = 'career_mcp'
+          and procedure_row.proname in (
+            'claim_post_draft_owner',
+            'keep_post_draft_owner_immutable',
+            'reject_post_draft_owner_mutation',
+            'reject_runtime_role_owner_mutation',
+            'claim_brand_brief_source',
+            'keep_brand_brief_source_immutable',
+            'reject_brand_brief_source_claim_mutation'
+          )
+        order by procedure_row.proname
+      `;
+      expect(functions.map((fn) => fn.name)).toEqual([
+        "claim_brand_brief_source",
+        "claim_post_draft_owner",
+        "keep_brand_brief_source_immutable",
+        "keep_post_draft_owner_immutable",
+        "reject_brand_brief_source_claim_mutation",
+        "reject_post_draft_owner_mutation",
+        "reject_runtime_role_owner_mutation"
+      ]);
+      for (const fn of functions) {
+        expect(fn.owner).not.toBe("career_mcp_runtime");
+        expect(fn.acl).not.toBeNull();
+        expect(fn.publicCanExecute).toBe(false);
+        expect(fn.runtimeCanExecute).toBe(true);
+        expect(fn.hasEmptySearchPath).toBe(true);
+        expect(fn.securityDefiner).toBe(fn.name.startsWith("claim_"));
+      }
+
       const repositories = createRepositories(drizzle(current.client, { schema }));
       const first = await repositories.postDrafts.createVersion({
         draftId,
@@ -573,6 +683,30 @@ liveDescribe("Task 7 real PostgreSQL concurrency", () => {
         claimedPostId: second.id,
         claimedPostVersion: second.version
       });
+      const [runtimeOwnerSelection] = await current.client<{ ownerSubject: string }[]>`
+        select owner_subject as "ownerSubject"
+        from career_mcp.runtime_role_owners
+        where role_name = 'career_mcp_runtime'
+      `;
+      const [postOwnerSelection] = await current.client<{ ownerSubject: string }[]>`
+        select owner_subject as "ownerSubject"
+        from career_mcp.post_draft_owners
+        where draft_id = ${draftId}
+      `;
+      const [briefClaimSelection] = await current.client<{ ownerSubject: string }[]>`
+        select owner_subject as "ownerSubject"
+        from career_mcp.brand_brief_source_claims
+        where brief_id = ${briefId}
+      `;
+      expect([
+        runtimeOwnerSelection?.ownerSubject,
+        postOwnerSelection?.ownerSubject,
+        briefClaimSelection?.ownerSubject
+      ]).toEqual([
+        current.ownerSubject,
+        current.ownerSubject,
+        current.ownerSubject
+      ]);
 
       const forgedPostError = await current.client`
         insert into career_mcp.post_drafts (
@@ -599,7 +733,7 @@ liveDescribe("Task 7 real PostgreSQL concurrency", () => {
           negative_constraints_json, state, created_at
         ) values (
           ${forgedBriefId}, ${otherOwner}, ${second.id}, ${second.version},
-          ${profileId}, 1, 'editorial-statement-v1', 1, 1,
+          ${profileId}, ${profileVersion}, 'editorial-statement-v1', 1, 1,
           'EDITORIAL_STATEMENT', 'Cross-owner brief', 'Must fail', null,
           'A test-only visual', '[]'::jsonb, 'ready', now()
         )
@@ -611,42 +745,73 @@ liveDescribe("Task 7 real PostgreSQL concurrency", () => {
       expect(postgresField(forgedBriefError, "constraint_name"))
         .toBe("brand_brief_source_owner_mismatch");
 
-      for (const operation of [
-        () => current.client`
-          insert into career_mcp.post_draft_owners (
-            draft_id, owner_subject, created_at
-          ) values (${forgedDraftId}, ${otherOwner}, now())
-        `,
-        () => current.client`
-          update career_mcp.post_draft_owners
-          set owner_subject = ${otherOwner}
-          where draft_id = ${draftId}
-        `,
-        () => current.client`
-          delete from career_mcp.post_draft_owners
-          where draft_id = ${draftId}
-        `,
-        () => current.client`truncate table career_mcp.post_draft_owners`,
-        () => current.client`
+      const protectedLedgerOperations: ReadonlyArray<
+        readonly [string, () => PromiseLike<unknown>]
+      > = [
+        ["runtime_role_owners INSERT", () => current.client`
           insert into career_mcp.runtime_role_owners (
             role_name, owner_subject, created_at
           ) values ('forged_runtime', ${otherOwner}, now())
-        `,
-        () => current.client`
+        `],
+        ["runtime_role_owners UPDATE", () => current.client`
           update career_mcp.runtime_role_owners
           set owner_subject = ${otherOwner}
           where role_name = 'career_mcp_runtime'
-        `,
-        () => current.client`
+        `],
+        ["runtime_role_owners DELETE", () => current.client`
+          delete from career_mcp.runtime_role_owners
+          where role_name = 'career_mcp_runtime'
+        `],
+        [
+          "runtime_role_owners TRUNCATE",
+          () => current.client`truncate table career_mcp.runtime_role_owners`
+        ],
+        ["post_draft_owners INSERT", () => current.client`
+          insert into career_mcp.post_draft_owners (
+            draft_id, owner_subject, created_at
+          ) values (${forgedDraftId}, ${otherOwner}, now())
+        `],
+        ["post_draft_owners UPDATE", () => current.client`
+          update career_mcp.post_draft_owners
+          set owner_subject = ${otherOwner}
+          where draft_id = ${draftId}
+        `],
+        ["post_draft_owners DELETE", () => current.client`
+          delete from career_mcp.post_draft_owners
+          where draft_id = ${draftId}
+        `],
+        [
+          "post_draft_owners TRUNCATE",
+          () => current.client`truncate table career_mcp.post_draft_owners`
+        ],
+        ["brand_brief_source_claims INSERT", () => current.client`
+          insert into career_mcp.brand_brief_source_claims (
+            brief_id, owner_subject, post_draft_id, post_version, created_at
+          ) values (
+            ${forgedBriefId}, ${current.ownerSubject}, ${second.id},
+            ${second.version}, now()
+          )
+        `],
+        ["brand_brief_source_claims UPDATE", () => current.client`
+          update career_mcp.brand_brief_source_claims
+          set owner_subject = ${otherOwner}
+          where brief_id = ${briefId}
+        `],
+        ["brand_brief_source_claims DELETE", () => current.client`
           delete from career_mcp.brand_brief_source_claims
           where brief_id = ${briefId}
-        `
-      ]) {
+        `],
+        [
+          "brand_brief_source_claims TRUNCATE",
+          () => current.client`truncate table career_mcp.brand_brief_source_claims`
+        ]
+      ];
+      for (const [label, operation] of protectedLedgerOperations) {
         const error = await operation().then(
           () => undefined,
           (operationError: unknown) => operationError
         );
-        expect(postgresField(error, "code")).toBe("42501");
+        expect(postgresField(error, "code"), label).toBe("42501");
       }
     } finally {
       try {
