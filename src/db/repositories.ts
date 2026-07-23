@@ -76,6 +76,28 @@ export type BrandVisualBriefWithDefaultProfileInput = {
   >;
 };
 
+export type BrandVisualRenderCommitInput = Readonly<{
+  ownerSubject: string;
+  briefId: string;
+  expectedDraftId: string;
+  expectedVersion: number;
+  sourceMediaId?: string;
+  renderedMediaId: string;
+  altText: string;
+  renderChecksum: string;
+  rendererVersion: number;
+  checksum: (
+    nextVersion: number,
+    logicalDraftId: string,
+    media: readonly {
+      position: number;
+      sha256: string;
+      mimeType: string;
+      altText: string;
+    }[]
+  ) => string;
+}>;
+
 export type CompanyUpsertInput = {
   ycId: string;
   name: string;
@@ -282,14 +304,21 @@ function postgresErrorField(error: unknown, field: "code" | "constraint_name"): 
   return undefined;
 }
 
-function isRetryableTransactionError(error: unknown, uniqueConstraint?: string): boolean {
+function isRetryableTransactionError(
+  error: unknown,
+  uniqueConstraints?: string | readonly string[]
+): boolean {
   const code = postgresErrorField(error, "code");
   if (code === "40001" || code === "40P01") {
     return true;
   }
+  const allowedConstraints = uniqueConstraints === undefined
+    ? []
+    : typeof uniqueConstraints === "string"
+      ? [uniqueConstraints]
+      : uniqueConstraints;
   return code === "23505"
-    && uniqueConstraint !== undefined
-    && postgresErrorField(error, "constraint_name") === uniqueConstraint;
+    && allowedConstraints.includes(postgresErrorField(error, "constraint_name") ?? "");
 }
 
 async function delay(milliseconds: number): Promise<void> {
@@ -299,7 +328,7 @@ async function delay(milliseconds: number): Promise<void> {
 async function serializableTransaction<T>(
   database: Database,
   operation: (transaction: Database) => Promise<T>,
-  uniqueConstraint?: string
+  uniqueConstraints?: string | readonly string[]
 ): Promise<T> {
   for (let attempt = 0; ; attempt += 1) {
     try {
@@ -309,7 +338,7 @@ async function serializableTransaction<T>(
       });
     } catch (error) {
       const retryDelay = SERIALIZABLE_RETRY_DELAYS_MS[attempt];
-      if (retryDelay === undefined || !isRetryableTransactionError(error, uniqueConstraint)) {
+      if (retryDelay === undefined || !isRetryableTransactionError(error, uniqueConstraints)) {
         throw error;
       }
       await delay(retryDelay);
@@ -1609,6 +1638,343 @@ export function createRepositories(database: Database) {
       }
     },
     brandVisualRenders: {
+      async commitAndAttach(
+        input: BrandVisualRenderCommitInput
+      ): Promise<{ post: PostDraft; render: BrandVisualRender }> {
+        const validationError = (field: string, reason: string) => (
+          new DomainError("VALIDATION_ERROR", "Brand render input is invalid", {
+            field,
+            reason
+          })
+        );
+        const briefNotFound = () => (
+          new DomainError("NOT_FOUND", "Brand visual brief was not found", {
+            entity: "brand_visual_brief"
+          })
+        );
+        const postNotFound = () => (
+          new DomainError("NOT_FOUND", "Brand visual brief source was not found", {
+            entity: "post_draft"
+          })
+        );
+        const mediaNotFound = () => (
+          new DomainError("NOT_FOUND", "Brand render media was not found", {
+            entity: "post_media"
+          })
+        );
+        const integrityError = () => (
+          new DomainError("DATA_INTEGRITY", "Brand render data is invalid", {
+            entity: "brand_visual_render"
+          })
+        );
+        const conflictError = () => (
+          new DomainError("CONFLICT", "Brand visual brief is not ready", {
+            entity: "brand_visual_brief"
+          })
+        );
+
+        if (!isUuid(input.ownerSubject)) {
+          throw validationError("ownerSubject", "must_be_uuid");
+        }
+        if (!isUuid(input.briefId)) {
+          throw validationError("briefId", "must_be_uuid");
+        }
+        if (!isUuid(input.expectedDraftId)) {
+          throw validationError("expectedDraftId", "must_be_uuid");
+        }
+        if (!Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 1) {
+          throw validationError("expectedVersion", "must_be_positive_integer");
+        }
+        if (!isUuid(input.renderedMediaId)) {
+          throw validationError("renderedMediaId", "must_be_uuid");
+        }
+        if (input.sourceMediaId !== undefined && !isUuid(input.sourceMediaId)) {
+          throw validationError("sourceMediaId", "must_be_uuid");
+        }
+        if (
+          input.sourceMediaId !== undefined
+          && input.sourceMediaId.toLowerCase() === input.renderedMediaId.toLowerCase()
+        ) {
+          throw integrityError();
+        }
+        if (
+          typeof input.altText !== "string"
+          || [...input.altText].length < 1
+          || [...input.altText].length > 120
+          || input.altText.trim().length < 1
+          || /[\r\n\u2028\u2029]/u.test(input.altText)
+        ) {
+          throw validationError("altText", "invalid");
+        }
+        if (!SHA256_PATTERN.test(input.renderChecksum)) {
+          throw validationError("renderChecksum", "must_be_sha256");
+        }
+        if (!Number.isSafeInteger(input.rendererVersion) || input.rendererVersion < 1) {
+          throw validationError("rendererVersion", "must_be_positive_integer");
+        }
+        if (typeof input.checksum !== "function") {
+          throw validationError("checksum", "must_be_function");
+        }
+
+        const ownerSubject = input.ownerSubject.toLowerCase();
+        const briefId = input.briefId.toLowerCase();
+        const expectedDraftId = input.expectedDraftId.toLowerCase();
+        const renderedMediaId = input.renderedMediaId.toLowerCase();
+        const sourceMediaId = input.sourceMediaId?.toLowerCase();
+        return serializableTransaction(database, async (transaction) => {
+          const [initialBriefRow] = await transaction.select().from(
+            brandVisualBriefs
+          ).where(and(
+            eq(brandVisualBriefs.id, briefId),
+            eq(brandVisualBriefs.ownerSubject, ownerSubject)
+          )).limit(1);
+          if (initialBriefRow === undefined) {
+            throw briefNotFound();
+          }
+          const initialBrief = normalizeRowTimestamps(initialBriefRow);
+
+          const [reference] = await transaction.select().from(postDrafts).where(and(
+            eq(postDrafts.id, initialBrief.postDraftId),
+            eq(postDrafts.version, initialBrief.postVersion)
+          )).limit(1);
+          if (
+            reference === undefined
+            || reference.draftId.toLowerCase() !== expectedDraftId
+          ) {
+            throw postNotFound();
+          }
+
+          const [latestRow] = await transaction.select().from(postDrafts).where(
+            eq(postDrafts.draftId, reference.draftId)
+          ).orderBy(desc(postDrafts.version)).limit(1).for("update");
+          if (latestRow === undefined) {
+            throw postNotFound();
+          }
+          const latest = normalizeRowTimestamps(latestRow);
+
+          const [exactRow] = await transaction.select().from(postDrafts).where(and(
+            eq(postDrafts.id, initialBrief.postDraftId),
+            eq(postDrafts.version, initialBrief.postVersion)
+          )).limit(1).for("update");
+          if (exactRow === undefined) {
+            throw postNotFound();
+          }
+          const exact = normalizeRowTimestamps(exactRow);
+
+          const exactDraftMedia = await transaction.select().from(
+            postDraftMedia
+          ).where(and(
+            eq(postDraftMedia.postDraftId, exact.id),
+            eq(postDraftMedia.version, exact.version)
+          )).orderBy(asc(postDraftMedia.position)).for("update");
+          const latestDraftMedia = latest.id === exact.id
+            ? exactDraftMedia
+            : await transaction.select().from(postDraftMedia).where(and(
+                eq(postDraftMedia.postDraftId, latest.id),
+                eq(postDraftMedia.version, latest.version)
+              )).orderBy(asc(postDraftMedia.position)).for("update");
+          if (exactDraftMedia.length === 0 || latestDraftMedia.length === 0) {
+            throw postNotFound();
+          }
+          if (sourceMediaId !== undefined) {
+            const sourceAttachments = await transaction.select({
+              mediaId: postDraftMedia.mediaId
+            }).from(postDraftMedia).where(
+              eq(postDraftMedia.mediaId, sourceMediaId)
+            ).orderBy(
+              asc(postDraftMedia.postDraftId),
+              asc(postDraftMedia.version),
+              asc(postDraftMedia.position)
+            );
+            if (sourceAttachments.length > 0) {
+              throw integrityError();
+            }
+          }
+
+          const sortedMediaIds = [...new Set([
+            ...exactDraftMedia.map(({ mediaId }) => mediaId.toLowerCase()),
+            ...latestDraftMedia.map(({ mediaId }) => mediaId.toLowerCase()),
+            ...(sourceMediaId === undefined ? [] : [sourceMediaId]),
+            renderedMediaId
+          ])].sort();
+          const lockedMedia = await transaction.select().from(postMedia).where(
+            inArray(postMedia.id, sortedMediaIds)
+          ).orderBy(asc(postMedia.id)).for("update");
+          if (lockedMedia.length !== sortedMediaIds.length) {
+            throw mediaNotFound();
+          }
+          const mediaById = new Map(lockedMedia.map((media) => [
+            media.id.toLowerCase(),
+            normalizeRowTimestamps(media)
+          ]));
+          const isOwnedMedia = (media: PostMedia | undefined): media is PostMedia => (
+            media !== undefined
+            && media.ownerSubject.toLowerCase() === ownerSubject
+            && media.objectPath.startsWith(`${ownerSubject}/`)
+            && SHA256_PATTERN.test(media.sha256)
+          );
+          if (
+            exactDraftMedia.some(({ mediaId }) => (
+              !isOwnedMedia(mediaById.get(mediaId.toLowerCase()))
+            ))
+            || latestDraftMedia.some(({ mediaId }) => (
+              !isOwnedMedia(mediaById.get(mediaId.toLowerCase()))
+            ))
+          ) {
+            throw postNotFound();
+          }
+
+          const renderedMedia = mediaById.get(renderedMediaId);
+          const sourceMedia = sourceMediaId === undefined
+            ? undefined
+            : mediaById.get(sourceMediaId);
+          if (!isOwnedMedia(renderedMedia)) {
+            throw mediaNotFound();
+          }
+          if (sourceMediaId !== undefined && !isOwnedMedia(sourceMedia)) {
+            throw mediaNotFound();
+          }
+
+          const [profile] = await transaction.select().from(brandProfiles).where(and(
+            eq(brandProfiles.id, initialBrief.brandProfileId),
+            eq(brandProfiles.version, initialBrief.brandProfileVersion),
+            eq(brandProfiles.ownerSubject, ownerSubject)
+          )).limit(1).for("update");
+          if (profile === undefined) {
+            throw briefNotFound();
+          }
+
+          const [lockedBriefRow] = await transaction.select().from(
+            brandVisualBriefs
+          ).where(and(
+            eq(brandVisualBriefs.id, briefId),
+            eq(brandVisualBriefs.ownerSubject, ownerSubject)
+          )).limit(1).for("update");
+          if (lockedBriefRow === undefined) {
+            throw briefNotFound();
+          }
+          const brief = normalizeRowTimestamps(lockedBriefRow);
+          if (
+            brief.postDraftId !== initialBrief.postDraftId
+            || brief.postVersion !== initialBrief.postVersion
+            || brief.brandProfileId !== initialBrief.brandProfileId
+            || brief.brandProfileVersion !== initialBrief.brandProfileVersion
+            || brief.templateId !== initialBrief.templateId
+            || brief.templateVersion !== initialBrief.templateVersion
+            || brief.visualMode !== initialBrief.visualMode
+          ) {
+            throw integrityError();
+          }
+          if (brief.state !== "ready") {
+            throw conflictError();
+          }
+          if (
+            latest.id !== exact.id
+            || latest.version !== exact.version
+            || exact.version !== input.expectedVersion
+            || brief.postVersion !== input.expectedVersion
+          ) {
+            throw new DomainError("CONFLICT", "Post draft version is stale", {
+              entity: "post_draft",
+              expectedVersion: input.expectedVersion,
+              actualVersion: latest.version
+            });
+          }
+          if (
+            (brief.visualMode === "EDITORIAL_STATEMENT" && sourceMediaId !== undefined)
+            || (brief.visualMode === "EDITORIAL_METAPHOR" && sourceMediaId === undefined)
+            || (
+              brief.visualMode !== "EDITORIAL_STATEMENT"
+              && brief.visualMode !== "EDITORIAL_METAPHOR"
+            )
+          ) {
+            throw integrityError();
+          }
+          if (
+            renderedMedia.mimeType !== "image/png"
+            || renderedMedia.width !== 1080
+            || renderedMedia.height !== 1350
+            || renderedMedia.frameCount !== 1
+            || !timingSafeTextEqual(input.renderChecksum, renderedMedia.sha256)
+          ) {
+            throw integrityError();
+          }
+
+          const existingRenders = await transaction.select({
+            id: brandVisualRenders.id
+          }).from(brandVisualRenders).where(
+            eq(brandVisualRenders.briefId, brief.id)
+          ).orderBy(desc(brandVisualRenders.version), desc(brandVisualRenders.id))
+            .for("update");
+          if (existingRenders.length > 0) {
+            throw conflictError();
+          }
+
+          const nextVersion = latest.version + 1;
+          const checksumMedia = Object.freeze([Object.freeze({
+            position: 0,
+            sha256: renderedMedia.sha256,
+            mimeType: renderedMedia.mimeType,
+            altText: input.altText
+          })]);
+          const postChecksum = input.checksum(
+            nextVersion,
+            latest.draftId,
+            checksumMedia
+          );
+          if (!SHA256_PATTERN.test(postChecksum)) {
+            throw integrityError();
+          }
+          const now = nowIso();
+          const [postRow] = await transaction.insert(postDrafts).values({
+            id: randomUUID(),
+            draftId: latest.draftId,
+            text: exact.text,
+            visibility: exact.visibility,
+            version: nextVersion,
+            checksum: postChecksum,
+            state: "draft",
+            createdAt: now,
+            updatedAt: now
+          }).returning();
+          const post = requiredRow(postRow, "post draft");
+          await transaction.insert(postDraftMedia).values({
+            postDraftId: post.id,
+            version: post.version,
+            position: 0,
+            mediaId: renderedMedia.id,
+            altText: input.altText
+          });
+          const [renderRow] = await transaction.insert(brandVisualRenders).values({
+            id: randomUUID(),
+            ownerSubject,
+            briefId: brief.id,
+            version: 1,
+            ...(sourceMediaId === undefined ? {} : { sourceMediaId }),
+            renderedMediaId: renderedMedia.id,
+            altText: input.altText,
+            renderChecksum: input.renderChecksum,
+            rendererVersion: input.rendererVersion,
+            createdAt: now
+          }).returning();
+          const render = requiredRow(renderRow, "brand visual render");
+          const [updatedBrief] = await transaction.update(brandVisualBriefs).set({
+            state: "rendered"
+          }).where(and(
+            eq(brandVisualBriefs.id, brief.id),
+            eq(brandVisualBriefs.ownerSubject, ownerSubject),
+            eq(brandVisualBriefs.state, "ready")
+          )).returning({ id: brandVisualBriefs.id });
+          if (updatedBrief === undefined) {
+            throw conflictError();
+          }
+          return { post, render };
+        }, [
+          "post_draft_version_unique",
+          "brand_visual_renders_brief_version_unique"
+        ]);
+      },
+
       async getByRenderedMedia(
         ownerSubject: string,
         mediaId: string

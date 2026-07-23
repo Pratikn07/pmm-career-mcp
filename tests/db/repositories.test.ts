@@ -62,6 +62,8 @@ async function addMedia(input: {
   ownerSubject: string;
   sha256?: string;
   originalFilename?: string;
+  width?: number;
+  height?: number;
 }) {
   const id = randomUUID();
   const sha256 = input.sha256 ?? randomUUID().replaceAll("-", "").padEnd(64, "0");
@@ -72,8 +74,8 @@ async function addMedia(input: {
     sha256,
     mimeType: "image/png",
     byteSize: 1024,
-    width: 1200,
-    height: 627,
+    width: input.width ?? 1200,
+    height: input.height ?? 627,
     frameCount: 1,
     ...(input.originalFilename === undefined
       ? {}
@@ -493,6 +495,53 @@ describe("PostgreSQL transaction retries", () => {
     ).rejects.toBe(unrelatedConflict);
     expect(notRetrying.transaction).toHaveBeenCalledTimes(1);
   });
+
+  it.each([
+    "post_draft_version_unique",
+    "brand_visual_renders_brief_version_unique"
+  ])("branded render retries only the named %s race", async (constraintName) => {
+    const error = Object.assign(new Error("branded render race"), {
+      code: "23505",
+      constraint_name: constraintName
+    });
+    const { repositories, transaction } = databaseThatRejectsTransactions(error);
+
+    await expect(repositories.brandVisualRenders.commitAndAttach({
+      ownerSubject: randomUUID(),
+      briefId: randomUUID(),
+      expectedDraftId: randomUUID(),
+      expectedVersion: 1,
+      renderedMediaId: randomUUID(),
+      altText: "Editorial cover",
+      renderChecksum: "a".repeat(64),
+      rendererVersion: 1,
+      checksum: () => "b".repeat(64)
+    })).rejects.toBe(error);
+
+    expect(transaction).toHaveBeenCalledTimes(3);
+  });
+
+  it("branded render does not retry an unrelated unique violation", async () => {
+    const error = Object.assign(new Error("unrelated branded render race"), {
+      code: "23505",
+      constraint_name: "post_media_owner_sha_unique"
+    });
+    const { repositories, transaction } = databaseThatRejectsTransactions(error);
+
+    await expect(repositories.brandVisualRenders.commitAndAttach({
+      ownerSubject: randomUUID(),
+      briefId: randomUUID(),
+      expectedDraftId: randomUUID(),
+      expectedVersion: 1,
+      renderedMediaId: randomUUID(),
+      altText: "Editorial cover",
+      renderChecksum: "a".repeat(64),
+      rendererVersion: 1,
+      checksum: () => "b".repeat(64)
+    })).rejects.toBe(error);
+
+    expect(transaction).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("Brand Studio repositories", () => {
@@ -550,6 +599,64 @@ describe("Brand Studio repositories", () => {
       generationPrompt: "A text-free editorial illustration",
       negativeConstraintsJson: ["no text"],
       state: "ready",
+      ...overrides
+    };
+  }
+
+  async function readyBrandedRender(
+    ownerSubject: string,
+    options: {
+      visualMode?: "EDITORIAL_STATEMENT" | "EDITORIAL_METAPHOR";
+    } = {}
+  ) {
+    const post = await addOwnedPost(ownerSubject);
+    const visualMode = options.visualMode ?? "EDITORIAL_STATEMENT";
+    const { profile, brief } = await db.brandVisualBriefs.createWithDefaultProfile({
+      profile: canonicalProfile(ownerSubject),
+      brief: atomicBrief(ownerSubject, post, {
+        visualMode,
+        templateId: visualMode === "EDITORIAL_STATEMENT"
+          ? "editorial-statement-v1"
+          : "editorial-metaphor-v1"
+      })
+    });
+    return { post, profile, brief };
+  }
+
+  function brandedRenderInput(
+    ownerSubject: string,
+    source: Awaited<ReturnType<typeof readyBrandedRender>>,
+    renderedMediaId: string,
+    overrides: Record<string, unknown> = {}
+  ) {
+    return {
+      ownerSubject,
+      briefId: source.brief.id,
+      expectedDraftId: source.post.draftId,
+      expectedVersion: source.post.version,
+      renderedMediaId,
+      altText: "PMM Field Notes cover reading “Clarity beats capability.”",
+      renderChecksum: "a".repeat(64),
+      rendererVersion: 1,
+      checksum: (
+        nextVersion: number,
+        logicalDraftId: string,
+        media: readonly {
+          position: number;
+          sha256: string;
+          mimeType: string;
+          altText: string;
+        }[]
+      ) => checksumLinkedInPost({
+        draftId: logicalDraftId,
+        version: nextVersion,
+        text: source.post.text,
+        visibility: source.post.visibility as "PUBLIC" | "CONNECTIONS",
+        media: media.map((item) => ({
+          ...item,
+          mimeType: item.mimeType as "image/jpeg" | "image/png" | "image/gif"
+        }))
+      }),
       ...overrides
     };
   }
@@ -1074,6 +1181,340 @@ describe("Brand Studio repositories", () => {
     `);
 
     expect(await db.brandVisualRenders.getByRenderedMedia(owner, foreignMedia.id)).toBeUndefined();
+  });
+
+  it("branded render atomically creates one immutable final-cover version without preview or publish rows", async () => {
+    const owner = randomUUID();
+    const source = await readyBrandedRender(owner, {
+      visualMode: "EDITORIAL_METAPHOR"
+    });
+    const sourceMedia = await addMedia({
+      ownerSubject: owner,
+      sha256: "b".repeat(64)
+    });
+    const finalMedia = await addMedia({
+      ownerSubject: owner,
+      sha256: "a".repeat(64),
+      originalFilename: "brand-cover.png",
+      width: 1080,
+      height: 1350
+    });
+    queryLog.length = 0;
+
+    const result = await db.brandVisualRenders.commitAndAttach(
+      brandedRenderInput(owner, source, finalMedia.id, {
+        sourceMediaId: sourceMedia.id
+      })
+    );
+
+    expect(result.post).toMatchObject({
+      draftId: source.post.draftId,
+      text: source.post.text,
+      visibility: source.post.visibility,
+      version: source.post.version + 1,
+      state: "draft"
+    });
+    expect(await db.postDrafts.listVersions(source.post.draftId)).toHaveLength(2);
+    expect(await db.postDraftMedia.listForVersion(result.post.id, result.post.version))
+      .toEqual([expect.objectContaining({
+        position: 0,
+        mediaId: finalMedia.id,
+        altText: "PMM Field Notes cover reading “Clarity beats capability.”",
+        sha256: finalMedia.sha256,
+        mimeType: "image/png"
+      })]);
+    const sourceAttachments = await queryTestDatabase<{ count: number }>(db, `
+      select count(*)::int as count
+      from career_mcp.post_draft_media
+      where media_id = '${sourceMedia.id}'
+    `);
+    expect(sourceAttachments).toEqual([{ count: 0 }]);
+    expect(result.render).toMatchObject({
+      ownerSubject: owner,
+      briefId: source.brief.id,
+      version: 1,
+      sourceMediaId: sourceMedia.id,
+      renderedMediaId: finalMedia.id,
+      altText: "PMM Field Notes cover reading “Clarity beats capability.”",
+      renderChecksum: finalMedia.sha256,
+      rendererVersion: 1
+    });
+    expect(await db.brandVisualBriefs.getOwned(source.brief.id, owner))
+      .toMatchObject({ state: "rendered" });
+    expect(await queryTestDatabase<{ count: number }>(db, `
+      select count(*)::int as count from career_mcp.post_previews
+    `)).toEqual([{ count: 0 }]);
+    expect(await queryTestDatabase<{ count: number }>(db, `
+      select count(*)::int as count from career_mcp.publish_attempts
+    `)).toEqual([{ count: 0 }]);
+
+    const lockQueries = queryLog.filter(({ query }) => /for update/i.test(query));
+    const lockIndex = (table: string, extra = "") => lockQueries.findIndex(({ query }) => (
+      query.includes(`from "career_mcp"."${table}"`) && query.includes(extra)
+    ));
+    const latestPostLock = lockIndex(
+      "post_drafts",
+      'order by "career_mcp"."post_drafts"."version" desc'
+    );
+    const exactPostLock = lockQueries.findIndex(({ query }, index) => (
+      index > latestPostLock
+      && query.includes('from "career_mcp"."post_drafts"')
+      && !query.includes('order by "career_mcp"."post_drafts"."version" desc')
+    ));
+    const draftMediaLock = lockIndex("post_draft_media");
+    const mediaLock = lockIndex(
+      "post_media",
+      'order by "career_mcp"."post_media"."id" asc'
+    );
+    const profileLock = lockIndex("brand_profiles");
+    const briefLock = lockIndex("brand_visual_briefs");
+    expect(latestPostLock).toBeGreaterThanOrEqual(0);
+    expect(exactPostLock).toBeGreaterThan(latestPostLock);
+    expect(draftMediaLock).toBeGreaterThan(exactPostLock);
+    expect(mediaLock).toBeGreaterThan(draftMediaLock);
+    expect(profileLock).toBeGreaterThan(mediaLock);
+    expect(briefLock).toBeGreaterThan(profileLock);
+    const lockedMediaIds = lockQueries[mediaLock]?.params as string[];
+    expect(lockedMediaIds).toEqual([...lockedMediaIds].sort());
+    expect(lockedMediaIds).toEqual(
+      expect.arrayContaining([
+        sourceMedia.id.toLowerCase(),
+        finalMedia.id.toLowerCase()
+      ])
+    );
+  });
+
+  it("branded render returns the same non-leaking NOT_FOUND for absent and foreign briefs", async () => {
+    const owner = randomUUID();
+    const otherOwner = randomUUID();
+    const foreign = await readyBrandedRender(otherOwner);
+    const finalMedia = await addMedia({
+      ownerSubject: owner,
+      sha256: "a".repeat(64),
+      width: 1080,
+      height: 1350
+    });
+    const rejection = async (briefId: string) => {
+      const error = await db.brandVisualRenders.commitAndAttach(
+        brandedRenderInput(owner, foreign, finalMedia.id, { briefId })
+      ).then(
+        () => undefined,
+        (reason: unknown) => reason
+      );
+      expect(error).toBeInstanceOf(DomainError);
+      return error as DomainError;
+    };
+
+    const foreignError = await rejection(foreign.brief.id);
+    const absentError = await rejection(randomUUID());
+
+    expect({
+      code: foreignError.code,
+      message: foreignError.message,
+      details: foreignError.details
+    }).toEqual({
+      code: absentError.code,
+      message: absentError.message,
+      details: absentError.details
+    });
+    expect(foreignError).toMatchObject({
+      code: "NOT_FOUND",
+      message: "Brand visual brief was not found",
+      details: { entity: "brand_visual_brief" }
+    });
+    expect(await db.postDrafts.listVersions(foreign.post.draftId)).toHaveLength(1);
+  });
+
+  it("branded render rejects a stale exact post before any mutation", async () => {
+    const owner = randomUUID();
+    const source = await readyBrandedRender(owner);
+    const sourceMedia = await db.postDraftMedia.listForVersion(
+      source.post.id,
+      source.post.version
+    );
+    const latest = (await db.postDrafts.createVersionWithMedia({
+      draftId: source.post.draftId,
+      expectedVersion: source.post.version,
+      ownerSubject: owner,
+      text: "A newer immutable version",
+      visibility: "PUBLIC",
+      state: "draft",
+      media: sourceMedia.map(({ mediaId, altText }) => ({ mediaId, altText })),
+      checksum: "newer-version"
+    })).post;
+    const finalMedia = await addMedia({
+      ownerSubject: owner,
+      sha256: "a".repeat(64),
+      width: 1080,
+      height: 1350
+    });
+
+    await expect(db.brandVisualRenders.commitAndAttach(
+      brandedRenderInput(owner, source, finalMedia.id)
+    )).rejects.toMatchObject({
+      code: "CONFLICT",
+      message: "Post draft version is stale",
+      details: {
+        entity: "post_draft",
+        expectedVersion: source.post.version,
+        actualVersion: latest.version
+      }
+    });
+
+    expect(await db.postDrafts.listVersions(source.post.draftId)).toHaveLength(2);
+    expect(await db.brandVisualBriefs.getOwned(source.brief.id, owner))
+      .toMatchObject({ state: "ready" });
+    expect(await queryTestDatabase<{ count: number }>(db, `
+      select count(*)::int as count from career_mcp.brand_visual_renders
+    `)).toEqual([{ count: 0 }]);
+  });
+
+  it.each([
+    ["foreign final media", "final", "NOT_FOUND"],
+    ["foreign source media", "source", "NOT_FOUND"],
+    ["render checksum mismatch", "checksum", "DATA_INTEGRITY"],
+    ["source reused as final", "same", "DATA_INTEGRITY"]
+  ] as const)(
+    "branded render rejects %s without changing the brief or post history",
+    async (_label, mutation, code) => {
+      const owner = randomUUID();
+      const source = await readyBrandedRender(owner, {
+        visualMode: "EDITORIAL_METAPHOR"
+      });
+      const sourceMedia = await addMedia({
+        ownerSubject: mutation === "source" ? randomUUID() : owner,
+        sha256: "b".repeat(64)
+      });
+      const finalMedia = mutation === "same"
+        ? sourceMedia
+        : await addMedia({
+            ownerSubject: mutation === "final" ? randomUUID() : owner,
+            sha256: "a".repeat(64),
+            width: 1080,
+            height: 1350
+          });
+      const input = brandedRenderInput(owner, source, finalMedia.id, {
+        sourceMediaId: mutation === "same" ? finalMedia.id : sourceMedia.id,
+        ...(mutation === "checksum" ? { renderChecksum: "c".repeat(64) } : {})
+      });
+
+      await expect(db.brandVisualRenders.commitAndAttach(input))
+        .rejects.toMatchObject({ code });
+
+      expect(await db.postDrafts.listVersions(source.post.draftId)).toHaveLength(1);
+      expect(await db.brandVisualBriefs.getOwned(source.brief.id, owner))
+        .toMatchObject({ state: "ready" });
+      expect(await queryTestDatabase<{ count: number }>(db, `
+        select count(*)::int as count from career_mcp.brand_visual_renders
+      `)).toEqual([{ count: 0 }]);
+    }
+  );
+
+  it("branded render rejects a source-art row that is already attached to a post", async () => {
+    const owner = randomUUID();
+    const source = await readyBrandedRender(owner, {
+      visualMode: "EDITORIAL_METAPHOR"
+    });
+    const [alreadyAttached] = await db.postDraftMedia.listForVersion(
+      source.post.id,
+      source.post.version
+    );
+    const finalMedia = await addMedia({
+      ownerSubject: owner,
+      sha256: "a".repeat(64),
+      width: 1080,
+      height: 1350
+    });
+
+    await expect(db.brandVisualRenders.commitAndAttach(
+      brandedRenderInput(owner, source, finalMedia.id, {
+        sourceMediaId: alreadyAttached?.mediaId
+      })
+    )).rejects.toMatchObject({ code: "DATA_INTEGRITY" });
+
+    expect(await db.postDrafts.listVersions(source.post.draftId)).toHaveLength(1);
+    expect(await db.brandVisualBriefs.getOwned(source.brief.id, owner))
+      .toMatchObject({ state: "ready" });
+  });
+
+  it("branded render allows only one concurrent ready-to-render commit", async () => {
+    const owner = randomUUID();
+    const source = await readyBrandedRender(owner);
+    const firstFinal = await addMedia({
+      ownerSubject: owner,
+      sha256: "a".repeat(64),
+      width: 1080,
+      height: 1350
+    });
+    const secondFinal = await addMedia({
+      ownerSubject: owner,
+      sha256: "b".repeat(64),
+      width: 1080,
+      height: 1350
+    });
+
+    const results = await Promise.allSettled([
+      db.brandVisualRenders.commitAndAttach(
+        brandedRenderInput(owner, source, firstFinal.id, {
+          renderChecksum: firstFinal.sha256
+        })
+      ),
+      db.brandVisualRenders.commitAndAttach(
+        brandedRenderInput(owner, source, secondFinal.id, {
+          renderChecksum: secondFinal.sha256
+        })
+      )
+    ]);
+
+    expect(results.filter(({ status }) => status === "fulfilled")).toHaveLength(1);
+    expect(results.filter(({ status }) => status === "rejected")).toEqual([
+      expect.objectContaining({
+        reason: expect.objectContaining({ code: "CONFLICT" })
+      })
+    ]);
+    expect(await db.postDrafts.listVersions(source.post.draftId)).toHaveLength(2);
+    expect(await queryTestDatabase<{ count: number }>(db, `
+      select count(*)::int as count from career_mcp.brand_visual_renders
+    `)).toEqual([{ count: 1 }]);
+    expect(await queryTestDatabase<{ count: number }>(db, `
+      select count(*)::int as count
+      from career_mcp.post_draft_media
+      where post_draft_id <> '${source.post.id}'
+    `)).toEqual([{ count: 1 }]);
+  });
+
+  it("branded render rolls back the post and attachment when the provenance insert fails", async () => {
+    const owner = randomUUID();
+    const source = await readyBrandedRender(owner);
+    const finalMedia = await addMedia({
+      ownerSubject: owner,
+      sha256: "a".repeat(64),
+      width: 1080,
+      height: 1350
+    });
+    await queryTestDatabase(db, `
+      alter table career_mcp.brand_visual_renders
+      add constraint task_7_forced_render_failure check (false)
+    `);
+
+    try {
+      await expect(db.brandVisualRenders.commitAndAttach(
+        brandedRenderInput(owner, source, finalMedia.id)
+      )).rejects.toBeDefined();
+    } finally {
+      await queryTestDatabase(db, `
+        alter table career_mcp.brand_visual_renders
+        drop constraint task_7_forced_render_failure
+      `);
+    }
+
+    expect(await db.postDrafts.listVersions(source.post.draftId)).toHaveLength(1);
+    expect(await db.brandVisualBriefs.getOwned(source.brief.id, owner))
+      .toMatchObject({ state: "ready" });
+    expect(await queryTestDatabase<{ count: number }>(db, `
+      select count(*)::int as count from career_mcp.post_draft_media
+      where post_draft_id <> '${source.post.id}'
+    `)).toEqual([{ count: 0 }]);
   });
 });
 
