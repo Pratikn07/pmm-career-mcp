@@ -1,6 +1,6 @@
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { and, asc, desc, eq, inArray, isNull, notExists, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, notExists, or, sql } from "drizzle-orm";
 import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
 import {
   brandProfiles,
@@ -489,6 +489,43 @@ function brandBriefSourceNotFound(): DomainError {
   return new DomainError("NOT_FOUND", "Brand visual brief source was not found", {
     entity: "post_draft"
   });
+}
+
+function brandRenderIntegrityError(): DomainError {
+  return new DomainError("DATA_INTEGRITY", "Brand render data is invalid", {
+    entity: "brand_visual_render"
+  });
+}
+
+async function lockBrandSourceMediaExclusivity(
+  transaction: Database,
+  mediaIds: readonly string[]
+): Promise<void> {
+  const sortedMediaIds = [...new Set(mediaIds.map((id) => id.toLowerCase()))].sort();
+  for (const mediaId of sortedMediaIds) {
+    await transaction.execute(sql`
+      select pg_catalog.pg_advisory_xact_lock(
+        pg_catalog.hashtextextended(${mediaId}::text, 719291484472341011)
+      )
+    `);
+  }
+}
+
+async function rejectBrandSourceMediaAttachments(
+  transaction: Database,
+  mediaIds: readonly string[]
+): Promise<void> {
+  if (mediaIds.length === 0) {
+    return;
+  }
+  const reserved = await transaction.select({
+    sourceMediaId: brandVisualRenders.sourceMediaId
+  }).from(brandVisualRenders).where(
+    inArray(brandVisualRenders.sourceMediaId, [...mediaIds])
+  ).limit(1);
+  if (reserved.length > 0) {
+    throw brandRenderIntegrityError();
+  }
 }
 
 async function lockBrandBriefMediaOwners(
@@ -1662,11 +1699,7 @@ export function createRepositories(database: Database) {
             entity: "post_media"
           })
         );
-        const integrityError = () => (
-          new DomainError("DATA_INTEGRITY", "Brand render data is invalid", {
-            entity: "brand_visual_render"
-          })
-        );
+        const integrityError = brandRenderIntegrityError;
         const conflictError = () => (
           new DomainError("CONFLICT", "Brand visual brief is not ready", {
             entity: "brand_visual_brief"
@@ -1690,12 +1723,6 @@ export function createRepositories(database: Database) {
         }
         if (input.sourceMediaId !== undefined && !isUuid(input.sourceMediaId)) {
           throw validationError("sourceMediaId", "must_be_uuid");
-        }
-        if (
-          input.sourceMediaId !== undefined
-          && input.sourceMediaId.toLowerCase() === input.renderedMediaId.toLowerCase()
-        ) {
-          throw integrityError();
         }
         if (
           typeof input.altText !== "string"
@@ -1744,6 +1771,30 @@ export function createRepositories(database: Database) {
             throw postNotFound();
           }
 
+          if (sourceMediaId !== undefined) {
+            const [initialSourceMedia] = await transaction.select().from(
+              postMedia
+            ).where(and(
+              eq(postMedia.id, sourceMediaId),
+              eq(postMedia.ownerSubject, ownerSubject)
+            )).limit(1);
+            if (
+              initialSourceMedia === undefined
+              || !initialSourceMedia.objectPath.startsWith(`${ownerSubject}/`)
+              || !SHA256_PATTERN.test(initialSourceMedia.sha256)
+            ) {
+              throw mediaNotFound();
+            }
+            if (sourceMediaId === renderedMediaId) {
+              throw integrityError();
+            }
+          }
+
+          await lockBrandSourceMediaExclusivity(transaction, [
+            ...(sourceMediaId === undefined ? [] : [sourceMediaId]),
+            renderedMediaId
+          ]);
+
           const [latestRow] = await transaction.select().from(postDrafts).where(
             eq(postDrafts.draftId, reference.draftId)
           ).orderBy(desc(postDrafts.version)).limit(1).for("update");
@@ -1751,15 +1802,19 @@ export function createRepositories(database: Database) {
             throw postNotFound();
           }
           const latest = normalizeRowTimestamps(latestRow);
-
-          const [exactRow] = await transaction.select().from(postDrafts).where(and(
-            eq(postDrafts.id, initialBrief.postDraftId),
-            eq(postDrafts.version, initialBrief.postVersion)
-          )).limit(1).for("update");
-          if (exactRow === undefined) {
-            throw postNotFound();
+          if (
+            latest.id !== reference.id
+            || latest.version !== reference.version
+            || latest.version !== input.expectedVersion
+            || initialBrief.postVersion !== input.expectedVersion
+          ) {
+            throw new DomainError("CONFLICT", "Post draft version is stale", {
+              entity: "post_draft",
+              expectedVersion: input.expectedVersion,
+              actualVersion: latest.version
+            });
           }
-          const exact = normalizeRowTimestamps(exactRow);
+          const exact = latest;
 
           const exactDraftMedia = await transaction.select().from(
             postDraftMedia
@@ -1767,28 +1822,9 @@ export function createRepositories(database: Database) {
             eq(postDraftMedia.postDraftId, exact.id),
             eq(postDraftMedia.version, exact.version)
           )).orderBy(asc(postDraftMedia.position)).for("update");
-          const latestDraftMedia = latest.id === exact.id
-            ? exactDraftMedia
-            : await transaction.select().from(postDraftMedia).where(and(
-                eq(postDraftMedia.postDraftId, latest.id),
-                eq(postDraftMedia.version, latest.version)
-              )).orderBy(asc(postDraftMedia.position)).for("update");
+          const latestDraftMedia = exactDraftMedia;
           if (exactDraftMedia.length === 0 || latestDraftMedia.length === 0) {
             throw postNotFound();
-          }
-          if (sourceMediaId !== undefined) {
-            const sourceAttachments = await transaction.select({
-              mediaId: postDraftMedia.mediaId
-            }).from(postDraftMedia).where(
-              eq(postDraftMedia.mediaId, sourceMediaId)
-            ).orderBy(
-              asc(postDraftMedia.postDraftId),
-              asc(postDraftMedia.version),
-              asc(postDraftMedia.position)
-            );
-            if (sourceAttachments.length > 0) {
-              throw integrityError();
-            }
           }
 
           const sortedMediaIds = [...new Set([
@@ -1834,6 +1870,21 @@ export function createRepositories(database: Database) {
           if (sourceMediaId !== undefined && !isOwnedMedia(sourceMedia)) {
             throw mediaNotFound();
           }
+          if (sourceMediaId !== undefined) {
+            const sourceAttachments = await transaction.select({
+              mediaId: postDraftMedia.mediaId
+            }).from(postDraftMedia).where(
+              eq(postDraftMedia.mediaId, sourceMediaId)
+            ).orderBy(
+              asc(postDraftMedia.postDraftId),
+              asc(postDraftMedia.version),
+              asc(postDraftMedia.position)
+            );
+            if (sourceAttachments.length > 0) {
+              throw integrityError();
+            }
+          }
+          await rejectBrandSourceMediaAttachments(transaction, [renderedMediaId]);
 
           const [profile] = await transaction.select().from(brandProfiles).where(and(
             eq(brandProfiles.id, initialBrief.brandProfileId),
@@ -1868,17 +1919,8 @@ export function createRepositories(database: Database) {
           if (brief.state !== "ready") {
             throw conflictError();
           }
-          if (
-            latest.id !== exact.id
-            || latest.version !== exact.version
-            || exact.version !== input.expectedVersion
-            || brief.postVersion !== input.expectedVersion
-          ) {
-            throw new DomainError("CONFLICT", "Post draft version is stale", {
-              entity: "post_draft",
-              expectedVersion: input.expectedVersion,
-              actualVersion: latest.version
-            });
+          if (brief.postVersion !== input.expectedVersion) {
+            throw integrityError();
           }
           if (
             (brief.visualMode === "EDITORIAL_STATEMENT" && sourceMediaId !== undefined)
@@ -2065,7 +2107,13 @@ export function createRepositories(database: Database) {
           inArray(postMedia.id, [...ids]),
           notExists(database.select({ id: postDraftMedia.mediaId }).from(postDraftMedia).where(
             eq(postDraftMedia.mediaId, postMedia.id)
-          ))
+          )),
+          notExists(database.select({ id: brandVisualRenders.id }).from(
+            brandVisualRenders
+          ).where(or(
+            eq(brandVisualRenders.sourceMediaId, postMedia.id),
+            eq(brandVisualRenders.renderedMediaId, postMedia.id)
+          )))
         )).returning({ id: postMedia.id });
         return rows.map(({ id }) => id);
       }
@@ -2125,6 +2173,7 @@ export function createRepositories(database: Database) {
         const draftId = input.draftId ?? randomUUID();
         const sortedMediaIds = [...normalizedMediaIds].sort();
         return serializableTransaction(database, async (transaction) => {
+          await lockBrandSourceMediaExclusivity(transaction, sortedMediaIds);
           const [latest] = await transaction.select().from(postDrafts).where(
             eq(postDrafts.draftId, draftId)
           ).orderBy(desc(postDrafts.version)).limit(1).for("update");
@@ -2159,6 +2208,7 @@ export function createRepositories(database: Database) {
           ) {
             throw new Error("Every media item must exist and be owned by the request subject");
           }
+          await rejectBrandSourceMediaAttachments(transaction, sortedMediaIds);
           const version = (latest?.version ?? 0) + 1;
           const now = nowIso();
           const lockedById = new Map(lockedMedia.map((media) => [media.id.toLowerCase(), media]));

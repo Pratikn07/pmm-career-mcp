@@ -633,6 +633,74 @@ describe("brand render service", () => {
     expect(remove).not.toHaveBeenCalled();
   });
 
+  it("branded render preserves committed source and final media after an ambiguous commit response", async () => {
+    const source = await readyBrief(owner, "EDITORIAL_METAPHOR");
+    const sourceId = randomUUID();
+    const finalId = randomUUID();
+    const commitAndAttach = db.brandVisualRenders.commitAndAttach;
+    const deleteOwnedUnreferenced = db.postMedia.deleteOwnedUnreferenced;
+    const cleanupResults: string[][] = [];
+    const ambiguousDatabase = {
+      ...db,
+      brandVisualRenders: {
+        ...db.brandVisualRenders,
+        commitAndAttach: vi.fn(async (
+          ...args: Parameters<typeof commitAndAttach>
+        ) => {
+          await commitAndAttach(...args);
+          throw new Error("simulated ambiguous database response");
+        })
+      },
+      postMedia: {
+        ...db.postMedia,
+        deleteOwnedUnreferenced: vi.fn(async (
+          ...args: Parameters<typeof deleteOwnedUnreferenced>
+        ) => {
+          const result = await deleteOwnedUnreferenced(...args);
+          cleanupResults.push(result);
+          return result;
+        })
+      }
+    } as CareerDatabase;
+
+    await expect(renderService({
+      database: ambiguousDatabase,
+      ids: [sourceId, finalId],
+      renderCover: vi.fn(async () => Object.freeze({
+        ...renderedCover(),
+        validation: Object.freeze({
+          fixedLabelsPresent: true,
+          textWithinSafeArea: true,
+          sourceImageUsed: true
+        })
+      }))
+    }).render({
+      briefId: source.brief.id,
+      postId: source.post.draftId,
+      expectedVersion: source.post.version,
+      sourceImage: sourceFile,
+      altText
+    })).rejects.toMatchObject({
+      code: "DATA_INTEGRITY",
+      message: "Brand cover could not be saved"
+    });
+
+    expect(await db.postDrafts.listVersions(source.post.draftId)).toHaveLength(2);
+    expect(await db.brandVisualBriefs.getOwned(source.brief.id, owner))
+      .toMatchObject({ state: "rendered" });
+    expect(await queryTestDatabase<{ count: number }>(db, `
+      select count(*)::int as count
+      from career_mcp.brand_visual_renders
+      where brief_id = '${source.brief.id}'
+        and source_media_id = '${sourceId}'
+        and rendered_media_id = '${finalId}'
+    `)).toEqual([{ count: 1 }]);
+    expect(await db.postMedia.get(sourceId)).toBeDefined();
+    expect(await db.postMedia.get(finalId)).toBeDefined();
+    expect(cleanupResults).toEqual([[]]);
+    expect(remove).not.toHaveBeenCalled();
+  });
+
   it("branded render preserves the original safe error when best-effort cleanup fails", async () => {
     const source = await readyBrief();
     const finalId = randomUUID();

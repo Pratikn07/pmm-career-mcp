@@ -1269,8 +1269,8 @@ describe("Brand Studio repositories", () => {
     const profileLock = lockIndex("brand_profiles");
     const briefLock = lockIndex("brand_visual_briefs");
     expect(latestPostLock).toBeGreaterThanOrEqual(0);
-    expect(exactPostLock).toBeGreaterThan(latestPostLock);
-    expect(draftMediaLock).toBeGreaterThan(exactPostLock);
+    expect(exactPostLock).toBe(-1);
+    expect(draftMediaLock).toBeGreaterThan(latestPostLock);
     expect(mediaLock).toBeGreaterThan(draftMediaLock);
     expect(profileLock).toBeGreaterThan(mediaLock);
     expect(briefLock).toBeGreaterThan(profileLock);
@@ -1325,6 +1325,95 @@ describe("Brand Studio repositories", () => {
     expect(await db.postDrafts.listVersions(foreign.post.draftId)).toHaveLength(1);
   });
 
+  it("branded render hides attached, unattached, and absent foreign source media identically", async () => {
+    const owner = randomUUID();
+    const otherOwner = randomUUID();
+    const source = await readyBrandedRender(owner, {
+      visualMode: "EDITORIAL_METAPHOR"
+    });
+    const foreignPost = await addOwnedPost(otherOwner);
+    const [attachedForeign] = await db.postDraftMedia.listForVersion(
+      foreignPost.id,
+      foreignPost.version
+    );
+    const unattachedForeign = await addMedia({
+      ownerSubject: otherOwner,
+      sha256: "b".repeat(64)
+    });
+    const finalMedia = await addMedia({
+      ownerSubject: owner,
+      sha256: "a".repeat(64),
+      width: 1080,
+      height: 1350
+    });
+    const rejection = async (sourceMediaId: string) => {
+      const error = await db.brandVisualRenders.commitAndAttach(
+        brandedRenderInput(owner, source, finalMedia.id, { sourceMediaId })
+      ).then(
+        () => undefined,
+        (reason: unknown) => reason
+      );
+      expect(error).toBeInstanceOf(DomainError);
+      const domainError = error as DomainError;
+      return {
+        code: domainError.code,
+        message: domainError.message,
+        details: domainError.details
+      };
+    };
+
+    const attached = await rejection(attachedForeign!.mediaId);
+    const unattached = await rejection(unattachedForeign.id);
+    const absent = await rejection(randomUUID());
+
+    expect(attached).toEqual(unattached);
+    expect(attached).toEqual(absent);
+    expect(attached).toEqual({
+      code: "NOT_FOUND",
+      message: "Brand render media was not found",
+      details: { entity: "post_media" }
+    });
+  });
+
+  it("owner validation still hides a foreign or absent source reused as rendered media", async () => {
+    const owner = randomUUID();
+    const otherOwner = randomUUID();
+    const source = await readyBrandedRender(owner, {
+      visualMode: "EDITORIAL_METAPHOR"
+    });
+    const foreign = await addMedia({
+      ownerSubject: otherOwner,
+      sha256: "b".repeat(64),
+      width: 1080,
+      height: 1350
+    });
+    const rejection = async (mediaId: string) => {
+      const error = await db.brandVisualRenders.commitAndAttach(
+        brandedRenderInput(owner, source, mediaId, { sourceMediaId: mediaId })
+      ).then(
+        () => undefined,
+        (reason: unknown) => reason
+      );
+      expect(error).toBeInstanceOf(DomainError);
+      const domainError = error as DomainError;
+      return {
+        code: domainError.code,
+        message: domainError.message,
+        details: domainError.details
+      };
+    };
+
+    const foreignError = await rejection(foreign.id);
+    const absentError = await rejection(randomUUID());
+
+    expect(foreignError).toEqual(absentError);
+    expect(foreignError).toEqual({
+      code: "NOT_FOUND",
+      message: "Brand render media was not found",
+      details: { entity: "post_media" }
+    });
+  });
+
   it("branded render rejects a stale exact post before any mutation", async () => {
     const owner = randomUUID();
     const source = await readyBrandedRender(owner);
@@ -1349,6 +1438,7 @@ describe("Brand Studio repositories", () => {
       height: 1350
     });
 
+    queryLog.length = 0;
     await expect(db.brandVisualRenders.commitAndAttach(
       brandedRenderInput(owner, source, finalMedia.id)
     )).rejects.toMatchObject({
@@ -1361,6 +1451,17 @@ describe("Brand Studio repositories", () => {
       }
     });
 
+    const staleLocks = queryLog.filter(({ query }) => /for update/i.test(query));
+    const stalePostLocks = staleLocks.filter(({ query }) => (
+      query.includes('from "career_mcp"."post_drafts"')
+    ));
+    expect(stalePostLocks).toHaveLength(1);
+    expect(stalePostLocks[0]?.query).toContain(
+      'order by "career_mcp"."post_drafts"."version" desc'
+    );
+    expect(staleLocks.some(({ query }) => (
+      query.includes('from "career_mcp"."post_draft_media"')
+    ))).toBe(false);
     expect(await db.postDrafts.listVersions(source.post.draftId)).toHaveLength(2);
     expect(await db.brandVisualBriefs.getOwned(source.brief.id, owner))
       .toMatchObject({ state: "ready" });
@@ -1435,6 +1536,269 @@ describe("Brand Studio repositories", () => {
     expect(await db.postDrafts.listVersions(source.post.draftId)).toHaveLength(1);
     expect(await db.brandVisualBriefs.getOwned(source.brief.id, owner))
       .toMatchObject({ state: "ready" });
+  });
+
+  it("repository attachment paths reject media already reserved as render source with a safe error", async () => {
+    const owner = randomUUID();
+    const source = await readyBrandedRender(owner, {
+      visualMode: "EDITORIAL_METAPHOR"
+    });
+    const sourceMedia = await addMedia({
+      ownerSubject: owner,
+      sha256: "b".repeat(64)
+    });
+    const renderedMedia = await addMedia({
+      ownerSubject: owner,
+      sha256: "a".repeat(64),
+      width: 1080,
+      height: 1350
+    });
+    await queryTestDatabase(db, `
+      insert into career_mcp.brand_visual_renders (
+        id, owner_subject, brief_id, version, source_media_id, rendered_media_id,
+        alt_text, render_checksum, renderer_version, created_at
+      ) values (
+        '${randomUUID()}', '${owner}', '${source.brief.id}', 1, '${sourceMedia.id}',
+        '${renderedMedia.id}', 'Reserved source', '${renderedMedia.sha256}', 1,
+        '2026-07-23T00:00:00.000Z'
+      )
+    `);
+
+    await expect(db.postDrafts.createVersionWithMedia({
+      ownerSubject: owner,
+      text: "Must not attach reserved source art",
+      visibility: "PUBLIC",
+      checksum: "reserved-source-attachment",
+      state: "draft",
+      media: [{ mediaId: sourceMedia.id, altText: "Reserved source art" }]
+    })).rejects.toMatchObject({
+      code: "DATA_INTEGRITY",
+      message: "Brand render data is invalid",
+      details: { entity: "brand_visual_render" }
+    });
+  });
+
+  it("branded render rejects a final attachment already reserved as source with a safe error", async () => {
+    const owner = randomUUID();
+    const otherOwner = randomUUID();
+    const source = await readyBrandedRender(owner);
+    const foreign = await readyBrandedRender(otherOwner, {
+      visualMode: "EDITORIAL_METAPHOR"
+    });
+    const reservedFinal = await addMedia({
+      ownerSubject: owner,
+      sha256: "a".repeat(64),
+      width: 1080,
+      height: 1350
+    });
+    const foreignRendered = await addMedia({
+      ownerSubject: otherOwner,
+      sha256: "b".repeat(64),
+      width: 1080,
+      height: 1350
+    });
+    await queryTestDatabase(db, `
+      insert into career_mcp.brand_visual_renders (
+        id, owner_subject, brief_id, version, source_media_id, rendered_media_id,
+        alt_text, render_checksum, renderer_version, created_at
+      ) values (
+        '${randomUUID()}', '${otherOwner}', '${foreign.brief.id}', 1,
+        '${reservedFinal.id}', '${foreignRendered.id}', 'Reserved source',
+        '${foreignRendered.sha256}', 1, '2026-07-23T00:00:00.000Z'
+      )
+    `);
+
+    await expect(db.brandVisualRenders.commitAndAttach(
+      brandedRenderInput(owner, source, reservedFinal.id, {
+        renderChecksum: reservedFinal.sha256
+      })
+    )).rejects.toMatchObject({
+      code: "DATA_INTEGRITY",
+      message: "Brand render data is invalid",
+      details: { entity: "brand_visual_render" }
+    });
+    expect(await db.postDrafts.listVersions(source.post.draftId)).toHaveLength(1);
+  });
+
+  it("database triggers reject source registration and post attachment in either sequential order", async () => {
+    const firstOwner = randomUUID();
+    const first = await readyBrandedRender(firstOwner, {
+      visualMode: "EDITORIAL_METAPHOR"
+    });
+    const reservedSource = await addMedia({
+      ownerSubject: firstOwner,
+      sha256: "b".repeat(64)
+    });
+    const firstRendered = await addMedia({
+      ownerSubject: firstOwner,
+      sha256: "a".repeat(64),
+      width: 1080,
+      height: 1350
+    });
+    await queryTestDatabase(db, `
+      insert into career_mcp.brand_visual_renders (
+        id, owner_subject, brief_id, version, source_media_id, rendered_media_id,
+        alt_text, render_checksum, renderer_version, created_at
+      ) values (
+        '${randomUUID()}', '${firstOwner}', '${first.brief.id}', 1,
+        '${reservedSource.id}', '${firstRendered.id}', 'Reserved source',
+        '${firstRendered.sha256}', 1, '2026-07-23T00:00:00.000Z'
+      )
+    `);
+    const attachTarget = await db.postDrafts.createVersion({
+      text: "Direct attachment target",
+      visibility: "PUBLIC",
+      checksum: "direct-attachment-target",
+      state: "draft"
+    });
+    await expect(queryTestDatabase(db, `
+      insert into career_mcp.post_draft_media (
+        post_draft_id, version, position, media_id, alt_text
+      ) values (
+        '${attachTarget.id}', ${attachTarget.version}, 0, '${reservedSource.id}',
+        'Must be rejected'
+      )
+    `)).rejects.toMatchObject({
+      code: "23514",
+      constraint: "brand_source_media_exclusive"
+    });
+
+    const secondOwner = randomUUID();
+    const second = await readyBrandedRender(secondOwner, {
+      visualMode: "EDITORIAL_METAPHOR"
+    });
+    const [attachedSource] = await db.postDraftMedia.listForVersion(
+      second.post.id,
+      second.post.version
+    );
+    const secondRendered = await addMedia({
+      ownerSubject: secondOwner,
+      sha256: "c".repeat(64),
+      width: 1080,
+      height: 1350
+    });
+    await expect(queryTestDatabase(db, `
+      insert into career_mcp.brand_visual_renders (
+        id, owner_subject, brief_id, version, source_media_id, rendered_media_id,
+        alt_text, render_checksum, renderer_version, created_at
+      ) values (
+        '${randomUUID()}', '${secondOwner}', '${second.brief.id}', 1,
+        '${attachedSource!.mediaId}', '${secondRendered.id}', 'Attached source',
+        '${secondRendered.sha256}', 1, '2026-07-23T00:00:00.000Z'
+      )
+    `)).rejects.toMatchObject({
+      code: "23514",
+      constraint: "brand_source_media_exclusive"
+    });
+  });
+
+  it("database triggers enforce source-media exclusivity on both update paths", async () => {
+    const owner = randomUUID();
+    const source = await readyBrandedRender(owner);
+    const [attached] = await db.postDraftMedia.listForVersion(
+      source.post.id,
+      source.post.version
+    );
+    const reservedSource = await addMedia({
+      ownerSubject: owner,
+      sha256: "b".repeat(64)
+    });
+    const rendered = await addMedia({
+      ownerSubject: owner,
+      sha256: "a".repeat(64),
+      width: 1080,
+      height: 1350
+    });
+    const renderId = randomUUID();
+    await queryTestDatabase(db, `
+      insert into career_mcp.brand_visual_renders (
+        id, owner_subject, brief_id, version, source_media_id, rendered_media_id,
+        alt_text, render_checksum, renderer_version, created_at
+      ) values (
+        '${renderId}', '${owner}', '${source.brief.id}', 1, '${reservedSource.id}',
+        '${rendered.id}', 'Reserved source', '${rendered.sha256}', 1,
+        '2026-07-23T00:00:00.000Z'
+      )
+    `);
+
+    await expect(queryTestDatabase(db, `
+      update career_mcp.post_draft_media
+      set media_id = '${reservedSource.id}'
+      where post_draft_id = '${source.post.id}'
+        and version = ${source.post.version}
+        and position = 0
+    `)).rejects.toMatchObject({
+      code: "23514",
+      constraint: "brand_source_media_exclusive"
+    });
+    await expect(queryTestDatabase(db, `
+      update career_mcp.brand_visual_renders
+      set source_media_id = '${attached!.mediaId}'
+      where id = '${renderId}'
+    `)).rejects.toMatchObject({
+      code: "23514",
+      constraint: "brand_source_media_exclusive"
+    });
+  });
+
+  it("local concurrent attachment and source registration allow exactly one media role", async () => {
+    const owner = randomUUID();
+    const source = await readyBrandedRender(owner, {
+      visualMode: "EDITORIAL_METAPHOR"
+    });
+    const racedMedia = await addMedia({
+      ownerSubject: owner,
+      sha256: "b".repeat(64)
+    });
+    const finalMedia = await addMedia({
+      ownerSubject: owner,
+      sha256: "a".repeat(64),
+      width: 1080,
+      height: 1350
+    });
+
+    const results = await Promise.allSettled([
+      db.postDrafts.createVersionWithMedia({
+        ownerSubject: owner,
+        text: "Concurrent source attachment",
+        visibility: "PUBLIC",
+        checksum: "concurrent-source-attachment",
+        state: "draft",
+        media: [{ mediaId: racedMedia.id, altText: "Concurrent source" }]
+      }),
+      db.brandVisualRenders.commitAndAttach(
+        brandedRenderInput(owner, source, finalMedia.id, {
+          sourceMediaId: racedMedia.id
+        })
+      )
+    ]);
+
+    expect(results.filter(({ status }) => status === "fulfilled")).toHaveLength(1);
+    expect(results.filter(({ status }) => status === "rejected")).toEqual([
+      expect.objectContaining({
+        reason: expect.objectContaining({
+          code: "DATA_INTEGRITY",
+          details: { entity: "brand_visual_render" }
+        })
+      })
+    ]);
+    const [counts] = await queryTestDatabase<{
+      attachments: number;
+      renders: number;
+    }>(db, `
+      select
+        (
+          select count(*)::int
+          from career_mcp.post_draft_media
+          where media_id = '${racedMedia.id}'
+        ) as attachments,
+        (
+          select count(*)::int
+          from career_mcp.brand_visual_renders
+          where source_media_id = '${racedMedia.id}'
+        ) as renders
+    `);
+    expect((counts?.attachments ?? 0) + (counts?.renders ?? 0)).toBe(1);
   });
 
   it("branded render allows only one concurrent ready-to-render commit", async () => {

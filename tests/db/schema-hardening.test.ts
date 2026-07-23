@@ -214,6 +214,41 @@ describe("foreign-key indexing", () => {
   });
 });
 
+describe("brand source-media exclusivity", () => {
+  it("registers paired insert/update triggers using non-definer functions", async () => {
+    const triggers = await queryTestDatabase<{
+      trigger_name: string;
+      definition: string;
+      security_definer: boolean;
+    }>(db, `
+      select
+        trigger_row.tgname as trigger_name,
+        pg_get_triggerdef(trigger_row.oid) as definition,
+        procedure_row.prosecdef as security_definer
+      from pg_trigger trigger_row
+      join pg_proc procedure_row
+        on procedure_row.oid = trigger_row.tgfoid
+      where not trigger_row.tgisinternal
+        and trigger_row.tgrelid in (
+          'career_mcp.post_draft_media'::regclass,
+          'career_mcp.brand_visual_renders'::regclass
+        )
+        and trigger_row.tgname like '%brand_source_media_exclusive%'
+      order by trigger_row.tgname
+    `);
+
+    expect(triggers).toHaveLength(2);
+    expect(triggers.map(({ trigger_name }) => trigger_name)).toEqual([
+      "brand_source_media_exclusive_on_post_draft_media",
+      "brand_source_media_exclusive_on_render"
+    ]);
+    for (const trigger of triggers) {
+      expect(trigger.definition).toMatch(/before insert or update/i);
+      expect(trigger.security_definer).toBe(false);
+    }
+  });
+});
+
 describe("database domain constraints", () => {
   it.each([-0.01, 1.01])("rejects evidence confidence %s outside 0..1", async (confidence) => {
     const { person } = await seedConstraintGraph();

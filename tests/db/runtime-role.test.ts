@@ -14,6 +14,10 @@ async function mediaMigrationSql(): Promise<string> {
   return await readFile(resolve("drizzle/0002_linkedin_media_review.sql"), "utf8");
 }
 
+async function brandSourceExclusivityMigrationSql(): Promise<string> {
+  return await readFile(resolve("drizzle/0005_brand_source_media_exclusive.sql"), "utf8");
+}
+
 describe("Supabase runtime-role operator template", () => {
   it("allows migrations after the runtime-role template bootstraps the private schema", async () => {
     const sql = await initialMigrationSql();
@@ -73,6 +77,23 @@ describe("Supabase runtime-role operator template", () => {
     expect(sql).not.toMatch(/\b(?:insert|update|delete)\b[\s\S]{0,80}\bstorage\b/i);
     expect(sql).not.toMatch(/\bgrant\b[\s\S]{0,100}\b(?:anon|authenticated)\b/i);
     expect(sql).not.toMatch(/enable\s+row\s+level\s+security/i);
+  });
+
+  it("keeps source-media exclusivity inside the private schema with invoker trigger functions", async () => {
+    const sql = await brandSourceExclusivityMigrationSql();
+
+    expect(sql).toMatch(/career_mcp[\s\S]*post_draft_media/i);
+    expect(sql).toMatch(/career_mcp[\s\S]*brand_visual_renders/i);
+    expect(sql).toMatch(
+      /lock\s+table[\s\S]*post_draft_media[\s\S]*brand_visual_renders[\s\S]*share\s+row\s+exclusive/i
+    );
+    expect(sql).toMatch(/if\s+exists[\s\S]*brand_visual_renders[\s\S]*post_draft_media/i);
+    expect(sql).toMatch(/pg_advisory_xact_lock/i);
+    expect(sql).toMatch(/constraint\s*=\s*'brand_source_media_exclusive'/i);
+    expect(sql).not.toMatch(/security\s+definer/i);
+    expect(sql).not.toMatch(/storage\s*\.\s*(?:buckets|objects)/i);
+    expect(sql).not.toMatch(/\bgrant\b[\s\S]{0,100}\b(?:public|anon|authenticated)\b/i);
+    expect(sql).not.toMatch(/\bservice_role\b/i);
   });
 
   it("fails closed when a reused runtime role belongs to any parent role", async () => {
