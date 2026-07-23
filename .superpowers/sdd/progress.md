@@ -90,8 +90,8 @@ Started: 2026-07-22
 | 3. Brand profile, hook, templates, and prompt | Complete | Complete | Approved | `8c0dfd4`, `9239603` |
 | 4. Brand visual brief service | Complete | Complete | Approved | `0f142e6`, `8c01973` |
 | 5. Fonts and deterministic renderer | Complete | Complete | Approved | `1a407c2`, `ca79fda`, `567a220` |
-| 6. Reusable private-media ingestion | In progress | In progress | Pending | — |
-| 7. Persisted branded render and atomic attachment | Pending | Pending | Pending | — |
+| 6. Reusable private-media ingestion | Complete | Complete | Approved | `1fae568`, `ee05259`, `ccc4dd9`, `572aa1e` |
+| 7. Persisted branded render and atomic attachment | In progress | In progress | Pending | — |
 | 8. Brand Studio MCP tools | Pending | Pending | Pending | — |
 | 9. Request wiring and review-card provenance | Pending | Pending | Pending | — |
 | 10. Scheduled-flow safety and operator docs | Pending | Pending | Pending | — |
@@ -117,3 +117,5 @@ Task 3: complete (commits `8c0dfd4`, `9239603`). The immutable PMM Field Notes p
 Task 4: complete (commits `0f142e6`, `8c01973`). The owner-scoped visual-brief service now binds to the exact latest post version, atomically initializes the canonical profile with the first brief, rejects recent hook reuse, returns model-safe provenance, and verifies media checksums. The first review found lock-order, transaction-atomicity, checksum-validation, and error-mapping issues; all were fixed and re-reviewed. Final review returned 0 Critical, 0 Important, and 0 Minor findings. Verification: 959 full-suite tests plus 76 focused service/repository tests passed; no live service was called.
 
 Task 5: complete (commits `1a407c2`, `ca79fda`, `567a220`). Exact checksum-pinned Cormorant/Inter fonts and licenses, Resvg 2.6.2, deterministic SVG/Sharp rendering, safe asset resolution, source-raster bounds, text fitting, XML safety, and two-stage Docker packaging are implemented. Reviews found resource-bound, word-tier, topic-fit, mutable-input, cache, XML, Docker-assertion, and pre-copy memory issues; all were fixed. Final review returned 0 Critical, 0 Important, and 0 Minor findings. Verification: 988 full-suite tests plus 35 focused renderer/Docker tests passed; Docker daemon validation remains deferred to Task 11.
+
+Task 6: complete (commits `1fae568`, `ee05259`, `ccc4dd9`, `572aa1e`). The existing hardened media path was extracted into one reusable private store with bounded immutable snapshots, inspected metadata, owner-scoped dedupe, ambiguous-write reconciliation, strict canonical row validation, and unforgeable same-store cleanup provenance. Multiple reviews found byte-bound, cleanup, race, reconciliation, pixel-accounting, and adapter-aliasing gaps; all were fixed. Final review returned 0 Critical, 0 Important, and 0 Minor findings. Verification: 1,049 full-suite tests plus 100 focused media/e2e tests passed; no live service was called.
