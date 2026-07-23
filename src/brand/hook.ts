@@ -7,10 +7,13 @@ const BAIT = [
   "here's the secret"
 ] as const;
 
-const LINE_CONTROL = /[\r\n\u0085\u2028\u2029]/u;
+const LINE_CONTROL = /[\r\n\v\f\u0085\u2028\u2029]/u;
 const SENTENCE_BOUNDARY = /[.!?\r\n\u0085\u2028\u2029]+/u;
-const LEADING_LIST_MARKER = /^[\s]*[•‣◦⁃∙\-–—*+]/u;
-const URL = /(?:\b(?:https?:\/\/|www\.)\S+|\b[\p{L}\p{N}](?:[\p{L}\p{N}-]*\.)+(?:com|org|net|io|co|ai|app|dev)(?:\/\S*)?)/iu;
+const LEADING_LIST_MARKER =
+  /^[\s]*[•‣◦⁃∙▪▫●○◉◎◆◇◼◻■□▶▷▸▹❥❧☙⁌⁍⦾⦿⬤⬥⬦⬧\-–—*+]/u;
+const EXPLICIT_URL = /\b(?:https?:\/\/|www\.)\S+/iu;
+const BARE_DOMAIN =
+  /(?:^|[^\p{L}\p{N}_-])((?:[\p{L}\p{N}](?:[\p{L}\p{N}-]{0,61}[\p{L}\p{N}])?\.)+[\p{L}]{2,63})(?=$|[^\p{L}\p{N}_-])/gu;
 const HASHTAG = /#[\p{L}\p{N}_]/u;
 const DIGIT = /\p{N}/u;
 const EMOJI_CODE_POINT =
@@ -55,6 +58,14 @@ function normalizedPostSentences(postText: string): readonly string[] {
     .filter((sentence) => sentence.length > 0);
 }
 
+function containsUrl(value: string): boolean {
+  if (EXPLICIT_URL.test(value)) {
+    return true;
+  }
+  return [...value.matchAll(BARE_DOMAIN)]
+    .some((match) => (match[1]?.length ?? 254) <= 253);
+}
+
 export function validateCoverHook(postText: string, rawHook: string): string {
   if (typeof rawHook !== "string" || LINE_CONTROL.test(rawHook)) {
     fail("single_line");
@@ -76,7 +87,7 @@ export function validateCoverHook(postText: string, rawHook: string): string {
   if (BAIT.some((phrase) => lowerHook.includes(phrase))) {
     fail("engagement_bait");
   }
-  if (URL.test(hook)) {
+  if (containsUrl(hook)) {
     fail("url");
   }
   if (HASHTAG.test(hook)) {

@@ -16,6 +16,10 @@ describe("buildSourceArtPrompt", () => {
     expect(prompt.generationPrompt).toContain("ink navy");
     expect(prompt.generationPrompt).toContain("muted copper");
     expect(prompt.generationPrompt).toContain("soft taupe");
+    expect(prompt.generationPrompt).toContain("paper highlight");
+    for (const color of Object.values(DEFAULT_PMM_BRAND_PROFILE.palette)) {
+      expect(prompt.generationPrompt).toContain(color);
+    }
     expect(prompt.generationPrompt).toContain("open doorway");
     expect(prompt.generationPrompt).not.toContain("Bhagyashree");
     expect(prompt.negativeConstraints).toContain("readable text");

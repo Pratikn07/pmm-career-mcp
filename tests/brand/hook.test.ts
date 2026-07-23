@@ -31,8 +31,12 @@ describe("validateCoverHook", () => {
     }));
   });
 
-  it("rejects generic engagement bait", () => {
-    expect(() => validateCoverHook("Post", "Read this now"))
+  it.each([
+    "You won't believe this",
+    "Read this now",
+    "Here's the secret today"
+  ])("rejects the generic engagement bait phrase in %j", (hook) => {
+    expect(() => validateCoverHook("Post", hook))
       .toThrowError(expect.objectContaining({
         code: "VALIDATION_ERROR",
         details: { field: "coverHook", reason: "engagement_bait" }
@@ -41,9 +45,13 @@ describe("validateCoverHook", () => {
 
   it.each([
     ["a caller-supplied newline", "Clarity\nbeats capability", "single_line"],
+    ["a caller-supplied vertical tab", "Clarity\vbeats capability", "single_line"],
+    ["a caller-supplied form feed", "Clarity\fbeats capability", "single_line"],
     ["a URL", "Visit https://example.com today", "url"],
+    ["a bare domain with a modern TLD", "Visit example.xyz today", "url"],
     ["a hashtag", "Clarity beats #capability", "hashtag"],
     ["a leading bullet", "• Clarity beats capability", "list_marker"],
+    ["a leading small-square bullet", "▪ Clarity beats capability", "list_marker"],
     ["a digit claim", "Clarity wins 3 times", "numeric_claim"],
     ["an emoji run", "Clarity 👀 🚀 ✨ wins", "emoji_count"]
   ])("rejects %s", (_label, hook, reason) => {
@@ -72,6 +80,13 @@ describe("validateCoverHook", () => {
       details: { field: "coverHook", reason: "post_duplicate" }
     }));
   });
+
+  it("does not mistake ordinary sentence punctuation for a bare domain", () => {
+    expect(validateCoverHook(
+      "A separate post.",
+      "More features. Less meaning."
+    )).toBe("More features. Less meaning.");
+  });
 });
 
 describe("normalizeTopicLabel", () => {
@@ -85,8 +100,8 @@ describe("the immutable brand registry", () => {
   it("defines the exact PMM Field Notes identity and deeply frozen profile", () => {
     expect(DEFAULT_PMM_BRAND_PROFILE).toMatchObject({
       version: 1,
-      publicName: "Bhagyashree Nandoskar",
-      roleLine: "Product Marketing",
+      publicName: "BHAGYASHREE NANDOSKAR",
+      roleLine: "PRODUCT MARKETING",
       seriesName: "PMM FIELD NOTES",
       monogram: "BN",
       palette: {
@@ -125,5 +140,28 @@ describe("the immutable brand registry", () => {
     expect(Object.isFrozen(statement)).toBe(true);
     expect(Object.isFrozen(statement.safeTextRectangles)).toBe(true);
     expect(Object.isFrozen(metaphor.imageZone)).toBe(true);
+  });
+
+  it("keeps every text-safe rectangle in bounds and outside each image zone", () => {
+    const templates = [
+      templateForMode("EDITORIAL_STATEMENT"),
+      templateForMode("EDITORIAL_METAPHOR")
+    ];
+
+    for (const template of templates) {
+      for (const rectangle of Object.values(template.safeTextRectangles)) {
+        expect(rectangle.x).toBeGreaterThanOrEqual(0);
+        expect(rectangle.y).toBeGreaterThanOrEqual(0);
+        expect(rectangle.x + rectangle.width).toBeLessThanOrEqual(template.width);
+        expect(rectangle.y + rectangle.height).toBeLessThanOrEqual(template.height);
+
+        const overlapsImageZone =
+          rectangle.x < template.imageZone.x + template.imageZone.width &&
+          rectangle.x + rectangle.width > template.imageZone.x &&
+          rectangle.y < template.imageZone.y + template.imageZone.height &&
+          rectangle.y + rectangle.height > template.imageZone.y;
+        expect(overlapsImageZone).toBe(false);
+      }
+    }
   });
 });

@@ -53,8 +53,8 @@ export const EDITORIAL_STATEMENT_TEMPLATE: BrandTemplate = Object.freeze({
   mode: "EDITORIAL_STATEMENT",
   width: 1080,
   height: 1350,
-  safeTextRectangles: textRectangles(rectangle(96, 300, 888, 720)),
-  imageZone: rectangle(650, 260, 334, 700),
+  safeTextRectangles: textRectangles(rectangle(96, 280, 888, 560)),
+  imageZone: rectangle(96, 900, 888, 220),
   requiresSourceImage: false
 });
 

@@ -80,7 +80,8 @@ export function buildSourceArtPrompt(
     `warm ivory (${profile.palette.ivory})`,
     `ink navy (${profile.palette.navy})`,
     `muted copper (${profile.palette.copper})`,
-    `soft taupe (${profile.palette.taupe})`
+    `soft taupe (${profile.palette.taupe})`,
+    `paper highlight (${profile.palette.highlight})`
   ].join(", ");
 
   const generationPrompt = [

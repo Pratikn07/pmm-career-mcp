@@ -44,8 +44,8 @@ const VOICE_TRAITS = Object.freeze([
 
 export const DEFAULT_PMM_BRAND_PROFILE: PmmBrandProfile = Object.freeze({
   version: 1,
-  publicName: "Bhagyashree Nandoskar",
-  roleLine: "Product Marketing",
+  publicName: "BHAGYASHREE NANDOSKAR",
+  roleLine: "PRODUCT MARKETING",
   seriesName: "PMM FIELD NOTES",
   monogram: "BN",
   voice: Object.freeze({
