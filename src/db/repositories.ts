@@ -2,6 +2,9 @@ import { randomUUID, timingSafeEqual } from "node:crypto";
 import { and, asc, desc, eq, inArray, isNull, notExists, sql } from "drizzle-orm";
 import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
 import {
+  brandProfiles,
+  brandVisualBriefs,
+  brandVisualRenders,
   companies,
   evidence,
   oauthTokens,
@@ -43,6 +46,9 @@ export type PostPreview = typeof postPreviews.$inferSelect;
 export type PublishAttempt = typeof publishAttempts.$inferSelect;
 export type PublishAttemptMedia = typeof publishAttemptMedia.$inferSelect;
 export type OAuthToken = typeof oauthTokens.$inferSelect;
+export type BrandProfile = typeof brandProfiles.$inferSelect;
+export type BrandVisualBrief = typeof brandVisualBriefs.$inferSelect;
+export type BrandVisualRender = typeof brandVisualRenders.$inferSelect;
 export type PersonWithEvidence = Person & { evidence: Evidence[] };
 
 export type CompanyUpsertInput = {
@@ -1288,6 +1294,131 @@ export function createRepositories(database: Database) {
           asc(shortlists.id)
         );
         return normalizeRows(rows);
+      }
+    },
+    brandProfiles: {
+      async getActive(ownerSubject: string): Promise<BrandProfile | undefined> {
+        if (!isUuid(ownerSubject)) {
+          return undefined;
+        }
+        const [profile] = await database.select().from(brandProfiles).where(and(
+          eq(brandProfiles.ownerSubject, ownerSubject),
+          eq(brandProfiles.state, "active")
+        )).limit(1);
+        return profile === undefined ? undefined : normalizeRowTimestamps(profile);
+      },
+      async ensureDefault(input: {
+        id: string;
+        ownerSubject: string;
+        publicName: string;
+        roleLine: string;
+        seriesName: string;
+        monogram: string;
+        voiceJson: Record<string, unknown>;
+        paletteJson: Record<string, string>;
+        hookRulesJson: Record<string, unknown>;
+      }): Promise<BrandProfile> {
+        if (!isUuid(input.id) || !isUuid(input.ownerSubject)) {
+          throw new Error("Brand profile id and ownerSubject must be valid UUIDs");
+        }
+        return serializableTransaction(database, async (transaction) => {
+          const [active] = await transaction.select().from(brandProfiles).where(and(
+            eq(brandProfiles.ownerSubject, input.ownerSubject),
+            eq(brandProfiles.state, "active")
+          )).limit(1).for("update");
+          if (active !== undefined) {
+            return normalizeRowTimestamps(active);
+          }
+          const [profile] = await transaction.insert(brandProfiles).values({
+            ...input,
+            version: 1,
+            state: "active",
+            createdAt: nowIso()
+          }).returning();
+          return requiredRow(profile, "brand profile");
+        }, "brand_profiles_one_active_owner_unique");
+      }
+    },
+    brandVisualBriefs: {
+      async create(
+        input: Omit<typeof brandVisualBriefs.$inferInsert, "createdAt">
+      ): Promise<BrandVisualBrief> {
+        if (
+          !isUuid(input.id)
+          || !isUuid(input.ownerSubject)
+          || !isUuid(input.postDraftId)
+          || !isUuid(input.brandProfileId)
+        ) {
+          throw new Error("Brand visual brief identifiers must be valid UUIDs");
+        }
+        const [profile] = await database.select({ id: brandProfiles.id }).from(brandProfiles).where(and(
+          eq(brandProfiles.id, input.brandProfileId),
+          eq(brandProfiles.version, input.brandProfileVersion),
+          eq(brandProfiles.ownerSubject, input.ownerSubject)
+        )).limit(1);
+        if (profile === undefined) {
+          throw new Error("Brand visual brief profile must be owned by the request subject");
+        }
+        const [brief] = await database.insert(brandVisualBriefs).values({
+          ...input,
+          createdAt: nowIso()
+        }).returning();
+        return requiredRow(brief, "brand visual brief");
+      },
+      async getOwned(id: string, ownerSubject: string): Promise<BrandVisualBrief | undefined> {
+        if (!isUuid(id) || !isUuid(ownerSubject)) {
+          return undefined;
+        }
+        const [brief] = await database.select().from(brandVisualBriefs).where(and(
+          eq(brandVisualBriefs.id, id),
+          eq(brandVisualBriefs.ownerSubject, ownerSubject)
+        ));
+        return brief === undefined ? undefined : normalizeRowTimestamps(brief);
+      },
+      async listRecent(ownerSubject: string, limit: number): Promise<BrandVisualBrief[]> {
+        if (!isUuid(ownerSubject)) {
+          return [];
+        }
+        const boundedLimit = Number.isFinite(limit)
+          ? Math.min(Math.max(Math.floor(limit), 1), 50)
+          : 1;
+        const rows = await database.select().from(brandVisualBriefs).where(
+          eq(brandVisualBriefs.ownerSubject, ownerSubject)
+        ).orderBy(desc(brandVisualBriefs.createdAt), desc(brandVisualBriefs.id)).limit(boundedLimit);
+        return normalizeRows(rows);
+      }
+    },
+    brandVisualRenders: {
+      async getByRenderedMedia(
+        ownerSubject: string,
+        mediaId: string
+      ): Promise<(BrandVisualRender & { brief: BrandVisualBrief; profile: BrandProfile }) | undefined> {
+        if (!isUuid(ownerSubject) || !isUuid(mediaId)) {
+          return undefined;
+        }
+        const [row] = await database.select({
+          render: brandVisualRenders,
+          brief: brandVisualBriefs,
+          profile: brandProfiles
+        }).from(brandVisualRenders).innerJoin(
+          brandVisualBriefs,
+          eq(brandVisualRenders.briefId, brandVisualBriefs.id)
+        ).innerJoin(brandProfiles, and(
+          eq(brandVisualBriefs.brandProfileId, brandProfiles.id),
+          eq(brandVisualBriefs.brandProfileVersion, brandProfiles.version)
+        )).where(and(
+          eq(brandVisualRenders.ownerSubject, ownerSubject),
+          eq(brandVisualRenders.renderedMediaId, mediaId),
+          eq(brandVisualBriefs.ownerSubject, ownerSubject),
+          eq(brandProfiles.ownerSubject, ownerSubject)
+        )).orderBy(desc(brandVisualRenders.createdAt), desc(brandVisualRenders.id)).limit(1);
+        return row === undefined
+          ? undefined
+          : {
+              ...normalizeRowTimestamps(row.render),
+              brief: normalizeRowTimestamps(row.brief),
+              profile: normalizeRowTimestamps(row.profile)
+            };
       }
     },
     postMedia: {

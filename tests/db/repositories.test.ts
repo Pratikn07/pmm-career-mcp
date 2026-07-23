@@ -350,7 +350,8 @@ describe("PostgreSQL transaction retries", () => {
 
   it.each([
     ["post_draft_version_unique", "postDrafts"] as const,
-    ["outreach_target_purpose_version_unique", "outreachDrafts"] as const
+    ["outreach_target_purpose_version_unique", "outreachDrafts"] as const,
+    ["brand_profiles_one_active_owner_unique", "brandProfiles"] as const
   ])("retries only the named %s version conflict", async (constraintName, repositoryName) => {
     const error = Object.assign(new Error("version conflict"), {
       code: "23505",
@@ -366,12 +367,24 @@ describe("PostgreSQL transaction retries", () => {
           checksum: "checksum",
           state: "draft"
         })
-      : repositories.outreachDrafts.createVersion({
-          targetId: randomUUID(),
-          purpose: "connection_note",
-          text: "Retry me",
-          evidenceIds: []
-        });
+      : repositoryName === "outreachDrafts"
+        ? repositories.outreachDrafts.createVersion({
+            targetId: randomUUID(),
+            purpose: "connection_note",
+            text: "Retry me",
+            evidenceIds: []
+          })
+        : repositories.brandProfiles.ensureDefault({
+            id: randomUUID(),
+            ownerSubject: randomUUID(),
+            publicName: "Bhagyashree Nandoskar",
+            roleLine: "Product Marketing",
+            seriesName: "PMM FIELD NOTES",
+            monogram: "BN",
+            voiceJson: {},
+            paletteJson: {},
+            hookRulesJson: {}
+          });
     await expect(operation).rejects.toBe(error);
 
     expect(transaction).toHaveBeenCalledTimes(3);
@@ -393,6 +406,161 @@ describe("PostgreSQL transaction retries", () => {
     })).rejects.toBe(error);
 
     expect(transaction).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not retry a different Brand Studio unique violation", async () => {
+    const error = Object.assign(new Error("different brand profile conflict"), {
+      code: "23505",
+      constraint_name: "brand_profiles_owner_version_unique"
+    });
+    const { repositories, transaction } = databaseThatRejectsTransactions(error);
+
+    await expect(repositories.brandProfiles.ensureDefault({
+      id: randomUUID(),
+      ownerSubject: randomUUID(),
+      publicName: "Bhagyashree Nandoskar",
+      roleLine: "Product Marketing",
+      seriesName: "PMM FIELD NOTES",
+      monogram: "BN",
+      voiceJson: {},
+      paletteJson: {},
+      hookRulesJson: {}
+    })).rejects.toBe(error);
+
+    expect(transaction).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("Brand Studio repositories", () => {
+  it("keeps the active profile and visual briefs scoped to their owner", async () => {
+    const owner = randomUUID();
+    const profile = await db.brandProfiles.ensureDefault({
+      ownerSubject: owner,
+      id: randomUUID(),
+      publicName: "Bhagyashree Nandoskar",
+      roleLine: "Product Marketing",
+      seriesName: "PMM FIELD NOTES",
+      monogram: "BN",
+      voiceJson: { persona: "curious PMM practitioner" },
+      paletteJson: { ivory: "#F6F1E8" },
+      hookRulesJson: { minWords: 2, maxWords: 8 }
+    });
+    const existing = await db.brandProfiles.ensureDefault({
+      ownerSubject: owner,
+      id: randomUUID(),
+      publicName: "Different name",
+      roleLine: "Different role",
+      seriesName: "Different series",
+      monogram: "DN",
+      voiceJson: {},
+      paletteJson: {},
+      hookRulesJson: {}
+    });
+    const post = await addPost();
+    const createBrief = async (coverHook: string) => db.brandVisualBriefs.create({
+      id: randomUUID(),
+      ownerSubject: owner,
+      postDraftId: post.id,
+      postVersion: post.version,
+      brandProfileId: profile.id,
+      brandProfileVersion: profile.version,
+      templateId: "editorial-statement-v1",
+      templateVersion: 1,
+      promptFormatVersion: 1,
+      visualMode: "EDITORIAL_STATEMENT",
+      coverHook,
+      conceptSummary: "A concise visual concept",
+      topicLabel: "Product marketing",
+      generationPrompt: "A text-free editorial illustration",
+      negativeConstraintsJson: ["no text"],
+      state: "ready"
+    });
+    const first = await createBrief("Start with the audience");
+    const second = await createBrief("Then sharpen the message");
+    await queryTestDatabase(db, `
+      update career_mcp.brand_visual_briefs
+      set created_at = '2026-07-22T10:00:00.000Z'
+      where id = '${first.id}'
+    `);
+    await queryTestDatabase(db, `
+      update career_mcp.brand_visual_briefs
+      set created_at = '2026-07-22T10:01:00.000Z'
+      where id = '${second.id}'
+    `);
+
+    expect(profile.version).toBe(1);
+    expect(existing).toEqual(profile);
+    expect((await db.brandProfiles.getActive(owner))?.id).toBe(profile.id);
+    expect(await db.brandProfiles.getActive(randomUUID())).toBeUndefined();
+    expect(await db.brandProfiles.getActive("not-a-uuid")).toBeUndefined();
+    expect(await db.brandVisualBriefs.getOwned(first.id, owner)).toMatchObject({ id: first.id });
+    expect(await db.brandVisualBriefs.getOwned(first.id, randomUUID())).toBeUndefined();
+    expect(await db.brandVisualBriefs.getOwned("not-a-uuid", owner)).toBeUndefined();
+    expect((await db.brandVisualBriefs.listRecent(owner, 10)).map(({ id }) => id)).toEqual([
+      second.id,
+      first.id
+    ]);
+    expect((await db.brandVisualBriefs.listRecent(owner, 0)).map(({ id }) => id)).toEqual([
+      second.id
+    ]);
+    expect((await db.brandVisualBriefs.listRecent(owner, 100)).map(({ id }) => id)).toEqual([
+      second.id,
+      first.id
+    ]);
+    expect(await db.brandVisualBriefs.listRecent("not-a-uuid", 10)).toEqual([]);
+  });
+
+  it("returns render provenance only for the owning subject", async () => {
+    const owner = randomUUID();
+    const profile = await db.brandProfiles.ensureDefault({
+      ownerSubject: owner,
+      id: randomUUID(),
+      publicName: "Bhagyashree Nandoskar",
+      roleLine: "Product Marketing",
+      seriesName: "PMM FIELD NOTES",
+      monogram: "BN",
+      voiceJson: { persona: "curious PMM practitioner" },
+      paletteJson: { ivory: "#F6F1E8" },
+      hookRulesJson: { minWords: 2, maxWords: 8 }
+    });
+    const post = await addPost();
+    const brief = await db.brandVisualBriefs.create({
+      id: randomUUID(),
+      ownerSubject: owner,
+      postDraftId: post.id,
+      postVersion: post.version,
+      brandProfileId: profile.id,
+      brandProfileVersion: profile.version,
+      templateId: "editorial-statement-v1",
+      templateVersion: 1,
+      promptFormatVersion: 1,
+      visualMode: "EDITORIAL_STATEMENT",
+      coverHook: "Start with the audience",
+      conceptSummary: "A concise visual concept",
+      generationPrompt: "A text-free editorial illustration",
+      negativeConstraintsJson: ["no text"],
+      state: "ready"
+    });
+    const renderedMedia = await addMedia({ ownerSubject: owner });
+    const renderId = randomUUID();
+    await queryTestDatabase(db, `
+      insert into career_mcp.brand_visual_renders (
+        id, owner_subject, brief_id, version, rendered_media_id, alt_text,
+        render_checksum, renderer_version, created_at
+      ) values (
+        '${renderId}', '${owner}', '${brief.id}', 1, '${renderedMedia.id}', 'Editorial cover',
+        '${"a".repeat(64)}', 1, '2026-07-22T10:00:00.000Z'
+      )
+    `);
+
+    expect(await db.brandVisualRenders.getByRenderedMedia(owner, renderedMedia.id)).toMatchObject({
+      id: renderId,
+      brief: { id: brief.id },
+      profile: { id: profile.id }
+    });
+    expect(await db.brandVisualRenders.getByRenderedMedia(randomUUID(), renderedMedia.id)).toBeUndefined();
+    expect(await db.brandVisualRenders.getByRenderedMedia("not-a-uuid", renderedMedia.id)).toBeUndefined();
+    expect(await db.brandVisualRenders.getByRenderedMedia(owner, "not-a-uuid")).toBeUndefined();
   });
 });
 
