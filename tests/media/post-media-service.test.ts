@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CareerDatabase } from "../../src/db/client.js";
 import { DomainError } from "../../src/domain/errors.js";
@@ -32,7 +32,7 @@ function inspectionFor(file: OpenAiFileRef, bytes: Uint8Array): ImageInspection 
     height: 80 + index,
     frameCount: 1,
     byteSize: bytes.byteLength,
-    sha256: (index + 1).toString(16).repeat(64)
+    sha256: createHash("sha256").update(bytes).digest("hex")
   };
 }
 
@@ -192,8 +192,9 @@ describe("post media service", () => {
     expect(upload).toHaveBeenCalledTimes(count);
     for (let index = 0; index < count; index += 1) {
       expect(bytesById.get(files[index]!.file_id)).toEqual(originals[index]);
+      const shard = inspectionFor(files[index]!, originals[index]!).sha256.slice(0, 2);
       expect(upload.mock.calls[index]?.[0]).toMatch(
-        new RegExp(`^${subject}/${index + 1}${index + 1}/[0-9a-f-]{36}\\.(png|jpg)$`)
+        new RegExp(`^${subject}/${shard}/[0-9a-f-]{36}\\.(png|jpg)$`)
       );
       expect(Buffer.from(upload.mock.calls[index]?.[1] ?? []).equals(originals[index]!)).toBe(true);
     }
@@ -325,7 +326,10 @@ describe("post media service", () => {
     }), "CONFLICT");
 
     expect((await db.postDrafts.listVersions(first.draftId)).map(({ version }) => version)).toEqual([1, 2]);
-    expect(await db.postMedia.getByOwnerAndSha(subject, "1".repeat(64))).toBeUndefined();
+    expect(await db.postMedia.getByOwnerAndSha(
+      subject,
+      inspectionFor(files[0]!, bytesById.get(files[0]!.file_id)!).sha256
+    )).toBeUndefined();
     expect(remove).toHaveBeenCalledTimes(1);
   });
 
@@ -381,10 +385,15 @@ describe("post media service", () => {
     }), "MEDIA_STORAGE_ERROR");
 
     expect(remove).toHaveBeenCalledTimes(1);
+    const shard = inspectionFor(files[0]!, bytesById.get(files[0]!.file_id)!)
+      .sha256.slice(0, 2);
     expect(remove.mock.calls[0]?.[0]).toEqual([
-      expect.stringMatching(new RegExp(`^${subject}/11/[0-9a-f-]{36}\\.png$`))
+      expect.stringMatching(new RegExp(`^${subject}/${shard}/[0-9a-f-]{36}\\.png$`))
     ]);
-    expect(await db.postMedia.getByOwnerAndSha(subject, "1".repeat(64))).toBeUndefined();
+    expect(await db.postMedia.getByOwnerAndSha(
+      subject,
+      inspectionFor(files[0]!, bytesById.get(files[0]!.file_id)!).sha256
+    )).toBeUndefined();
   });
 
   it("removes newly uploaded objects best-effort when the database version write fails", async () => {
@@ -408,6 +417,9 @@ describe("post media service", () => {
     expect(remove).toHaveBeenCalledTimes(1);
     expect(remove.mock.calls[0]?.[0]).toHaveLength(1);
     expect((await db.postDrafts.listVersions(first.draftId))).toHaveLength(1);
-    expect(await db.postMedia.getByOwnerAndSha(subject, "1".repeat(64))).toBeUndefined();
+    expect(await db.postMedia.getByOwnerAndSha(
+      subject,
+      inspectionFor(files[0]!, bytesById.get(files[0]!.file_id)!).sha256
+    )).toBeUndefined();
   });
 });

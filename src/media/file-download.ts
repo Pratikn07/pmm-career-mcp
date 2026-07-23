@@ -37,7 +37,7 @@ export type DownloadOpenAiFileDependencies = Readonly<{
   httpsRequest?: typeof https.request;
 }>;
 
-const MAX_BYTES = 20 * 1024 * 1024;
+export const MAX_OPENAI_FILE_BYTES = 20 * 1024 * 1024;
 const MAX_REDIRECTS = 3;
 const TIMEOUT_MS = 10_000;
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
@@ -173,7 +173,7 @@ async function readHopBody(
 ): Promise<Uint8Array> {
   try {
     const contentLength = declaredContentLength(response);
-    if (contentLength !== undefined && contentLength > MAX_BYTES) {
+    if (contentLength !== undefined && contentLength > MAX_OPENAI_FILE_BYTES) {
       throw new Error("Response exceeds byte limit");
     }
 
@@ -189,7 +189,7 @@ async function readHopBody(
         throw new Error("Invalid response chunk");
       }
       byteLength += next.value.byteLength;
-      if (!Number.isSafeInteger(byteLength) || byteLength > MAX_BYTES) {
+      if (!Number.isSafeInteger(byteLength) || byteLength > MAX_OPENAI_FILE_BYTES) {
         throw new Error("Response exceeds byte limit");
       }
       chunks.push(next.value);

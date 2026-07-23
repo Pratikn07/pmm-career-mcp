@@ -12,8 +12,8 @@ export type ImageInspection = Readonly<{
   sha256: string;
 }>;
 
-const MAX_PIXELS = 36_152_320;
-const MAX_GIF_FRAMES = 250;
+export const MAX_LINKEDIN_IMAGE_PIXELS_EXCLUSIVE = 36_152_320;
+export const MAX_LINKEDIN_IMAGE_FRAMES = 250;
 const MIME_BY_FORMAT: Readonly<Partial<Record<string, DraftMediaMimeType>>> = {
   jpeg: "image/jpeg",
   png: "image/png",
@@ -49,12 +49,15 @@ export async function inspectLinkedInImage(
       throw new Error("Image dimensions rejected");
     }
     const decodedPixels = metadata.width * metadata.height;
-    if (!Number.isSafeInteger(decodedPixels) || decodedPixels >= MAX_PIXELS) {
+    if (
+      !Number.isSafeInteger(decodedPixels)
+      || decodedPixels >= MAX_LINKEDIN_IMAGE_PIXELS_EXCLUSIVE
+    ) {
       throw new Error("Image pixel count rejected");
     }
 
     const frameCount = metadata.pages ?? 1;
-    if (!positiveInteger(frameCount) || frameCount > MAX_GIF_FRAMES) {
+    if (!positiveInteger(frameCount) || frameCount > MAX_LINKEDIN_IMAGE_FRAMES) {
       throw new Error("Image frame count rejected");
     }
     const displayHeight = metadata.pageHeight ?? metadata.height;
