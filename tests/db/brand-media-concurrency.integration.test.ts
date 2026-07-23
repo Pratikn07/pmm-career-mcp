@@ -6,7 +6,32 @@ import { createRepositories } from "../../src/db/repositories.js";
 import { DomainError } from "../../src/domain/errors.js";
 import { schema } from "../../src/db/schema.js";
 
-const databaseUrl = process.env.TASK7_POSTGRES_TEST_DATABASE_URL;
+export function task7LocalDatabaseUrl(
+  env: Readonly<Record<string, string | undefined>>
+): string | undefined {
+  const databaseUrl = env.TASK7_POSTGRES_TEST_DATABASE_URL;
+  if (
+    databaseUrl === undefined
+    || env.TASK7_POSTGRES_TEST_ACK !== "local-docker-only"
+  ) {
+    return undefined;
+  }
+  try {
+    const parsed = new URL(databaseUrl);
+    const hostname = parsed.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+    if (
+      (parsed.protocol !== "postgres:" && parsed.protocol !== "postgresql:")
+      || !new Set(["localhost", "127.0.0.1", "::1"]).has(hostname)
+    ) {
+      return undefined;
+    }
+    return databaseUrl;
+  } catch {
+    return undefined;
+  }
+}
+
+const databaseUrl = task7LocalDatabaseUrl(process.env);
 const liveDescribe = databaseUrl === undefined ? describe.skip : describe;
 
 type Deferred = Readonly<{
@@ -21,6 +46,7 @@ type Seed = Readonly<{
   latestPostId: string;
   profileId: string;
   briefId: string;
+  baseMediaId: string;
   sourceMediaId: string;
   renderedMediaId: string;
 }>;
@@ -43,6 +69,35 @@ function postgresField(error: unknown, field: "code" | "constraint_name"): strin
   }
   return undefined;
 }
+
+describe("Task 7 PostgreSQL integration safety gate", () => {
+  const localUrl = "postgres://postgres:postgres@127.0.0.1:54322/career_mcp_test";
+
+  it("requires both the local-Docker acknowledgement and a loopback hostname", () => {
+    expect(task7LocalDatabaseUrl({
+      TASK7_POSTGRES_TEST_DATABASE_URL: localUrl
+    })).toBeUndefined();
+    expect(task7LocalDatabaseUrl({
+      TASK7_POSTGRES_TEST_DATABASE_URL: "postgres://user:secret@db.example.com:5432/production",
+      TASK7_POSTGRES_TEST_ACK: "local-docker-only"
+    })).toBeUndefined();
+    expect(task7LocalDatabaseUrl({
+      TASK7_POSTGRES_TEST_DATABASE_URL: localUrl,
+      TASK7_POSTGRES_TEST_ACK: "local-docker-only"
+    })).toBe(localUrl);
+  });
+
+  it("fails closed for malformed URLs and lookalike loopback hostnames", () => {
+    expect(task7LocalDatabaseUrl({
+      TASK7_POSTGRES_TEST_DATABASE_URL: "not a url",
+      TASK7_POSTGRES_TEST_ACK: "local-docker-only"
+    })).toBeUndefined();
+    expect(task7LocalDatabaseUrl({
+      TASK7_POSTGRES_TEST_DATABASE_URL: "postgres://user:secret@localhost.example.com/db",
+      TASK7_POSTGRES_TEST_ACK: "local-docker-only"
+    })).toBeUndefined();
+  });
+});
 
 async function createClients() {
   if (databaseUrl === undefined) {
@@ -94,6 +149,7 @@ async function seed(sql: Sql, stale = false): Promise<Seed> {
     latestPostId: stale ? randomUUID() : "",
     profileId: randomUUID(),
     briefId: randomUUID(),
+    baseMediaId: randomUUID(),
     sourceMediaId: randomUUID(),
     renderedMediaId: randomUUID()
   };
@@ -102,12 +158,18 @@ async function seed(sql: Sql, stale = false): Promise<Seed> {
   const latestChecksum = "2".repeat(64);
   const sourceChecksum = "3".repeat(64);
   const renderedChecksum = "4".repeat(64);
+  const baseChecksum = "5".repeat(64);
 
   await sql`
     insert into career_mcp.post_media (
       id, owner_subject, object_path, sha256, mime_type, byte_size,
       width, height, frame_count, original_filename, created_at
     ) values
+      (
+        ${result.baseMediaId}, ${result.owner},
+        ${`${result.owner}/55/${result.baseMediaId}.png`}, ${baseChecksum},
+        'image/png', 1024, 1200, 627, 1, 'post-source.png', now()
+      ),
       (
         ${result.sourceMediaId}, ${result.owner},
         ${`${result.owner}/33/${result.sourceMediaId}.png`}, ${sourceChecksum},
@@ -134,6 +196,22 @@ async function seed(sql: Sql, stale = false): Promise<Seed> {
       ) values (
         ${latestPostId}, ${result.draftId}, 'Task 7 newer immutable version',
         'PUBLIC', 2, ${latestChecksum}, 'draft', now(), now()
+      )
+    `;
+  }
+  await sql`
+    insert into career_mcp.post_draft_media (
+      post_draft_id, version, position, media_id, alt_text
+    ) values (
+      ${result.firstPostId}, 1, 0, ${result.baseMediaId}, 'Owned post source'
+    )
+  `;
+  if (stale) {
+    await sql`
+      insert into career_mcp.post_draft_media (
+        post_draft_id, version, position, media_id, alt_text
+      ) values (
+        ${latestPostId}, 2, 0, ${result.baseMediaId}, 'Owned latest post source'
       )
     `;
   }
@@ -175,47 +253,55 @@ async function cleanup(sql: Sql, seeded: Seed): Promise<void> {
   await sql`delete from career_mcp.post_drafts where draft_id = ${seeded.draftId}`;
   await sql`
     delete from career_mcp.post_media
-    where id in (${seeded.sourceMediaId}, ${seeded.renderedMediaId})
+    where id in (${seeded.baseMediaId}, ${seeded.sourceMediaId}, ${seeded.renderedMediaId})
   `;
 }
 
-async function waitUntilAdvisoryBlocked(sql: Sql, pid: number): Promise<void> {
+async function waitUntilBlocked(sql: Sql, pid: number): Promise<void> {
   for (let attempt = 0; attempt < 100; attempt += 1) {
     const [row] = await sql<{ waiting: boolean }[]>`
       select exists (
         select 1
         from pg_locks
         where pid = ${pid}
-          and locktype = 'advisory'
           and not granted
       ) as waiting
     `;
     if (row?.waiting === true) return;
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
-  throw new Error("Timed out waiting for the render transaction advisory-lock barrier");
+  throw new Error("Timed out waiting for the repository transaction lock barrier");
+}
+
+function expectSafeRoleConflict(error: unknown): void {
+  const code = postgresField(error, "code");
+  expect(code).not.toBe("40P01");
+  expect(["DATA_INTEGRITY", "23514", "40001"]).toContain(code);
+  if (code === "23514") {
+    expect(postgresField(error, "constraint_name"))
+      .toBe("brand_source_media_exclusive");
+  }
 }
 
 liveDescribe("Task 7 real PostgreSQL concurrency", () => {
-  it("serializes direct attachment against source registration with a two-session barrier", async () => {
+  it("lets a direct READ COMMITTED attachment beat SERIALIZABLE commitAndAttach safely", async () => {
     const clients = await createClients();
     let seeded: Seed | undefined;
     let pendingAttachment: Promise<unknown> | undefined;
     let pendingRender: Promise<unknown> | undefined;
     const attachmentInserted = deferred();
     const releaseAttachment = deferred();
-    const renderStarted = deferred();
-    let renderPid = 0;
     try {
       await assertMigrationApplied(clients.observer);
       seeded = await seed(clients.observer);
       const current = seeded;
       const attachment = clients.attach.begin(async (transaction) => {
+        await transaction`set transaction isolation level read committed`;
         await transaction`
           insert into career_mcp.post_draft_media (
             post_draft_id, version, position, media_id, alt_text
           ) values (
-            ${current.firstPostId}, 1, 0, ${current.sourceMediaId}, 'Race source'
+            ${current.firstPostId}, 1, 1, ${current.sourceMediaId}, 'Race source'
           )
         `;
         attachmentInserted.resolve();
@@ -224,26 +310,24 @@ liveDescribe("Task 7 real PostgreSQL concurrency", () => {
       pendingAttachment = attachment;
       await attachmentInserted.promise;
 
-      const render = clients.render.begin(async (transaction) => {
-        const [backend] = await transaction<{ pid: number }[]>`
-          select pg_backend_pid()::int as pid
-        `;
-        renderPid = backend!.pid;
-        renderStarted.resolve();
-        await transaction`
-          insert into career_mcp.brand_visual_renders (
-            id, owner_subject, brief_id, version, source_media_id, rendered_media_id,
-            alt_text, render_checksum, renderer_version, created_at
-          ) values (
-            ${randomUUID()}, ${current.owner}, ${current.briefId}, 1,
-            ${current.sourceMediaId}, ${current.renderedMediaId}, 'Race render',
-            ${"4".repeat(64)}, 1, now()
-          )
-        `;
+      const [backend] = await clients.render<{ pid: number }[]>`
+        select pg_backend_pid()::int as pid
+      `;
+      const repositories = createRepositories(drizzle(clients.render, { schema }));
+      const render = repositories.brandVisualRenders.commitAndAttach({
+        ownerSubject: current.owner,
+        briefId: current.briefId,
+        expectedDraftId: current.draftId,
+        expectedVersion: 1,
+        sourceMediaId: current.sourceMediaId,
+        renderedMediaId: current.renderedMediaId,
+        altText: "Mixed-isolation render",
+        renderChecksum: "4".repeat(64),
+        rendererVersion: 1,
+        checksum: () => "6".repeat(64)
       });
       pendingRender = render;
-      await renderStarted.promise;
-      await waitUntilAdvisoryBlocked(clients.observer, renderPid);
+      await waitUntilBlocked(clients.observer, backend!.pid);
       releaseAttachment.resolve();
       await attachment;
       const renderError = await render.then(
@@ -251,10 +335,12 @@ liveDescribe("Task 7 real PostgreSQL concurrency", () => {
         (error: unknown) => error
       );
 
-      expect(postgresField(renderError, "code")).toBe("23514");
-      expect(postgresField(renderError, "constraint_name"))
-        .toBe("brand_source_media_exclusive");
-      const [counts] = await clients.observer<{ attachments: number; renders: number }[]>`
+      expectSafeRoleConflict(renderError);
+      const [counts] = await clients.observer<{
+        attachments: number;
+        renders: number;
+        claimPurpose: string;
+      }[]>`
         select
           (
             select count(*)::int
@@ -265,14 +351,116 @@ liveDescribe("Task 7 real PostgreSQL concurrency", () => {
             select count(*)::int
             from career_mcp.brand_visual_renders
             where source_media_id = ${current.sourceMediaId}
-          ) as renders
+          ) as renders,
+          (
+            select purpose
+            from career_mcp.media_usage_claims
+            where media_id = ${current.sourceMediaId}
+          ) as "claimPurpose"
       `;
-      expect(counts).toEqual({ attachments: 1, renders: 0 });
+      expect(counts).toEqual({
+        attachments: 1,
+        renders: 0,
+        claimPurpose: "attached"
+      });
     } finally {
       releaseAttachment.resolve();
       await Promise.allSettled([
         ...(pendingAttachment === undefined ? [] : [pendingAttachment]),
         ...(pendingRender === undefined ? [] : [pendingRender])
+      ]);
+      if (seeded !== undefined) await cleanup(clients.observer, seeded);
+      await closeClients(clients);
+    }
+  });
+
+  it("lets a direct READ COMMITTED source claim beat SERIALIZABLE createVersionWithMedia safely", async () => {
+    const clients = await createClients();
+    let seeded: Seed | undefined;
+    let pendingSource: Promise<unknown> | undefined;
+    let pendingAttachment: Promise<unknown> | undefined;
+    const sourceInserted = deferred();
+    const releaseSource = deferred();
+    try {
+      await assertMigrationApplied(clients.observer);
+      seeded = await seed(clients.observer);
+      const current = seeded;
+      const source = clients.attach.begin(async (transaction) => {
+        await transaction`set transaction isolation level read committed`;
+        await transaction`
+          insert into career_mcp.brand_visual_renders (
+            id, owner_subject, brief_id, version, source_media_id, rendered_media_id,
+            alt_text, render_checksum, renderer_version, created_at
+          ) values (
+            ${randomUUID()}, ${current.owner}, ${current.briefId}, 1,
+            ${current.sourceMediaId}, ${current.renderedMediaId}, 'Race source',
+            ${"4".repeat(64)}, 1, now()
+          )
+        `;
+        sourceInserted.resolve();
+        await releaseSource.promise;
+      });
+      pendingSource = source;
+      await sourceInserted.promise;
+
+      const [backend] = await clients.render<{ pid: number }[]>`
+        select pg_backend_pid()::int as pid
+      `;
+      const repositories = createRepositories(drizzle(clients.render, { schema }));
+      const attachment = repositories.postDrafts.createVersionWithMedia({
+        draftId: current.draftId,
+        ownerSubject: current.owner,
+        text: "Mixed-isolation attachment",
+        visibility: "PUBLIC",
+        checksum: "mixed-isolation-attachment",
+        state: "draft",
+        media: [{
+          mediaId: current.sourceMediaId,
+          altText: "Must remain a brand source"
+        }]
+      });
+      pendingAttachment = attachment;
+      await waitUntilBlocked(clients.observer, backend!.pid);
+      releaseSource.resolve();
+      await source;
+      const attachmentError = await attachment.then(
+        () => undefined,
+        (error: unknown) => error
+      );
+
+      expectSafeRoleConflict(attachmentError);
+      const [counts] = await clients.observer<{
+        attachments: number;
+        renders: number;
+        claimPurpose: string;
+      }[]>`
+        select
+          (
+            select count(*)::int
+            from career_mcp.post_draft_media
+            where media_id = ${current.sourceMediaId}
+          ) as attachments,
+          (
+            select count(*)::int
+            from career_mcp.brand_visual_renders
+            where source_media_id = ${current.sourceMediaId}
+          ) as renders,
+          (
+            select purpose
+            from career_mcp.media_usage_claims
+            where media_id = ${current.sourceMediaId}
+          ) as "claimPurpose"
+      `;
+      expect(counts).toEqual({
+        attachments: 0,
+        renders: 1,
+        claimPurpose: "brand_source"
+      });
+    } finally {
+      releaseSource.resolve();
+      await Promise.allSettled([
+        ...(pendingSource === undefined ? [] : [pendingSource]),
+        ...(pendingAttachment === undefined ? [] : [pendingAttachment])
       ]);
       if (seeded !== undefined) await cleanup(clients.observer, seeded);
       await closeClients(clients);

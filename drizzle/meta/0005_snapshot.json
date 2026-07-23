@@ -1,5 +1,5 @@
 {
-  "id": "d3ceb58f-09ad-4f79-834a-a2f468a71c9e",
+  "id": "841e3b55-f23f-4505-ae80-705db5c7d6b0",
   "prevId": "3da76028-75bf-4c7a-8040-18062ed7c995",
   "version": "7",
   "dialect": "postgresql",
@@ -93,10 +93,10 @@
             }
           ],
           "isUnique": true,
-          "with": {},
-          "method": "btree",
           "where": "\"career_mcp\".\"brand_profiles\".\"state\" = 'active'",
-          "concurrently": false
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {},
@@ -104,19 +104,19 @@
       "uniqueConstraints": {
         "brand_profiles_row_version_unique": {
           "name": "brand_profiles_row_version_unique",
+          "nullsNotDistinct": false,
           "columns": [
             "id",
             "version"
-          ],
-          "nullsNotDistinct": false
+          ]
         },
         "brand_profiles_owner_version_unique": {
           "name": "brand_profiles_owner_version_unique",
+          "nullsNotDistinct": false,
           "columns": [
             "owner_subject",
             "version"
-          ],
-          "nullsNotDistinct": false
+          ]
         }
       },
       "policies": {},
@@ -257,9 +257,9 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "brand_visual_briefs_profile_version_idx": {
           "name": "brand_visual_briefs_profile_version_idx",
@@ -278,9 +278,9 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "brand_visual_briefs_owner_created_idx": {
           "name": "brand_visual_briefs_owner_created_idx",
@@ -299,43 +299,43 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {
         "brand_visual_briefs_post_version_fk": {
           "name": "brand_visual_briefs_post_version_fk",
           "tableFrom": "brand_visual_briefs",
+          "tableTo": "post_drafts",
+          "schemaTo": "career_mcp",
           "columnsFrom": [
             "post_draft_id",
             "post_version"
           ],
-          "tableTo": "post_drafts",
-          "schemaTo": "career_mcp",
           "columnsTo": [
             "id",
             "version"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "brand_visual_briefs_profile_version_fk": {
           "name": "brand_visual_briefs_profile_version_fk",
           "tableFrom": "brand_visual_briefs",
+          "tableTo": "brand_profiles",
+          "schemaTo": "career_mcp",
           "columnsFrom": [
             "brand_profile_id",
             "brand_profile_version"
           ],
-          "tableTo": "brand_profiles",
-          "schemaTo": "career_mcp",
           "columnsTo": [
             "id",
             "version"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -430,9 +430,9 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "brand_visual_renders_source_media_id_idx": {
           "name": "brand_visual_renders_source_media_id_idx",
@@ -445,9 +445,9 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "brand_visual_renders_rendered_media_id_idx": {
           "name": "brand_visual_renders_rendered_media_id_idx",
@@ -460,64 +460,64 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {
         "brand_visual_renders_brief_id_brand_visual_briefs_id_fk": {
           "name": "brand_visual_renders_brief_id_brand_visual_briefs_id_fk",
           "tableFrom": "brand_visual_renders",
+          "tableTo": "brand_visual_briefs",
+          "schemaTo": "career_mcp",
           "columnsFrom": [
             "brief_id"
           ],
-          "tableTo": "brand_visual_briefs",
-          "schemaTo": "career_mcp",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "brand_visual_renders_source_media_id_post_media_id_fk": {
           "name": "brand_visual_renders_source_media_id_post_media_id_fk",
           "tableFrom": "brand_visual_renders",
+          "tableTo": "post_media",
+          "schemaTo": "career_mcp",
           "columnsFrom": [
             "source_media_id"
           ],
-          "tableTo": "post_media",
-          "schemaTo": "career_mcp",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "brand_visual_renders_rendered_media_id_post_media_id_fk": {
           "name": "brand_visual_renders_rendered_media_id_post_media_id_fk",
           "tableFrom": "brand_visual_renders",
+          "tableTo": "post_media",
+          "schemaTo": "career_mcp",
           "columnsFrom": [
             "rendered_media_id"
           ],
-          "tableTo": "post_media",
-          "schemaTo": "career_mcp",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {
         "brand_visual_renders_brief_version_unique": {
           "name": "brand_visual_renders_brief_version_unique",
+          "nullsNotDistinct": false,
           "columns": [
             "brief_id",
             "version"
-          ],
-          "nullsNotDistinct": false
+          ]
         }
       },
       "policies": {},
@@ -630,10 +630,10 @@
       "uniqueConstraints": {
         "companies_yc_id_unique": {
           "name": "companies_yc_id_unique",
+          "nullsNotDistinct": false,
           "columns": [
             "yc_id"
-          ],
-          "nullsNotDistinct": false
+          ]
         }
       },
       "policies": {},
@@ -711,25 +711,25 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {
         "evidence_person_id_people_id_fk": {
           "name": "evidence_person_id_people_id_fk",
           "tableFrom": "evidence",
+          "tableTo": "people",
+          "schemaTo": "career_mcp",
           "columnsFrom": [
             "person_id"
           ],
-          "tableTo": "people",
-          "schemaTo": "career_mcp",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -739,6 +739,86 @@
         "evidence_confidence_range_check": {
           "name": "evidence_confidence_range_check",
           "value": "\"career_mcp\".\"evidence\".\"confidence\" >= 0 and \"career_mcp\".\"evidence\".\"confidence\" <= 1"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "career_mcp.media_usage_claims": {
+      "name": "media_usage_claims",
+      "schema": "career_mcp",
+      "columns": {
+        "media_id": {
+          "name": "media_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "owner_subject": {
+          "name": "owner_subject",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "purpose": {
+          "name": "purpose",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {
+        "media_usage_claims_owner_subject_idx": {
+          "name": "media_usage_claims_owner_subject_idx",
+          "columns": [
+            {
+              "expression": "owner_subject",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "media_usage_claims_media_id_fk": {
+          "name": "media_usage_claims_media_id_fk",
+          "tableFrom": "media_usage_claims",
+          "tableTo": "post_media",
+          "schemaTo": "career_mcp",
+          "columnsFrom": [
+            "media_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "media_usage_claims_pkey": {
+          "name": "media_usage_claims_pkey",
+          "columns": [
+            "media_id"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "media_usage_claims_purpose_check": {
+          "name": "media_usage_claims_purpose_check",
+          "value": "\"career_mcp\".\"media_usage_claims\".\"purpose\" in ('attached','brand_source')"
         }
       },
       "isRLSEnabled": false
@@ -796,10 +876,10 @@
       "uniqueConstraints": {
         "oauth_tokens_provider_unique": {
           "name": "oauth_tokens_provider_unique",
+          "nullsNotDistinct": false,
           "columns": [
             "provider"
-          ],
-          "nullsNotDistinct": false
+          ]
         }
       },
       "policies": {},
@@ -883,25 +963,25 @@
             }
           ],
           "isUnique": true,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {
         "outreach_drafts_target_id_targets_id_fk": {
           "name": "outreach_drafts_target_id_targets_id_fk",
           "tableFrom": "outreach_drafts",
+          "tableTo": "targets",
+          "schemaTo": "career_mcp",
           "columnsFrom": [
             "target_id"
           ],
-          "tableTo": "targets",
-          "schemaTo": "career_mcp",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -992,25 +1072,25 @@
             }
           ],
           "isUnique": true,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {
         "people_company_id_companies_id_fk": {
           "name": "people_company_id_companies_id_fk",
           "tableFrom": "people",
+          "tableTo": "companies",
+          "schemaTo": "career_mcp",
           "columnsFrom": [
             "company_id"
           ],
-          "tableTo": "companies",
-          "schemaTo": "career_mcp",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -1066,41 +1146,41 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {
         "post_draft_media_exact_version_fk": {
           "name": "post_draft_media_exact_version_fk",
           "tableFrom": "post_draft_media",
+          "tableTo": "post_drafts",
+          "schemaTo": "career_mcp",
           "columnsFrom": [
             "post_draft_id",
             "version"
           ],
-          "tableTo": "post_drafts",
-          "schemaTo": "career_mcp",
           "columnsTo": [
             "id",
             "version"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "post_draft_media_media_id_fk": {
           "name": "post_draft_media_media_id_fk",
           "tableFrom": "post_draft_media",
+          "tableTo": "post_media",
+          "schemaTo": "career_mcp",
           "columnsFrom": [
             "media_id"
           ],
-          "tableTo": "post_media",
-          "schemaTo": "career_mcp",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {
@@ -1116,12 +1196,12 @@
       "uniqueConstraints": {
         "post_draft_media_version_media_unique": {
           "name": "post_draft_media_version_media_unique",
+          "nullsNotDistinct": false,
           "columns": [
             "post_draft_id",
             "version",
             "media_id"
-          ],
-          "nullsNotDistinct": false
+          ]
         }
       },
       "policies": {},
@@ -1202,19 +1282,19 @@
       "uniqueConstraints": {
         "post_draft_version_unique": {
           "name": "post_draft_version_unique",
+          "nullsNotDistinct": false,
           "columns": [
             "draft_id",
             "version"
-          ],
-          "nullsNotDistinct": false
+          ]
         },
         "post_draft_row_version_unique": {
           "name": "post_draft_row_version_unique",
+          "nullsNotDistinct": false,
           "columns": [
             "id",
             "version"
-          ],
-          "nullsNotDistinct": false
+          ]
         }
       },
       "policies": {},
@@ -1324,9 +1404,9 @@
             }
           ],
           "isUnique": true,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "post_media_object_path_unique": {
           "name": "post_media_object_path_unique",
@@ -1339,9 +1419,9 @@
             }
           ],
           "isUnique": true,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {},
@@ -1437,37 +1517,37 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {
         "post_previews_exact_version_fk": {
           "name": "post_previews_exact_version_fk",
           "tableFrom": "post_previews",
+          "tableTo": "post_drafts",
+          "schemaTo": "career_mcp",
           "columnsFrom": [
             "post_draft_id",
             "version"
           ],
-          "tableTo": "post_drafts",
-          "schemaTo": "career_mcp",
           "columnsTo": [
             "id",
             "version"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {
         "post_previews_token_hash_unique": {
           "name": "post_previews_token_hash_unique",
+          "nullsNotDistinct": false,
           "columns": [
             "token_hash"
-          ],
-          "nullsNotDistinct": false
+          ]
         }
       },
       "policies": {},
@@ -1528,9 +1608,9 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "publish_attempt_media_media_id_idx": {
           "name": "publish_attempt_media_media_id_idx",
@@ -1543,50 +1623,50 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {
         "publish_attempt_media_publish_attempt_id_fk": {
           "name": "publish_attempt_media_publish_attempt_id_fk",
           "tableFrom": "publish_attempt_media",
+          "tableTo": "publish_attempts",
+          "schemaTo": "career_mcp",
           "columnsFrom": [
             "publish_attempt_id"
           ],
-          "tableTo": "publish_attempts",
-          "schemaTo": "career_mcp",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "publish_attempt_media_media_id_fk": {
           "name": "publish_attempt_media_media_id_fk",
           "tableFrom": "publish_attempt_media",
+          "tableTo": "post_media",
+          "schemaTo": "career_mcp",
           "columnsFrom": [
             "media_id"
           ],
-          "tableTo": "post_media",
-          "schemaTo": "career_mcp",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {
         "publish_attempt_media_position_unique": {
           "name": "publish_attempt_media_position_unique",
+          "nullsNotDistinct": false,
           "columns": [
             "publish_attempt_id",
             "position"
-          ],
-          "nullsNotDistinct": false
+          ]
         }
       },
       "policies": {},
@@ -1683,27 +1763,27 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {
         "publish_attempts_exact_version_fk": {
           "name": "publish_attempts_exact_version_fk",
           "tableFrom": "publish_attempts",
+          "tableTo": "post_drafts",
+          "schemaTo": "career_mcp",
           "columnsFrom": [
             "post_draft_id",
             "version"
           ],
-          "tableTo": "post_drafts",
-          "schemaTo": "career_mcp",
           "columnsTo": [
             "id",
             "version"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -1760,10 +1840,10 @@
       "uniqueConstraints": {
         "settings_key_unique": {
           "name": "settings_key_unique",
+          "nullsNotDistinct": false,
           "columns": [
             "key"
-          ],
-          "nullsNotDistinct": false
+          ]
         }
       },
       "policies": {},
@@ -1823,9 +1903,9 @@
             }
           ],
           "isUnique": true,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "shortlist_position_unique": {
           "name": "shortlist_position_unique",
@@ -1844,9 +1924,9 @@
             }
           ],
           "isUnique": true,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "shortlist_entries_target_id_idx": {
           "name": "shortlist_entries_target_id_idx",
@@ -1859,39 +1939,39 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {
         "shortlist_entries_shortlist_id_shortlists_id_fk": {
           "name": "shortlist_entries_shortlist_id_shortlists_id_fk",
           "tableFrom": "shortlist_entries",
+          "tableTo": "shortlists",
+          "schemaTo": "career_mcp",
           "columnsFrom": [
             "shortlist_id"
           ],
-          "tableTo": "shortlists",
-          "schemaTo": "career_mcp",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "shortlist_entries_target_id_targets_id_fk": {
           "name": "shortlist_entries_target_id_targets_id_fk",
           "tableFrom": "shortlist_entries",
+          "tableTo": "targets",
+          "schemaTo": "career_mcp",
           "columnsFrom": [
             "target_id"
           ],
-          "tableTo": "targets",
-          "schemaTo": "career_mcp",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -1983,25 +2063,25 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {
         "target_notes_target_id_targets_id_fk": {
           "name": "target_notes_target_id_targets_id_fk",
           "tableFrom": "target_notes",
+          "tableTo": "targets",
+          "schemaTo": "career_mcp",
           "columnsFrom": [
             "target_id"
           ],
-          "tableTo": "targets",
-          "schemaTo": "career_mcp",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -2086,26 +2166,26 @@
         "targets_person_id_people_id_fk": {
           "name": "targets_person_id_people_id_fk",
           "tableFrom": "targets",
+          "tableTo": "people",
+          "schemaTo": "career_mcp",
           "columnsFrom": [
             "person_id"
           ],
-          "tableTo": "people",
-          "schemaTo": "career_mcp",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {
         "targets_person_id_unique": {
           "name": "targets_person_id_unique",
+          "nullsNotDistinct": false,
           "columns": [
             "person_id"
-          ],
-          "nullsNotDistinct": false
+          ]
         }
       },
       "policies": {},
@@ -2142,10 +2222,10 @@
   "schemas": {
     "career_mcp": "career_mcp"
   },
-  "views": {},
   "sequences": {},
   "roles": {},
   "policies": {},
+  "views": {},
   "_meta": {
     "columns": {},
     "schemas": {},

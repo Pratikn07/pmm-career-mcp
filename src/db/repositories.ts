@@ -8,6 +8,7 @@ import {
   brandVisualRenders,
   companies,
   evidence,
+  mediaUsageClaims,
   oauthTokens,
   outreachDrafts,
   people,
@@ -497,20 +498,6 @@ function brandRenderIntegrityError(): DomainError {
   });
 }
 
-async function lockBrandSourceMediaExclusivity(
-  transaction: Database,
-  mediaIds: readonly string[]
-): Promise<void> {
-  const sortedMediaIds = [...new Set(mediaIds.map((id) => id.toLowerCase()))].sort();
-  for (const mediaId of sortedMediaIds) {
-    await transaction.execute(sql`
-      select pg_catalog.pg_advisory_xact_lock(
-        pg_catalog.hashtextextended(${mediaId}::text, 719291484472341011)
-      )
-    `);
-  }
-}
-
 async function rejectBrandSourceMediaAttachments(
   transaction: Database,
   mediaIds: readonly string[]
@@ -518,13 +505,61 @@ async function rejectBrandSourceMediaAttachments(
   if (mediaIds.length === 0) {
     return;
   }
+  const [reservedClaim] = await transaction.select({
+    purpose: mediaUsageClaims.purpose
+  }).from(mediaUsageClaims).where(and(
+    inArray(mediaUsageClaims.mediaId, [...mediaIds]),
+    eq(mediaUsageClaims.purpose, "brand_source")
+  )).limit(1);
   const reserved = await transaction.select({
     sourceMediaId: brandVisualRenders.sourceMediaId
   }).from(brandVisualRenders).where(
     inArray(brandVisualRenders.sourceMediaId, [...mediaIds])
   ).limit(1);
-  if (reserved.length > 0) {
+  if (reservedClaim !== undefined || reserved.length > 0) {
     throw brandRenderIntegrityError();
+  }
+}
+
+async function validateOwnedBrandPostMedia(
+  transaction: Database,
+  input: Readonly<{
+    postDraftId: string;
+    version: number;
+    ownerSubject: string;
+  }>
+): Promise<void> {
+  const draftMedia = await transaction.select({
+    mediaId: postDraftMedia.mediaId
+  }).from(postDraftMedia).where(and(
+    eq(postDraftMedia.postDraftId, input.postDraftId),
+    eq(postDraftMedia.version, input.version)
+  )).orderBy(asc(postDraftMedia.position));
+  if (draftMedia.length === 0) {
+    throw brandBriefSourceNotFound();
+  }
+
+  const mediaIds = draftMedia.map(({ mediaId }) => mediaId.toLowerCase()).sort();
+  if (new Set(mediaIds).size !== mediaIds.length) {
+    throw brandBriefSourceNotFound();
+  }
+  const media = await transaction.select({
+    id: postMedia.id,
+    ownerSubject: postMedia.ownerSubject,
+    objectPath: postMedia.objectPath,
+    sha256: postMedia.sha256
+  }).from(postMedia).where(
+    inArray(postMedia.id, mediaIds)
+  ).orderBy(asc(postMedia.id));
+  if (
+    media.length !== mediaIds.length
+    || media.some((row) => (
+      row.ownerSubject.toLowerCase() !== input.ownerSubject.toLowerCase()
+      || !row.objectPath.startsWith(`${input.ownerSubject.toLowerCase()}/`)
+      || !SHA256_PATTERN.test(row.sha256)
+    ))
+  ) {
+    throw brandBriefSourceNotFound();
   }
 }
 
@@ -1790,11 +1825,6 @@ export function createRepositories(database: Database) {
             }
           }
 
-          await lockBrandSourceMediaExclusivity(transaction, [
-            ...(sourceMediaId === undefined ? [] : [sourceMediaId]),
-            renderedMediaId
-          ]);
-
           const [latestRow] = await transaction.select().from(postDrafts).where(
             eq(postDrafts.draftId, reference.draftId)
           ).orderBy(desc(postDrafts.version)).limit(1).for("update");
@@ -1802,6 +1832,16 @@ export function createRepositories(database: Database) {
             throw postNotFound();
           }
           const latest = normalizeRowTimestamps(latestRow);
+          await validateOwnedBrandPostMedia(transaction, {
+            postDraftId: reference.id,
+            version: reference.version,
+            ownerSubject
+          });
+          await validateOwnedBrandPostMedia(transaction, {
+            postDraftId: latest.id,
+            version: latest.version,
+            ownerSubject
+          });
           if (
             latest.id !== reference.id
             || latest.version !== reference.version
@@ -1881,6 +1921,15 @@ export function createRepositories(database: Database) {
               asc(postDraftMedia.position)
             );
             if (sourceAttachments.length > 0) {
+              throw integrityError();
+            }
+            const [sourceClaim] = await transaction.select({
+              purpose: mediaUsageClaims.purpose
+            }).from(mediaUsageClaims).where(and(
+              eq(mediaUsageClaims.mediaId, sourceMediaId),
+              eq(mediaUsageClaims.purpose, "attached")
+            )).limit(1);
+            if (sourceClaim !== undefined) {
               throw integrityError();
             }
           }
@@ -2173,7 +2222,6 @@ export function createRepositories(database: Database) {
         const draftId = input.draftId ?? randomUUID();
         const sortedMediaIds = [...normalizedMediaIds].sort();
         return serializableTransaction(database, async (transaction) => {
-          await lockBrandSourceMediaExclusivity(transaction, sortedMediaIds);
           const [latest] = await transaction.select().from(postDrafts).where(
             eq(postDrafts.draftId, draftId)
           ).orderBy(desc(postDrafts.version)).limit(1).for("update");

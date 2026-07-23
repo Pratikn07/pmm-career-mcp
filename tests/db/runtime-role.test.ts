@@ -18,6 +18,10 @@ async function brandSourceExclusivityMigrationSql(): Promise<string> {
   return await readFile(resolve("drizzle/0005_brand_source_media_exclusive.sql"), "utf8");
 }
 
+async function brandSourceExclusivitySnapshot(): Promise<string> {
+  return await readFile(resolve("drizzle/meta/0005_snapshot.json"), "utf8");
+}
+
 describe("Supabase runtime-role operator template", () => {
   it("allows migrations after the runtime-role template bootstraps the private schema", async () => {
     const sql = await initialMigrationSql();
@@ -84,16 +88,29 @@ describe("Supabase runtime-role operator template", () => {
 
     expect(sql).toMatch(/career_mcp[\s\S]*post_draft_media/i);
     expect(sql).toMatch(/career_mcp[\s\S]*brand_visual_renders/i);
+    expect(sql).toMatch(/create\s+table\s+"career_mcp"\."media_usage_claims"/i);
     expect(sql).toMatch(
       /lock\s+table[\s\S]*post_draft_media[\s\S]*brand_visual_renders[\s\S]*share\s+row\s+exclusive/i
     );
-    expect(sql).toMatch(/if\s+exists[\s\S]*brand_visual_renders[\s\S]*post_draft_media/i);
-    expect(sql).toMatch(/pg_advisory_xact_lock/i);
+    const attachedBackfill = sql.indexOf("  'attached',\n  pg_catalog.now()");
+    const sourceBackfill = sql.indexOf("  'brand_source',\n  pg_catalog.now()");
+    expect(attachedBackfill).toBeGreaterThan(-1);
+    expect(sourceBackfill).toBeGreaterThan(attachedBackfill);
+    expect(sql).toMatch(/on\s+conflict\s*\(\s*"media_id"\s*\)\s+do\s+update/i);
     expect(sql).toMatch(/constraint\s*=\s*'brand_source_media_exclusive'/i);
+    expect(sql).not.toMatch(/pg_advisory_xact_lock/i);
     expect(sql).not.toMatch(/security\s+definer/i);
     expect(sql).not.toMatch(/storage\s*\.\s*(?:buckets|objects)/i);
     expect(sql).not.toMatch(/\bgrant\b[\s\S]{0,100}\b(?:public|anon|authenticated)\b/i);
     expect(sql).not.toMatch(/\bservice_role\b/i);
+  });
+
+  it("records the persistent claim table in Drizzle migration metadata", async () => {
+    const snapshot = await brandSourceExclusivitySnapshot();
+
+    expect(snapshot).toMatch(/career_mcp\.media_usage_claims/i);
+    expect(snapshot).toMatch(/media_usage_claims_media_id_fk/i);
+    expect(snapshot).toMatch(/media_usage_claims_purpose_check/i);
   });
 
   it("fails closed when a reused runtime role belongs to any parent role", async () => {

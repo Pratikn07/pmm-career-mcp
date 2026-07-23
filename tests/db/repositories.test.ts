@@ -109,7 +109,7 @@ it("persists a target with evidence provenance", async () => {
 });
 
 describe("database lifecycle", () => {
-  it("migrates exactly the nineteen application tables into the private schema", async () => {
+  it("migrates exactly the twenty application tables into the private schema", async () => {
     const tables = await queryTestDatabase<{ table_name: string }>(db, `
       select table_name
       from information_schema.tables
@@ -124,6 +124,7 @@ describe("database lifecycle", () => {
       "brand_visual_renders",
       "companies",
       "evidence",
+      "media_usage_claims",
       "oauth_tokens",
       "outreach_drafts",
       "people",
@@ -1470,6 +1471,138 @@ describe("Brand Studio repositories", () => {
     `)).toEqual([{ count: 0 }]);
   });
 
+  it("validates exact and latest post-media lineage before revealing stale version details", async () => {
+    const rejection = async (
+      lineage: "foreign_exact" | "unattached_exact" | "absent_exact" | "foreign_latest"
+    ) => {
+      const owner = randomUUID();
+      const otherOwner = randomUUID();
+      const source = await readyBrandedRender(owner);
+      const finalMedia = await addMedia({
+        ownerSubject: owner,
+        sha256: "a".repeat(64),
+        width: 1080,
+        height: 1350
+      });
+      let expectedDraftId = source.post.draftId;
+
+      if (lineage === "foreign_exact") {
+        const foreignFirst = await addOwnedPost(otherOwner);
+        const foreignMedia = await db.postDraftMedia.listForVersion(
+          foreignFirst.id,
+          foreignFirst.version
+        );
+        await db.postDrafts.createVersionWithMedia({
+          draftId: foreignFirst.draftId,
+          ownerSubject: otherOwner,
+          text: "Foreign newer version",
+          visibility: "PUBLIC",
+          state: "draft",
+          checksum: "foreign-newer-version",
+          media: foreignMedia.map(({ mediaId, altText }) => ({ mediaId, altText }))
+        });
+        expectedDraftId = foreignFirst.draftId;
+        await queryTestDatabase(db, `
+          update career_mcp.brand_visual_briefs
+          set post_draft_id = '${foreignFirst.id}', post_version = 1
+          where id = '${source.brief.id}'
+        `);
+      } else if (lineage === "unattached_exact") {
+        const unattachedFirst = await db.postDrafts.createVersion({
+          text: "Unattached exact source",
+          visibility: "PUBLIC",
+          state: "draft",
+          checksum: "unattached-exact"
+        });
+        await db.postDrafts.createVersion({
+          draftId: unattachedFirst.draftId,
+          text: "Unattached latest source",
+          visibility: "PUBLIC",
+          state: "draft",
+          checksum: "unattached-latest"
+        });
+        expectedDraftId = unattachedFirst.draftId;
+        await queryTestDatabase(db, `
+          update career_mcp.brand_visual_briefs
+          set post_draft_id = '${unattachedFirst.id}', post_version = 1
+          where id = '${source.brief.id}'
+        `);
+      } else if (lineage === "absent_exact") {
+        const absentPostId = randomUUID();
+        expectedDraftId = randomUUID();
+        await queryTestDatabase(
+          db,
+          "alter table career_mcp.brand_visual_briefs disable trigger all"
+        );
+        await queryTestDatabase(db, `
+          update career_mcp.brand_visual_briefs
+          set post_draft_id = '${absentPostId}', post_version = 1
+          where id = '${source.brief.id}'
+        `);
+        await queryTestDatabase(
+          db,
+          "alter table career_mcp.brand_visual_briefs enable trigger all"
+        );
+      } else {
+        const foreignLatestMedia = await addMedia({
+          ownerSubject: otherOwner,
+          sha256: "b".repeat(64)
+        });
+        const latestPostId = randomUUID();
+        await queryTestDatabase(db, `
+          insert into career_mcp.post_drafts (
+            id, draft_id, text, visibility, version, checksum, state, created_at, updated_at
+          ) values (
+            '${latestPostId}', '${source.post.draftId}', 'Foreign latest media',
+            'PUBLIC', 2, 'foreign-latest', 'draft',
+            '2026-07-23T00:00:00.000Z', '2026-07-23T00:00:00.000Z'
+          )
+        `);
+        await queryTestDatabase(db, `
+          insert into career_mcp.post_draft_media (
+            post_draft_id, version, position, media_id, alt_text
+          ) values (
+            '${latestPostId}', 2, 0, '${foreignLatestMedia.id}', 'Foreign latest'
+          )
+        `);
+      }
+
+      const error = await db.brandVisualRenders.commitAndAttach(
+        brandedRenderInput(owner, source, finalMedia.id, {
+          expectedDraftId,
+          expectedVersion: 1
+        })
+      ).then(
+        () => undefined,
+        (reason: unknown) => reason
+      );
+      expect(error).toBeInstanceOf(DomainError);
+      const domainError = error as DomainError;
+      return {
+        code: domainError.code,
+        message: domainError.message,
+        details: domainError.details
+      };
+    };
+
+    const failures = [];
+    for (const lineage of [
+      "foreign_exact",
+      "unattached_exact",
+      "absent_exact",
+      "foreign_latest"
+    ] as const) {
+      failures.push(await rejection(lineage));
+    }
+
+    expect(new Set(failures.map((failure) => JSON.stringify(failure))).size).toBe(1);
+    expect(failures[0]).toEqual({
+      code: "NOT_FOUND",
+      message: "Brand visual brief source was not found",
+      details: { entity: "post_draft" }
+    });
+  });
+
   it.each([
     ["foreign final media", "final", "NOT_FOUND"],
     ["foreign source media", "source", "NOT_FOUND"],
@@ -1578,6 +1711,87 @@ describe("Brand Studio repositories", () => {
     });
   });
 
+  it("repository paths safely reject conservative opposite-purpose claims after role rows are removed", async () => {
+    const sourceOwner = randomUUID();
+    const source = await readyBrandedRender(sourceOwner, {
+      visualMode: "EDITORIAL_METAPHOR"
+    });
+    const formerlyAttached = await addMedia({
+      ownerSubject: sourceOwner,
+      sha256: "b".repeat(64)
+    });
+    const temporaryAttachment = await db.postDrafts.createVersionWithMedia({
+      ownerSubject: sourceOwner,
+      text: "Temporary attachment claim",
+      visibility: "PUBLIC",
+      checksum: "temporary-attachment-claim",
+      state: "draft",
+      media: [{ mediaId: formerlyAttached.id, altText: "Temporary attachment" }]
+    });
+    await queryTestDatabase(db, `
+      delete from career_mcp.post_draft_media
+      where post_draft_id = '${temporaryAttachment.post.id}'
+        and version = ${temporaryAttachment.post.version}
+    `);
+    const finalMedia = await addMedia({
+      ownerSubject: sourceOwner,
+      sha256: "a".repeat(64),
+      width: 1080,
+      height: 1350
+    });
+    await expect(db.brandVisualRenders.commitAndAttach(
+      brandedRenderInput(sourceOwner, source, finalMedia.id, {
+        sourceMediaId: formerlyAttached.id
+      })
+    )).rejects.toMatchObject({
+      code: "DATA_INTEGRITY",
+      message: "Brand render data is invalid",
+      details: { entity: "brand_visual_render" }
+    });
+
+    const attachmentOwner = randomUUID();
+    const reserved = await readyBrandedRender(attachmentOwner, {
+      visualMode: "EDITORIAL_METAPHOR"
+    });
+    const formerlySource = await addMedia({
+      ownerSubject: attachmentOwner,
+      sha256: "c".repeat(64)
+    });
+    const rendered = await addMedia({
+      ownerSubject: attachmentOwner,
+      sha256: "d".repeat(64),
+      width: 1080,
+      height: 1350
+    });
+    const renderId = randomUUID();
+    await queryTestDatabase(db, `
+      insert into career_mcp.brand_visual_renders (
+        id, owner_subject, brief_id, version, source_media_id, rendered_media_id,
+        alt_text, render_checksum, renderer_version, created_at
+      ) values (
+        '${renderId}', '${attachmentOwner}', '${reserved.brief.id}', 1,
+        '${formerlySource.id}', '${rendered.id}', 'Persistent source claim',
+        '${rendered.sha256}', 1, '2026-07-23T00:00:00.000Z'
+      )
+    `);
+    await queryTestDatabase(db, `
+      delete from career_mcp.brand_visual_renders
+      where id = '${renderId}'
+    `);
+    await expect(db.postDrafts.createVersionWithMedia({
+      ownerSubject: attachmentOwner,
+      text: "Must respect persistent source claim",
+      visibility: "PUBLIC",
+      checksum: "persistent-source-claim",
+      state: "draft",
+      media: [{ mediaId: formerlySource.id, altText: "Persistent source" }]
+    })).rejects.toMatchObject({
+      code: "DATA_INTEGRITY",
+      message: "Brand render data is invalid",
+      details: { entity: "brand_visual_render" }
+    });
+  });
+
   it("branded render rejects a final attachment already reserved as source with a safe error", async () => {
     const owner = randomUUID();
     const otherOwner = randomUUID();
@@ -1645,6 +1859,15 @@ describe("Brand Studio repositories", () => {
         '${firstRendered.sha256}', 1, '2026-07-23T00:00:00.000Z'
       )
     `);
+    expect(await queryTestDatabase(db, `
+      select media_id, owner_subject, purpose
+      from career_mcp.media_usage_claims
+      where media_id = '${reservedSource.id}'
+    `)).toEqual([{
+      media_id: reservedSource.id,
+      owner_subject: firstOwner,
+      purpose: "brand_source"
+    }]);
     const attachTarget = await db.postDrafts.createVersion({
       text: "Direct attachment target",
       visibility: "PUBLIC",
@@ -1671,6 +1894,15 @@ describe("Brand Studio repositories", () => {
       second.post.id,
       second.post.version
     );
+    expect(await queryTestDatabase(db, `
+      select media_id, owner_subject, purpose
+      from career_mcp.media_usage_claims
+      where media_id = '${attachedSource!.mediaId}'
+    `)).toEqual([{
+      media_id: attachedSource!.mediaId,
+      owner_subject: secondOwner,
+      purpose: "attached"
+    }]);
     const secondRendered = await addMedia({
       ownerSubject: secondOwner,
       sha256: "c".repeat(64),
@@ -1690,6 +1922,40 @@ describe("Brand Studio repositories", () => {
       code: "23514",
       constraint: "brand_source_media_exclusive"
     });
+  });
+
+  it("allows repeated same-purpose attachments while retaining one claim row", async () => {
+    const owner = randomUUID();
+    const media = await addMedia({ ownerSubject: owner });
+    const first = await db.postDrafts.createVersionWithMedia({
+      ownerSubject: owner,
+      text: "First same-purpose claim",
+      visibility: "PUBLIC",
+      checksum: "first-same-purpose-claim",
+      state: "draft",
+      media: [{ mediaId: media.id, altText: "Shared attachment" }]
+    });
+    await db.postDrafts.createVersionWithMedia({
+      draftId: first.post.draftId,
+      ownerSubject: owner,
+      text: "Second same-purpose claim",
+      visibility: "PUBLIC",
+      checksum: "second-same-purpose-claim",
+      state: "draft",
+      media: [{ mediaId: media.id, altText: "Shared attachment" }]
+    });
+
+    expect(await queryTestDatabase(db, `
+      select media_id, owner_subject, purpose, count(*)::int as count
+      from career_mcp.media_usage_claims
+      where media_id = '${media.id}'
+      group by media_id, owner_subject, purpose
+    `)).toEqual([{
+      media_id: media.id,
+      owner_subject: owner,
+      purpose: "attached",
+      count: 1
+    }]);
   });
 
   it("database triggers enforce source-media exclusivity on both update paths", async () => {

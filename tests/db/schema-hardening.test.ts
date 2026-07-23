@@ -1,4 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
+import { PGlite } from "@electric-sql/pglite";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   createTestDatabase,
@@ -110,6 +113,91 @@ async function expectCheckViolation(statement: string): Promise<void> {
   await expect(queryTestDatabase(db, statement)).rejects.toMatchObject({ code: "23514" });
 }
 
+async function createPreClaimDatabase(): Promise<PGlite> {
+  const client = new PGlite();
+  for (const migration of [
+    "0000_initial.sql",
+    "0001_schema_hardening.sql",
+    "0002_linkedin_media_review.sql",
+    "0003_linkedin_preview_snapshot.sql",
+    "0004_pmm_brand_studio.sql"
+  ]) {
+    await client.exec(await readFile(resolve("drizzle", migration), "utf8"));
+  }
+  return client;
+}
+
+async function seedPreClaimUsage(client: PGlite, contradiction = false): Promise<{
+  attachedMediaId: string;
+  sourceMediaId: string;
+}> {
+  const owner = randomUUID();
+  const attachedMediaId = randomUUID();
+  const sourceMediaId = contradiction ? attachedMediaId : randomUUID();
+  const renderedIds = [randomUUID(), randomUUID()];
+  const postIds = [randomUUID(), randomUUID()];
+  const draftIds = [randomUUID(), randomUUID()];
+  const profileId = randomUUID();
+  const briefIds = [randomUUID(), randomUUID()];
+  const allMedia = [...new Set([attachedMediaId, sourceMediaId, ...renderedIds])];
+  await client.exec(`
+    insert into career_mcp.post_media (
+      id, owner_subject, object_path, sha256, mime_type, byte_size,
+      width, height, frame_count, original_filename, created_at
+    ) values
+      ${allMedia.map((id, index) => `(
+        '${id}', '${owner}', '${owner}/${index}/${id}.png', '${String(index + 1).repeat(64)}',
+        'image/png', 1024, 1200, 627, 1, 'claim-${index}.png', now()
+      )`).join(",")};
+    insert into career_mcp.post_drafts (
+      id, draft_id, text, visibility, version, checksum, state, created_at, updated_at
+    ) values
+      ('${postIds[0]}', '${draftIds[0]}', 'Claim one', 'PUBLIC', 1, 'claim-one', 'draft', now(), now()),
+      ('${postIds[1]}', '${draftIds[1]}', 'Claim two', 'PUBLIC', 1, 'claim-two', 'draft', now(), now());
+    insert into career_mcp.post_draft_media (
+      post_draft_id, version, position, media_id, alt_text
+    ) values
+      ('${postIds[0]}', 1, 0, '${attachedMediaId}', 'Attached one'),
+      ('${postIds[1]}', 1, 0, '${attachedMediaId}', 'Attached two');
+    insert into career_mcp.brand_profiles (
+      id, owner_subject, version, state, public_name, role_line, series_name,
+      monogram, voice_json, palette_json, hook_rules_json, created_at
+    ) values (
+      '${profileId}', '${owner}', 1, 'active', 'Claim Test', 'PMM',
+      'CLAIM TEST', 'CT', '{}'::jsonb, '{}'::jsonb, '{}'::jsonb, now()
+    );
+    insert into career_mcp.brand_visual_briefs (
+      id, owner_subject, post_draft_id, post_version, brand_profile_id,
+      brand_profile_version, template_id, template_version, prompt_format_version,
+      visual_mode, cover_hook, concept_summary, topic_label, generation_prompt,
+      negative_constraints_json, state, created_at
+    ) values
+      (
+        '${briefIds[0]}', '${owner}', '${postIds[0]}', 1, '${profileId}', 1,
+        'editorial-metaphor-v1', 1, 1, 'EDITORIAL_METAPHOR', 'Claim one',
+        'Claim one', null, 'Claim one', '[]'::jsonb, 'ready', now()
+      ),
+      (
+        '${briefIds[1]}', '${owner}', '${postIds[1]}', 1, '${profileId}', 1,
+        'editorial-metaphor-v1', 1, 1, 'EDITORIAL_METAPHOR', 'Claim two',
+        'Claim two', null, 'Claim two', '[]'::jsonb, 'ready', now()
+      );
+    insert into career_mcp.brand_visual_renders (
+      id, owner_subject, brief_id, version, source_media_id, rendered_media_id,
+      alt_text, render_checksum, renderer_version, created_at
+    ) values
+      (
+        '${randomUUID()}', '${owner}', '${briefIds[0]}', 1, '${sourceMediaId}',
+        '${renderedIds[0]}', 'Render one', '${"3".repeat(64)}', 1, now()
+      ),
+      (
+        '${randomUUID()}', '${owner}', '${briefIds[1]}', 1, '${sourceMediaId}',
+        '${renderedIds[1]}', 'Render two', '${"4".repeat(64)}', 1, now()
+      )
+  `);
+  return { attachedMediaId, sourceMediaId };
+}
+
 describe("foreign-key indexing", () => {
   it("gives every foreign key a valid non-partial index with the complete key as its leading columns", async () => {
     const missing = await queryTestDatabase<{
@@ -215,16 +303,109 @@ describe("foreign-key indexing", () => {
 });
 
 describe("brand source-media exclusivity", () => {
+  it("backfills duplicate same-purpose rows into one durable claim each", async () => {
+    const client = await createPreClaimDatabase();
+    try {
+      const seeded = await seedPreClaimUsage(client);
+      await client.exec(
+        await readFile(resolve("drizzle/0005_brand_source_media_exclusive.sql"), "utf8")
+      );
+      const claims = await client.query<{
+        media_id: string;
+        purpose: string;
+      }>(`
+        select media_id, purpose
+        from career_mcp.media_usage_claims
+        where media_id in ('${seeded.attachedMediaId}', '${seeded.sourceMediaId}')
+        order by purpose
+      `);
+      expect(claims.rows).toEqual([
+        { media_id: seeded.attachedMediaId, purpose: "attached" },
+        { media_id: seeded.sourceMediaId, purpose: "brand_source" }
+      ]);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("aborts backfill when legacy rows assign both purposes to one media ID", async () => {
+    const client = await createPreClaimDatabase();
+    try {
+      await seedPreClaimUsage(client, true);
+      await expect(client.exec(
+        await readFile(resolve("drizzle/0005_brand_source_media_exclusive.sql"), "utf8")
+      )).rejects.toMatchObject({
+        code: "23514",
+        constraint: "brand_source_media_exclusive"
+      });
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("stores one durable private usage claim per media row", async () => {
+    const columns = await queryTestDatabase<{
+      column_name: string;
+      data_type: string;
+      is_nullable: string;
+    }>(db, `
+      select column_name, data_type, is_nullable
+      from information_schema.columns
+      where table_schema = 'career_mcp'
+        and table_name = 'media_usage_claims'
+      order by ordinal_position
+    `);
+    expect(columns).toEqual([
+      { column_name: "media_id", data_type: "uuid", is_nullable: "NO" },
+      { column_name: "owner_subject", data_type: "uuid", is_nullable: "NO" },
+      { column_name: "purpose", data_type: "text", is_nullable: "NO" },
+      {
+        column_name: "created_at",
+        data_type: "timestamp with time zone",
+        is_nullable: "NO"
+      }
+    ]);
+
+    const constraints = await queryTestDatabase<{
+      constraint_name: string;
+      definition: string;
+    }>(db, `
+      select conname as constraint_name, pg_get_constraintdef(oid) as definition
+      from pg_constraint
+      where conrelid = to_regclass('career_mcp.media_usage_claims')
+        and contype in ('p', 'f', 'c')
+      order by conname
+    `);
+    expect(constraints).toEqual([
+      {
+        constraint_name: "media_usage_claims_media_id_fk",
+        definition: expect.stringMatching(
+          /foreign key \(media_id\) references career_mcp\.post_media\(id\) on delete cascade/i
+        )
+      },
+      {
+        constraint_name: "media_usage_claims_pkey",
+        definition: "PRIMARY KEY (media_id)"
+      },
+      {
+        constraint_name: "media_usage_claims_purpose_check",
+        definition: expect.stringMatching(/purpose.*attached.*brand_source/i)
+      }
+    ]);
+  });
+
   it("registers paired insert/update triggers using non-definer functions", async () => {
     const triggers = await queryTestDatabase<{
       trigger_name: string;
       definition: string;
       security_definer: boolean;
+      function_definition: string;
     }>(db, `
       select
         trigger_row.tgname as trigger_name,
         pg_get_triggerdef(trigger_row.oid) as definition,
-        procedure_row.prosecdef as security_definer
+        procedure_row.prosecdef as security_definer,
+        pg_get_functiondef(procedure_row.oid) as function_definition
       from pg_trigger trigger_row
       join pg_proc procedure_row
         on procedure_row.oid = trigger_row.tgfoid
@@ -245,6 +426,11 @@ describe("brand source-media exclusivity", () => {
     for (const trigger of triggers) {
       expect(trigger.definition).toMatch(/before insert or update/i);
       expect(trigger.security_definer).toBe(false);
+      expect(trigger.function_definition).toMatch(/media_usage_claims/i);
+      expect(trigger.function_definition).toMatch(
+        /on\s+conflict\s*\(\s*"?media_id"?\s*\)/i
+      );
+      expect(trigger.function_definition).not.toMatch(/pg_advisory_xact_lock/i);
     }
   });
 });

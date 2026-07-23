@@ -223,6 +223,28 @@ export const postMedia = careerMcp.table("post_media", {
   check("post_media_frames_check", sql`${table.frameCount} between 1 and 250`)
 ]);
 
+export const mediaUsageClaims = careerMcp.table("media_usage_claims", {
+  mediaId: uuid("media_id").notNull(),
+  ownerSubject: uuid("owner_subject").notNull(),
+  purpose: text("purpose").notNull(),
+  createdAt: timestamptz("created_at").notNull()
+}, (table) => [
+  primaryKey({
+    name: "media_usage_claims_pkey",
+    columns: [table.mediaId]
+  }),
+  foreignKey({
+    name: "media_usage_claims_media_id_fk",
+    columns: [table.mediaId],
+    foreignColumns: [postMedia.id]
+  }).onDelete("cascade"),
+  index("media_usage_claims_owner_subject_idx").on(table.ownerSubject),
+  check(
+    "media_usage_claims_purpose_check",
+    sql`${table.purpose} in ('attached','brand_source')`
+  )
+]);
+
 export const postDrafts = careerMcp.table("post_drafts", {
   id: uuid("id").primaryKey(),
   draftId: uuid("draft_id").notNull(),
@@ -463,6 +485,7 @@ export const schema = {
   shortlistEntries,
   brandProfiles,
   postMedia,
+  mediaUsageClaims,
   postDrafts,
   brandVisualBriefs,
   brandVisualRenders,
