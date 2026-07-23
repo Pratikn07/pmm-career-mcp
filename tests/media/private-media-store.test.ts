@@ -235,6 +235,67 @@ describe("private media store", () => {
     expect(Buffer.from(upload.mock.calls[0]?.[1] ?? []).equals(expectedBytes)).toBe(true);
   });
 
+  it("isolates upload bytes and validated metadata from inspector mutation during lookup", async () => {
+    const expectedBytes = Buffer.from(fixturePng);
+    const mutableInspection = { ...pngInspection };
+    let retainedInspectorBytes: Uint8Array | undefined;
+    const inspectImage = vi.fn(async (bytes: Uint8Array): Promise<ImageInspection> => {
+      retainedInspectorBytes = bytes;
+      return mutableInspection;
+    });
+    let lookupStarted!: () => void;
+    let finishLookup!: () => void;
+    const started = new Promise<void>((resolve) => {
+      lookupStarted = resolve;
+    });
+    const finish = new Promise<void>((resolve) => {
+      finishLookup = resolve;
+    });
+    const getByOwnerAndSha = vi.fn(async () => {
+      lookupStarted();
+      await finish;
+      return undefined;
+    });
+    const delayedDatabase = {
+      ...db,
+      postMedia: { ...db.postMedia, getByOwnerAndSha }
+    } as CareerDatabase;
+
+    const storing = createStore({
+      database: delayedDatabase,
+      inspectImage
+    }).storeBytes(expectedBytes, "image.png");
+    await started;
+    retainedInspectorBytes!.fill(0);
+    Object.assign(mutableInspection, {
+      mimeType: "image/gif",
+      width: 2,
+      height: 2,
+      frameCount: 1,
+      sha256: "0".repeat(64)
+    });
+    finishLookup();
+    const stored = await storing;
+
+    expect(retainedInspectorBytes).not.toBe(stored.bytes);
+    expect(stored.bytes.equals(expectedBytes)).toBe(true);
+    expect(stored.media).toMatchObject({
+      sha256,
+      mimeType: "image/png",
+      byteSize: expectedBytes.byteLength,
+      width: pngInspection.width,
+      height: pngInspection.height,
+      frameCount: pngInspection.frameCount,
+      objectPath: `${owner}/${shaShard}/${mediaId}.png`
+    });
+    expect(upload).toHaveBeenCalledWith(
+      `${owner}/${shaShard}/${mediaId}.png`,
+      expect.any(Buffer),
+      "image/png"
+    );
+    expect(Buffer.from(upload.mock.calls[0]?.[1] ?? []).equals(expectedBytes)).toBe(true);
+  });
+
   it("deduplicates SHA-256 only within the owner boundary", async () => {
     const first = await createStore().storeBytes(fixturePng, "first.png");
     upload.mockClear();
@@ -291,6 +352,29 @@ describe("private media store", () => {
     expect(remove).not.toHaveBeenCalled();
   });
 
+  it("normalizes an uppercase generated UUID for storage, rows, and downstream cleanup", async () => {
+    const deleteOwnedUnreferenced = vi.fn(db.postMedia.deleteOwnedUnreferenced);
+    const spyDatabase = {
+      ...db,
+      postMedia: { ...db.postMedia, deleteOwnedUnreferenced }
+    } as CareerDatabase;
+    const store = createStore({
+      database: spyDatabase,
+      createId: () => mediaId.toUpperCase()
+    });
+
+    const stored = await store.storeBytes(fixturePng, "image.png");
+
+    expect(stored.media.id).toBe(mediaId);
+    expect(stored.media.objectPath).toBe(`${owner}/${shaShard}/${mediaId}.png`);
+    expect(stored.createdObjectPath).toBe(stored.media.objectPath);
+
+    await store.removeBestEffort([stored]);
+
+    expect(deleteOwnedUnreferenced).toHaveBeenCalledWith(owner, [mediaId]);
+    expect(remove).toHaveBeenCalledWith([`${owner}/${shaShard}/${mediaId}.png`]);
+  });
+
   it.each([
     ["uppercase SHA-256", { sha256: sha256.toUpperCase() }],
     ["short SHA-256", { sha256: "a".repeat(63) }],
@@ -300,6 +384,16 @@ describe("private media store", () => {
     ["zero width", { width: 0 }],
     ["non-integer height", { height: 1.5 }],
     ["excess decoded pixels", { width: MAX_DECODED_PIXELS_EXCLUSIVE, height: 1 }],
+    ["multi-frame decoded pixels at the exclusive boundary", {
+      width: MAX_DECODED_PIXELS_EXCLUSIVE / 2,
+      height: 1,
+      frameCount: 2
+    }],
+    ["overflowing decoded pixel arithmetic", {
+      width: Number.MAX_SAFE_INTEGER,
+      height: Number.MAX_SAFE_INTEGER,
+      frameCount: MAX_IMAGE_FRAMES
+    }],
     ["zero frame count", { frameCount: 0 }],
     ["excess frame count", { frameCount: MAX_IMAGE_FRAMES + 1 }]
   ])("rejects inspector output with %s before dedupe or path creation", async (_label, patch) => {
@@ -323,6 +417,28 @@ describe("private media store", () => {
     expect(getByOwnerAndSha).not.toHaveBeenCalled();
     expect(upload).not.toHaveBeenCalled();
     expect(remove).not.toHaveBeenCalled();
+  });
+
+  it("accepts the exact maximum multi-frame decoded-pixel count below the exclusive limit", async () => {
+    const width = (MAX_DECODED_PIXELS_EXCLUSIVE - 1) / 3;
+    const inspection: ImageInspection = {
+      ...pngInspection,
+      width,
+      height: 1,
+      frameCount: 3
+    };
+    expect(Number.isInteger(width)).toBe(true);
+    expect(BigInt(width) * 3n).toBe(BigInt(MAX_DECODED_PIXELS_EXCLUSIVE - 1));
+
+    const stored = await createStore({
+      inspectImage: vi.fn(async () => inspection)
+    }).storeBytes(fixturePng, "animated.png");
+
+    expect(stored.media).toMatchObject({
+      width,
+      height: 1,
+      frameCount: 3
+    });
   });
 
   it("best-effort removes a provisional object when upload may commit before failing", async () => {
@@ -382,6 +498,70 @@ describe("private media store", () => {
     expect(stored.createdObjectPath).toBeUndefined();
     expect(remove).toHaveBeenCalledWith([provisionalPath]);
     expect(remove.mock.calls.flatMap(([paths]) => paths)).not.toContain(concurrent.objectPath);
+  });
+
+  it.each([
+    ["the provisional path belongs to a different row ID", () => mediaRow(
+      otherMediaId,
+      `${owner}/${shaShard}/${mediaId}.png`
+    )],
+    ["the object path contains traversal", () => mediaRow(
+      otherMediaId,
+      `${owner}/${shaShard}/../${otherMediaId}.png`
+    )],
+    ["the object path uses a foreign owner prefix", () => mediaRow(
+      otherMediaId,
+      `${otherOwner}/${shaShard}/${otherMediaId}.png`
+    )],
+    ["the MIME metadata differs", () => ({
+      ...mediaRow(otherMediaId, `${owner}/${shaShard}/${otherMediaId}.gif`),
+      mimeType: "image/gif"
+    })],
+    ["the byte size differs", () => ({
+      ...mediaRow(otherMediaId),
+      byteSize: fixturePng.byteLength + 1
+    })],
+    ["the width differs", () => ({
+      ...mediaRow(otherMediaId),
+      width: pngInspection.width + 1
+    })],
+    ["the height differs", () => ({
+      ...mediaRow(otherMediaId),
+      height: pngInspection.height + 1
+    })],
+    ["the frame count differs", () => ({
+      ...mediaRow(otherMediaId),
+      frameCount: pngInspection.frameCount + 1
+    })],
+    ["the row UUID is invalid", () => mediaRow(
+      "not-a-uuid",
+      `${owner}/${shaShard}/not-a-uuid.png`
+    )],
+    ["the row UUID is not normalized", () => mediaRow(
+      otherMediaId.toUpperCase(),
+      `${owner}/${shaShard}/${otherMediaId.toUpperCase()}.png`
+    )],
+    ["the owner UUID is not normalized", () => ({
+      ...mediaRow(otherMediaId),
+      ownerSubject: owner.toUpperCase()
+    })]
+  ])("retains the provisional object and original create error when %s", async (_label, row) => {
+    const createError = new Error("private row create failure");
+    const getByOwnerAndSha = vi.fn()
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(row());
+    const create = vi.fn().mockRejectedValueOnce(createError);
+    const malformedDatabase = {
+      ...db,
+      postMedia: { ...db.postMedia, getByOwnerAndSha, create }
+    } as unknown as CareerDatabase;
+
+    await expect(
+      createStore({ database: malformedDatabase }).storeBytes(fixturePng, "image.png")
+    ).rejects.toBe(createError);
+
+    expect(remove).not.toHaveBeenCalled();
+    expect(getByOwnerAndSha).toHaveBeenCalledTimes(2);
   });
 
   it("removes the provisional object and preserves the create error after confirmed row absence", async () => {
@@ -604,6 +784,29 @@ describe("private media store", () => {
     expect(deleteOwnedUnreferenced).toHaveBeenCalledWith(owner, [created.media.id]);
     expect(remove).toHaveBeenCalledWith([created.media.objectPath]);
     expect(await db.postMedia.get(created.media.id)).toBeUndefined();
+  });
+
+  it.each([
+    ["a non-array object", { deleted: [mediaId] }],
+    ["null", null],
+    ["a non-string array member", [42]],
+    ["an invalid UUID", ["not-a-uuid"]],
+    ["a non-normalized UUID", [mediaId.toUpperCase()]]
+  ])("stops cleanup safely when deletion returns %s", async (_label, output) => {
+    const deleteOwnedUnreferenced = vi.fn(async () => output as unknown as string[]);
+    const malformedDatabase = {
+      ...db,
+      postMedia: { ...db.postMedia, deleteOwnedUnreferenced }
+    } as CareerDatabase;
+    const store = createStore({ database: malformedDatabase });
+    const created = await store.storeBytes(fixturePng, "first.png");
+    remove.mockClear();
+
+    await expect(store.removeBestEffort([created])).resolves.toBeUndefined();
+
+    expect(deleteOwnedUnreferenced).toHaveBeenCalledWith(owner, [created.media.id]);
+    expect(remove).not.toHaveBeenCalled();
+    expect(await db.postMedia.get(created.media.id)).toEqual(created.media);
   });
 
   it("removes only objects whose newly-created rows were deleted as unreferenced", async () => {

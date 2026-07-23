@@ -14,6 +14,9 @@ export type ImageInspection = Readonly<{
 
 export const MAX_LINKEDIN_IMAGE_PIXELS_EXCLUSIVE = 36_152_320;
 export const MAX_LINKEDIN_IMAGE_FRAMES = 250;
+const MAX_LINKEDIN_IMAGE_PIXELS_EXCLUSIVE_BIGINT = BigInt(
+  MAX_LINKEDIN_IMAGE_PIXELS_EXCLUSIVE
+);
 const MIME_BY_FORMAT: Readonly<Partial<Record<string, DraftMediaMimeType>>> = {
   jpeg: "image/jpeg",
   png: "image/png",
@@ -26,6 +29,21 @@ function mediaValidationError(): DomainError {
 
 function positiveInteger(value: number | undefined): value is number {
   return value !== undefined && Number.isInteger(value) && value > 0;
+}
+
+export function isWithinLinkedInDecodedPixelLimit(
+  width: number,
+  height: number,
+  frameCount: number
+): boolean {
+  return Number.isSafeInteger(width)
+    && width > 0
+    && Number.isSafeInteger(height)
+    && height > 0
+    && Number.isSafeInteger(frameCount)
+    && frameCount > 0
+    && BigInt(width) * BigInt(height) * BigInt(frameCount)
+      < MAX_LINKEDIN_IMAGE_PIXELS_EXCLUSIVE_BIGINT;
 }
 
 export async function inspectLinkedInImage(
@@ -48,14 +66,6 @@ export async function inspectLinkedInImage(
     if (!positiveInteger(metadata.width) || !positiveInteger(metadata.height)) {
       throw new Error("Image dimensions rejected");
     }
-    const decodedPixels = metadata.width * metadata.height;
-    if (
-      !Number.isSafeInteger(decodedPixels)
-      || decodedPixels >= MAX_LINKEDIN_IMAGE_PIXELS_EXCLUSIVE
-    ) {
-      throw new Error("Image pixel count rejected");
-    }
-
     const frameCount = metadata.pages ?? 1;
     if (!positiveInteger(frameCount) || frameCount > MAX_LINKEDIN_IMAGE_FRAMES) {
       throw new Error("Image frame count rejected");
@@ -67,6 +77,9 @@ export async function inspectLinkedInImage(
       || (metadata.pageHeight !== undefined && displayHeight * frameCount !== metadata.height)
     ) {
       throw new Error("Image page dimensions rejected");
+    }
+    if (!isWithinLinkedInDecodedPixelLimit(metadata.width, displayHeight, frameCount)) {
+      throw new Error("Image pixel count rejected");
     }
 
     return {
