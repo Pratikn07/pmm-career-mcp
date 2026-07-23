@@ -7,7 +7,11 @@ import { createHttpApp } from "../../src/http/app.js";
 import {
   attachLinkedInPostImagesInput,
   attachLinkedInPostImagesOutput,
+  createBrandedVisualBriefInput,
+  createBrandedVisualBriefOutput,
   rankNetworkingTargetsInput,
+  renderBrandedLinkedInCoverInput,
+  renderBrandedLinkedInCoverOutput,
   saveTargetInput,
   setLinkedInPostImagesInput
 } from "../../src/mcp/schemas.js";
@@ -33,6 +37,9 @@ const expectedTools = [
   "draft_outreach",
   "draft_linkedin_post",
   "revise_post",
+  "get_pmm_brand_profile",
+  "create_branded_visual_brief",
+  "render_branded_linkedin_cover",
   "attach_linkedin_post_images",
   "set_linkedin_post_images",
   "open_linkedin_review_card",
@@ -49,6 +56,43 @@ const expectedTools = [
 ] as const;
 
 const FIXED_NOW = new Date("2026-07-17T00:00:00.000Z");
+const BRAND_POST_ID = "123e4567-e89b-12d3-a456-426614174001";
+const BRAND_BRIEF_ID = "123e4567-e89b-12d3-a456-426614174002";
+
+it("publishes strict bounded Brand Studio inputs", () => {
+  const brief = {
+    postId: BRAND_POST_ID,
+    expectedVersion: 1,
+    coverHook: "Clarity beats capability.",
+    conceptSummary: "Restrained editorial geometry about choosing clarity",
+    visualMode: "EDITORIAL_STATEMENT" as const,
+    topicLabel: "POSITIONING"
+  };
+  const render = {
+    briefId: BRAND_BRIEF_ID,
+    postId: BRAND_POST_ID,
+    expectedVersion: 1,
+    sourceImage: {
+      download_url: "https://files.example/source.png",
+      file_id: "file-source",
+      mime_type: "image/png",
+      file_name: "source.png"
+    },
+    altText: "Editorial PMM Field Notes cover about product clarity."
+  };
+
+  expect(createBrandedVisualBriefInput.parse(brief)).toEqual(brief);
+  expect(createBrandedVisualBriefInput.safeParse({ ...brief, extra: true }).success).toBe(false);
+  expect(createBrandedVisualBriefInput.safeParse({ ...brief, coverHook: "x".repeat(73) }).success).toBe(false);
+  expect(createBrandedVisualBriefInput.safeParse({ ...brief, conceptSummary: "x".repeat(501) }).success).toBe(false);
+  expect(createBrandedVisualBriefInput.safeParse({ ...brief, topicLabel: "x".repeat(25) }).success).toBe(false);
+  expect(renderBrandedLinkedInCoverInput.parse(render)).toEqual(render);
+  expect(renderBrandedLinkedInCoverInput.safeParse({ ...render, extra: true }).success).toBe(false);
+  expect(renderBrandedLinkedInCoverInput.safeParse({
+    ...render,
+    altText: "two\nlines"
+  }).success).toBe(false);
+});
 
 it("counts LinkedIn image alt text by Unicode code point in input and output schemas", () => {
   const id = "123e4567-e89b-12d3-a456-426614174000";
@@ -212,6 +256,75 @@ function successfulDependencies(): CareerMcpDependencies {
     updatedAt: timestamp,
     media: []
   };
+  const brandProfile = {
+    version: 1 as const,
+    publicName: "BHAGYASHREE NANDOSKAR",
+    roleLine: "PRODUCT MARKETING",
+    seriesName: "PMM FIELD NOTES",
+    monogram: "BN",
+    voice: {
+      persona: "curious PMM practitioner",
+      traits: ["thoughtful", "practical", "observant", "conversational", "evidence-aware"],
+      neverInventExperience: true as const
+    },
+    palette: {
+      ivory: "#F6F1E8",
+      navy: "#14233A",
+      copper: "#B97850",
+      taupe: "#C9B8A5",
+      highlight: "#FFFDF9"
+    },
+    hookRules: {
+      minWords: 2 as const,
+      maxWords: 8 as const,
+      maxCharacters: 72 as const,
+      recentWindow: 30 as const
+    },
+    recentUsage: [{
+      templateId: "editorial-statement-v1",
+      coverHook: "Clarity beats capability.",
+      createdAt: timestamp
+    }]
+  };
+  const brief = {
+    id: BRAND_BRIEF_ID,
+    ownerSubject: "123e4567-e89b-12d3-a456-426614174000",
+    postDraftId: BRAND_POST_ID,
+    postVersion: 1,
+    brandProfileId: "123e4567-e89b-12d3-a456-426614174003",
+    brandProfileVersion: 1,
+    templateId: "editorial-statement-v1",
+    templateVersion: 1,
+    promptFormatVersion: 1,
+    visualMode: "EDITORIAL_STATEMENT",
+    coverHook: "Clarity beats capability.",
+    conceptSummary: "Restrained editorial geometry about choosing clarity",
+    topicLabel: "POSITIONING",
+    generationPrompt: "Create text-free restrained abstract editorial geometry.",
+    negativeConstraintsJson: ["readable text", "logos", "watermarks"],
+    state: "ready",
+    createdAt: timestamp
+  };
+  const renderedPost = {
+    ...post,
+    id: BRAND_POST_ID,
+    versionId: "123e4567-e89b-12d3-a456-426614174004",
+    version: 2,
+    checksum: "b".repeat(64),
+    media: [{
+      position: 0,
+      mediaId: "123e4567-e89b-12d3-a456-426614174005",
+      altText: "Editorial PMM Field Notes cover about product clarity.",
+      sha256: "c".repeat(64),
+      mimeType: "image/png" as const,
+      byteSize: 2048,
+      width: 1080,
+      height: 1350,
+      frameCount: 1,
+      originalFilename: "brand-cover.png",
+      createdAt: timestamp
+    }]
+  };
   return {
     ycProvider: {
       searchYcCompanies: async () => [{
@@ -309,6 +422,35 @@ function successfulDependencies(): CareerMcpDependencies {
         signedMediaUrls: []
       })
     },
+    brand: {
+      getProfile: async () => brandProfile,
+      createBrief: async () => ({
+        brief,
+        profile: brandProfile,
+        requiresSourceImage: false,
+        proposedAltText: "Editorial PMM Field Notes cover reading “Clarity beats capability.”."
+      }),
+      getProvenanceForMedia: async () => undefined
+    },
+    brandRenderer: {
+      render: async () => ({
+        post: renderedPost,
+        provenance: {
+          seriesName: "PMM FIELD NOTES",
+          profileVersion: 1,
+          templateId: "editorial-statement-v1",
+          templateVersion: 1,
+          coverHook: "Clarity beats capability.",
+          renderChecksum: "c".repeat(64),
+          validationPassed: true,
+          validation: {
+            fixedLabelsPresent: true as const,
+            textWithinSafeArea: true as const,
+            sourceImageUsed: false
+          }
+        }
+      })
+    },
     publish: { publish: async () => ({ state: "published", postUrn: "urn:li:share:12345" }) },
     linkedin: { createAuthorizationUrl: () => "https://www.linkedin.com/oauth/v2/authorization" },
     getLinkedInConnectionStatus: async () => ({ connected: true, valid: true, publishingEnabled: false, imagePublishingEnabled: false })
@@ -328,7 +470,7 @@ async function listTools() {
 it("registers exactly the approved Career MCP tools", async () => {
   const tools = await listTools();
   expect(tools.map((tool) => tool.name).sort()).toEqual([...expectedTools].sort());
-  expect(tools.map((tool) => tool.name).some((name) => /scrape|message|profile|schedule|batch/.test(name))).toBe(false);
+  expect(tools.map((tool) => tool.name).some((name) => /scrape|message|schedule|batch/.test(name))).toBe(false);
   expect(tools.every((tool) => tool.inputSchema.additionalProperties === false)).toBe(true);
   expect(tools.every((tool) => tool.outputSchema !== undefined)).toBe(true);
 });
@@ -377,6 +519,9 @@ it("publishes an explicit success and safe-error output contract for every tool"
     draft_outreach: "draft",
     draft_linkedin_post: "post",
     revise_post: "post",
+    get_pmm_brand_profile: "profile",
+    create_branded_visual_brief: "brief",
+    render_branded_linkedin_cover: "post",
     attach_linkedin_post_images: "post",
     set_linkedin_post_images: "post",
     open_linkedin_review_card: "post",
@@ -523,6 +668,27 @@ it("returns schema-valid structured data and bounded summaries from every regist
     { name: "draft_outreach", arguments: { targetId: "target-1", purpose: "networking", text: "Hello", evidenceIds: ["evidence-1"] } },
     { name: "draft_linkedin_post", arguments: { text: "A safe test post", visibility: "PUBLIC" } },
     { name: "revise_post", arguments: { postId: "post-1", text: "A safe revised post" } },
+    { name: "get_pmm_brand_profile", arguments: {} },
+    {
+      name: "create_branded_visual_brief",
+      arguments: {
+        postId: BRAND_POST_ID,
+        expectedVersion: 1,
+        coverHook: "Clarity beats capability.",
+        conceptSummary: "Restrained editorial geometry about choosing clarity",
+        visualMode: "EDITORIAL_STATEMENT",
+        topicLabel: "POSITIONING"
+      }
+    },
+    {
+      name: "render_branded_linkedin_cover",
+      arguments: {
+        briefId: BRAND_BRIEF_ID,
+        postId: BRAND_POST_ID,
+        expectedVersion: 1,
+        altText: "Editorial PMM Field Notes cover about product clarity."
+      }
+    },
     {
       name: "attach_linkedin_post_images",
       arguments: {
@@ -611,6 +777,29 @@ it("requires request auth before any draft-media or Storage action", async () =>
     {
       name: "create_exact_linkedin_preview",
       arguments: { postId: "123e4567-e89b-12d3-a456-426614174001", version: 1 }
+    },
+    {
+      name: "get_pmm_brand_profile",
+      arguments: {}
+    },
+    {
+      name: "create_branded_visual_brief",
+      arguments: {
+        postId: BRAND_POST_ID,
+        expectedVersion: 1,
+        coverHook: "Clarity beats capability.",
+        conceptSummary: "Restrained editorial geometry about choosing clarity",
+        visualMode: "EDITORIAL_STATEMENT"
+      }
+    },
+    {
+      name: "render_branded_linkedin_cover",
+      arguments: {
+        briefId: BRAND_BRIEF_ID,
+        postId: BRAND_POST_ID,
+        expectedVersion: 1,
+        altText: "Editorial PMM Field Notes cover about product clarity."
+      }
     }
   ]) {
     const result = await client.callTool(call);
@@ -626,6 +815,85 @@ it("requires request auth before any draft-media or Storage action", async () =>
   expect(getVersion).not.toHaveBeenCalled();
   expect(createSignedUrls).not.toHaveBeenCalled();
   expect(createExact).not.toHaveBeenCalled();
+});
+
+it("returns only model-safe Brand Studio values and never leaks service internals", async () => {
+  const deps = successfulDependencies();
+  const secret = "private-secret-that-must-not-leak";
+  const brandResult = await deps.brand!.createBrief({
+    postId: BRAND_POST_ID,
+    expectedVersion: 1,
+    coverHook: "Clarity beats capability.",
+    conceptSummary: "Restrained editorial geometry about choosing clarity",
+    visualMode: "EDITORIAL_STATEMENT"
+  });
+  deps.brand = {
+    ...deps.brand!,
+    createBrief: async () => ({
+      ...brandResult,
+      brief: {
+        ...brandResult.brief,
+        objectPath: `owner/${secret}/source.png`,
+        signedUrl: `https://storage.example/${secret}`,
+        approvalCapability: secret
+      }
+    })
+  };
+  const renderResult = await deps.brandRenderer!.render({
+    briefId: BRAND_BRIEF_ID,
+    postId: BRAND_POST_ID,
+    expectedVersion: 1,
+    altText: "Editorial PMM Field Notes cover about product clarity."
+  });
+  deps.brandRenderer = {
+    render: async () => ({
+      ...renderResult,
+      objectPath: `owner/${secret}/render.png`,
+      sourceDownloadUrl: `https://files.example/${secret}`,
+      jwt: secret,
+      fontPath: `/private/fonts/${secret}.woff2`,
+      approvalCapability: secret
+    })
+  };
+  const server = createCareerMcpServer(deps, {
+    requestAuthContext: Object.freeze({
+      subject: "123e4567-e89b-12d3-a456-426614174000",
+      accessToken: secret
+    })
+  });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "test", version: "1.0.0" });
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+
+  const brief = await client.callTool({
+    name: "create_branded_visual_brief",
+    arguments: {
+      postId: BRAND_POST_ID,
+      expectedVersion: 1,
+      coverHook: "Clarity beats capability.",
+      conceptSummary: "Restrained editorial geometry about choosing clarity",
+      visualMode: "EDITORIAL_STATEMENT"
+    }
+  });
+  const render = await client.callTool({
+    name: "render_branded_linkedin_cover",
+    arguments: {
+      briefId: BRAND_BRIEF_ID,
+      postId: BRAND_POST_ID,
+      expectedVersion: 1,
+      altText: "Editorial PMM Field Notes cover about product clarity."
+    }
+  });
+  await Promise.all([client.close(), server.close()]);
+
+  expect(createBrandedVisualBriefOutput.safeParse(brief.structuredContent).success).toBe(true);
+  expect(renderBrandedLinkedInCoverOutput.safeParse(render.structuredContent).success).toBe(true);
+  const serialized = JSON.stringify({ brief, render });
+  expect(serialized).not.toContain(secret);
+  expect(serialized).not.toMatch(/objectPath|signedUrl|sourceDownloadUrl|jwt|fontPath|approvalCapability/);
+  expect(serialized).toContain("generationPrompt");
+  expect(serialized).toContain("negativeConstraints");
+  expect(serialized).toContain("validationPassed");
 });
 
 it("keeps exact-preview capabilities and signed URLs widget-private", async () => {
@@ -779,7 +1047,7 @@ it("reports the independent image-publishing switch as a boolean only", async ()
   expect(JSON.stringify(result)).not.toContain("LINKEDIN_IMAGE_PUBLISH_ENABLED");
 });
 
-it("makes the four publishing and research safety rules prominent in instructions", async () => {
+it("makes publishing, research, and branded-cover safety rules prominent in instructions", async () => {
   const server = createCareerMcpServer(dependencies());
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "test", version: "1.0.0" });
@@ -790,6 +1058,8 @@ it("makes the four publishing and research safety rules prominent in instruction
   expect(instructions.slice(0, 512)).toContain("Never claim complete employee coverage");
   expect(instructions.slice(0, 512)).toContain("current user explicitly asks to publish the exact preview");
   expect(instructions.slice(0, 512)).toContain("Never batch or retry publishing");
+  expect(instructions).toContain("curiosity covers, not post summaries");
+  expect(instructions).toContain("source art must contain no text");
 });
 
 it("serves MCP initialization through stateless Streamable HTTP", async () => {

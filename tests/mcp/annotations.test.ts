@@ -28,10 +28,10 @@ it("uses complete, safe tool annotations", async () => {
 
   const byName = new Map(tools.map((tool) => [tool.name, tool]));
   const annotationsFor = (name: string) => byName.get(name)?.annotations;
-  for (const name of ["search_yc_companies", "discover_public_people", "find_pmm_opportunities", "rank_networking_targets", "explain_target_match", "list_pipeline", "list_post_history", "get_linkedin_connection_status", "open_linkedin_review_card"]) {
+  for (const name of ["search_yc_companies", "discover_public_people", "find_pmm_opportunities", "rank_networking_targets", "explain_target_match", "list_pipeline", "list_post_history", "get_linkedin_connection_status", "open_linkedin_review_card", "get_pmm_brand_profile"]) {
     expect(annotationsFor(name)).toMatchObject({ readOnlyHint: true, destructiveHint: false });
   }
-  for (const name of ["draft_outreach", "draft_linkedin_post", "revise_post", "set_linkedin_post_images", "create_weekly_shortlist", "save_target", "update_outreach_status", "record_note", "create_linkedin_authorization_url"]) {
+  for (const name of ["draft_outreach", "draft_linkedin_post", "revise_post", "set_linkedin_post_images", "create_weekly_shortlist", "save_target", "update_outreach_status", "record_note", "create_linkedin_authorization_url", "create_branded_visual_brief"]) {
     expect(annotationsFor(name)).toMatchObject({ readOnlyHint: false, openWorldHint: false, destructiveHint: false });
   }
   expect(annotationsFor("create_exact_linkedin_preview")).toEqual({
@@ -40,6 +40,11 @@ it("uses complete, safe tool annotations", async () => {
     destructiveHint: false
   });
   expect(annotationsFor("attach_linkedin_post_images")).toEqual({
+    readOnlyHint: false,
+    openWorldHint: true,
+    destructiveHint: false
+  });
+  expect(annotationsFor("render_branded_linkedin_cover")).toEqual({
     readOnlyHint: false,
     openWorldHint: true,
     destructiveHint: false
@@ -54,6 +59,9 @@ it("uses complete, safe tool annotations", async () => {
 
   expect(byName.get("attach_linkedin_post_images")?._meta).toMatchObject({
     "openai/fileParams": ["images"]
+  });
+  expect(byName.get("render_branded_linkedin_cover")?._meta).toMatchObject({
+    "openai/fileParams": ["sourceImage"]
   });
   expect(byName.get("open_linkedin_review_card")?._meta).toMatchObject({
     "openai/outputTemplate": "ui://pmm-career-mcp/linkedin-review-card.html",
@@ -74,4 +82,18 @@ it("uses complete, safe tool annotations", async () => {
   expect(modelVisibleNames).not.toContain("create_exact_linkedin_preview");
   expect(modelVisibleNames).not.toContain("publish_exact_linkedin_post");
   expect(modelVisibleNames).not.toContain("publish_linkedin_post");
+  expect(modelVisibleNames).toEqual(expect.arrayContaining([
+    "get_pmm_brand_profile",
+    "create_branded_visual_brief",
+    "render_branded_linkedin_cover"
+  ]));
+  for (const name of [
+    "get_pmm_brand_profile",
+    "create_branded_visual_brief",
+    "render_branded_linkedin_cover"
+  ]) {
+    const description = byName.get(name)?.description ?? "";
+    expect(description).not.toMatch(/upload(?:s|ed|ing)?\s+(?:an?\s+)?(?:image\s+)?to\s+LinkedIn/i);
+    expect(description).not.toMatch(/LinkedIn (?:Images|Posts) API/i);
+  }
 });

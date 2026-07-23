@@ -2,6 +2,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import type { RequestAuthContext } from "../auth/request-context.js";
 import { SUPABASE_OAUTH_SCOPES } from "../auth/resource-auth.js";
+import type { BrandBriefService } from "../brand/brief-service.js";
+import type { BrandRenderService } from "../brand/render-service.js";
 import type { DraftService } from "../drafts/service.js";
 import { DomainError } from "../domain/errors.js";
 import type { LinkedInOAuth } from "../linkedin/oauth.js";
@@ -28,6 +30,8 @@ import {
 import {
   attachLinkedInPostImagesInput,
   attachLinkedInPostImagesOutput,
+  createBrandedVisualBriefInput,
+  createBrandedVisualBriefOutput,
   createExactLinkedInPreviewInput,
   createExactLinkedInPreviewOutput,
   createLinkedInAuthorizationUrlOutput,
@@ -45,6 +49,7 @@ import {
   findPmmOpportunitiesInput,
   findPmmOpportunitiesOutput,
   getLinkedInConnectionStatusOutput,
+  getPmmBrandProfileOutput,
   listPipelineInput,
   listPipelineOutput,
   listPostHistoryInput,
@@ -58,6 +63,8 @@ import {
   rankNetworkingTargetsOutput,
   recordNoteInput,
   recordNoteOutput,
+  renderBrandedLinkedInCoverInput,
+  renderBrandedLinkedInCoverOutput,
   revisePostInput,
   revisePostOutput,
   saveTargetInput,
@@ -70,7 +77,7 @@ import {
   updateOutreachStatusOutput
 } from "./schemas.js";
 
-export const CAREER_MCP_INSTRUCTIONS = "Never fetch LinkedIn for research. Never claim complete employee coverage. Never claim complete YC-company coverage. Scheduled and model-driven flows must stop after saving private drafts and may only open the non-writing review card. Exact preview and publish actions are app-only, never model-callable, and available only after the current user explicitly asks to publish the exact preview. Never batch or retry publishing. Research is restricted to YC companies and allowed public sources. Drafts and pipeline data stay private.";
+export const CAREER_MCP_INSTRUCTIONS = "Never fetch LinkedIn for research. Never claim complete employee coverage. Never claim complete YC-company coverage. Scheduled and model-driven flows must stop after saving private drafts and may only open the non-writing review card. Exact preview and publish actions are app-only, never model-callable, and available only after the current user explicitly asks to publish the exact preview. Never batch or retry publishing. Research is restricted to YC companies and allowed public sources. Drafts and pipeline data stay private. Branded visuals are curiosity covers, not post summaries; source art must contain no text.";
 
 type YcProvider = { searchYcCompanies(query: CompanySearchQuery): Promise<CompanyResult[]> };
 type ConnectionStatus = {
@@ -97,6 +104,11 @@ export type CareerMcpDependencies = {
   linkedin: Pick<LinkedInOAuth, "createAuthorizationUrl">;
   getLinkedInConnectionStatus: () => Promise<ConnectionStatus>;
   media?: ModelMediaService;
+  brand?: Pick<
+    BrandBriefService,
+    "getProfile" | "createBrief" | "getProvenanceForMedia"
+  >;
+  brandRenderer?: Pick<BrandRenderService, "render">;
 };
 
 export type CareerMcpServerOptions = {
@@ -121,6 +133,10 @@ const appOnlyToolMetadata: Record<string, unknown> = {
 const attachFileToolMetadata: Record<string, unknown> = {
   ...oauthToolMetadata,
   "openai/fileParams": ["images"]
+};
+const brandRenderToolMetadata: Record<string, unknown> = {
+  ...oauthToolMetadata,
+  "openai/fileParams": ["sourceImage"]
 };
 const reviewCardLauncherMetadata: Record<string, unknown> = {
   ...oauthToolMetadata,
@@ -192,6 +208,59 @@ function scoringNow(clock: () => Date): Date {
   return new Date(value.getTime());
 }
 
+function modelSafeProfile(
+  profile: Awaited<ReturnType<BrandBriefService["getProfile"]>>
+) {
+  return {
+    version: profile.version,
+    publicName: profile.publicName,
+    roleLine: profile.roleLine,
+    seriesName: profile.seriesName,
+    monogram: profile.monogram,
+    voice: {
+      persona: profile.voice.persona,
+      traits: [...profile.voice.traits],
+      neverInventExperience: profile.voice.neverInventExperience
+    },
+    palette: { ...profile.palette },
+    hookRules: { ...profile.hookRules },
+    recentUsage: profile.recentUsage.map((usage) => ({
+      templateId: usage.templateId,
+      coverHook: usage.coverHook,
+      createdAt: usage.createdAt
+    }))
+  };
+}
+
+function modelSafePost(
+  post: Awaited<ReturnType<BrandRenderService["render"]>>["post"]
+) {
+  return {
+    id: post.id,
+    versionId: post.versionId,
+    text: post.text,
+    visibility: post.visibility,
+    version: post.version,
+    checksum: post.checksum,
+    state: post.state,
+    createdAt: post.createdAt,
+    updatedAt: post.updatedAt,
+    media: post.media.map((media) => ({
+      position: media.position,
+      mediaId: media.mediaId,
+      altText: media.altText,
+      sha256: media.sha256,
+      mimeType: media.mimeType,
+      byteSize: media.byteSize,
+      width: media.width,
+      height: media.height,
+      frameCount: media.frameCount,
+      originalFilename: media.originalFilename,
+      createdAt: media.createdAt
+    }))
+  };
+}
+
 /** Creates the single-user MCP server. It has no hidden network side effects. */
 export function createCareerMcpServer(
   deps: CareerMcpDependencies,
@@ -231,6 +300,29 @@ export function createCareerMcpServer(
       throw new DomainError("AUTH_REQUIRED", "Authenticated request identity is required");
     }
     return deps.publish;
+  }
+
+  function authenticatedBrand(): Pick<
+    BrandBriefService,
+    "getProfile" | "createBrief" | "getProvenanceForMedia"
+  > {
+    if (options.requestAuthContext === undefined) {
+      throw new DomainError("AUTH_REQUIRED", "Authenticated request identity is required");
+    }
+    if (deps.brand === undefined) {
+      throw new DomainError("DATA_INTEGRITY", "PMM brand service is unavailable");
+    }
+    return deps.brand;
+  }
+
+  function authenticatedBrandRenderer(): Pick<BrandRenderService, "render"> {
+    if (options.requestAuthContext === undefined) {
+      throw new DomainError("AUTH_REQUIRED", "Authenticated request identity is required");
+    }
+    if (deps.brandRenderer === undefined) {
+      throw new DomainError("DATA_INTEGRITY", "PMM brand renderer is unavailable");
+    }
+    return deps.brandRenderer;
   }
 
   server.registerTool("search_yc_companies", {
@@ -333,6 +425,106 @@ export function createCareerMcpServer(
   }, async ({ postId, text }) => guarded(async () => ({
     post: await deps.drafts.revisePost(postId, text)
   }), ({ post }) => `Saved private post version ${post.version}; nothing was published.`)());
+
+  server.registerTool("get_pmm_brand_profile", {
+    title: "Get PMM brand profile",
+    description: "Return the active model-safe PMM Field Notes brand rules. Read-only.",
+    inputSchema: emptyInputSchema,
+    outputSchema: getPmmBrandProfileOutput,
+    annotations: readOnly,
+    _meta: oauthToolMetadata
+  }, async () => guarded(async () => ({
+    profile: modelSafeProfile(await authenticatedBrand().getProfile())
+  }), () => "Loaded the active PMM Field Notes brand profile; nothing was changed.")());
+
+  server.registerTool("create_branded_visual_brief", {
+    title: "Create branded visual brief",
+    description: "Save one private PMM Field Notes curiosity-cover brief. This does not attach an image, create a preview, or publish.",
+    inputSchema: createBrandedVisualBriefInput,
+    outputSchema: createBrandedVisualBriefOutput,
+    annotations: privateWrite,
+    _meta: oauthToolMetadata
+  }, async (input) => guarded(async () => {
+    const result = await authenticatedBrand().createBrief({
+      postId: input.postId,
+      expectedVersion: input.expectedVersion,
+      coverHook: input.coverHook,
+      conceptSummary: input.conceptSummary,
+      visualMode: input.visualMode,
+      ...(input.topicLabel === undefined
+        ? {}
+        : { topicLabel: input.topicLabel })
+    });
+    return {
+      brief: {
+        id: result.brief.id,
+        postId: result.brief.postDraftId,
+        postVersion: result.brief.postVersion,
+        profileVersion: result.brief.brandProfileVersion,
+        templateId: result.brief.templateId,
+        templateVersion: result.brief.templateVersion,
+        promptFormatVersion: result.brief.promptFormatVersion,
+        visualMode: result.brief.visualMode,
+        coverHook: result.brief.coverHook,
+        conceptSummary: result.brief.conceptSummary,
+        topicLabel: result.brief.topicLabel,
+        generationPrompt: result.brief.generationPrompt,
+        negativeConstraints: [...result.brief.negativeConstraintsJson],
+        state: result.brief.state,
+        createdAt: result.brief.createdAt
+      },
+      requiresSourceImage: result.requiresSourceImage,
+      proposedAltText: result.proposedAltText
+    };
+  }, () => "Saved one private branded visual brief; no image was attached, previewed, uploaded to LinkedIn, or published.")());
+
+  server.registerTool("render_branded_linkedin_cover", {
+    title: "Render branded LinkedIn cover",
+    description: "Render and privately attach one PMM Field Notes curiosity cover to a new immutable post version. This does not create a preview or publish.",
+    inputSchema: renderBrandedLinkedInCoverInput,
+    outputSchema: renderBrandedLinkedInCoverOutput,
+    annotations: attachmentWrite,
+    _meta: brandRenderToolMetadata
+  }, async (input) => guarded(async () => {
+    const sourceImage = input.sourceImage === undefined
+      ? {}
+      : {
+          sourceImage: {
+            download_url: input.sourceImage.download_url,
+            file_id: input.sourceImage.file_id,
+            ...(input.sourceImage.mime_type === undefined
+              ? {}
+              : { mime_type: input.sourceImage.mime_type }),
+            ...(input.sourceImage.file_name === undefined
+              ? {}
+              : { file_name: input.sourceImage.file_name })
+          }
+        };
+    const result = await authenticatedBrandRenderer().render({
+      briefId: input.briefId,
+      postId: input.postId,
+      expectedVersion: input.expectedVersion,
+      ...sourceImage,
+      altText: input.altText
+    });
+    return {
+      post: modelSafePost(result.post),
+      provenance: {
+        seriesName: result.provenance.seriesName,
+        profileVersion: result.provenance.profileVersion,
+        templateId: result.provenance.templateId,
+        templateVersion: result.provenance.templateVersion,
+        coverHook: result.provenance.coverHook,
+        renderChecksum: result.provenance.renderChecksum,
+        validationPassed: result.provenance.validationPassed,
+        validation: {
+          fixedLabelsPresent: result.provenance.validation.fixedLabelsPresent,
+          textWithinSafeArea: result.provenance.validation.textWithinSafeArea,
+          sourceImageUsed: result.provenance.validation.sourceImageUsed
+        }
+      }
+    };
+  }, ({ post }) => `Saved one private branded cover in post version ${post.version}; nothing was previewed, uploaded to LinkedIn, or published.`)());
 
   server.registerTool("attach_linkedin_post_images", {
     title: "Attach LinkedIn post images",

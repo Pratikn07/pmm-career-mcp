@@ -144,11 +144,26 @@ export const revisePostInput = z.object({
   postId: id,
   text: z.string().trim().min(1).max(3_000)
 }).strict();
+export const createBrandedVisualBriefInput = z.object({
+  postId: id,
+  expectedVersion: z.number().int().positive(),
+  coverHook: z.string().trim().min(1).max(72),
+  conceptSummary: z.string().trim().min(1).max(500),
+  visualMode: z.enum(["EDITORIAL_STATEMENT", "EDITORIAL_METAPHOR"]),
+  topicLabel: z.string().trim().min(1).max(24).optional()
+}).strict();
 export const openAiFileSchema = z.object({
   download_url: z.string().url(),
   file_id: z.string().min(1).max(512),
   mime_type: z.string().max(100).optional(),
   file_name: z.string().max(255).optional()
+}).strict();
+export const renderBrandedLinkedInCoverInput = z.object({
+  briefId: id,
+  postId: id,
+  expectedVersion: z.number().int().positive(),
+  sourceImage: openAiFileSchema.optional(),
+  altText: imageAltText
 }).strict();
 export const attachLinkedInPostImagesInput = z.object({
   postId: id,
@@ -287,6 +302,70 @@ const postDraftSchema = z.object({
   media: z.array(postDraftMediaSchema).max(4).default([])
 }).strict();
 
+const pmmBrandProfileSchema = z.object({
+  version: z.number().int().positive(),
+  publicName: name,
+  roleLine: name,
+  seriesName: name,
+  monogram: z.string().trim().min(1).max(12),
+  voice: z.object({
+    persona: shortText,
+    traits: z.array(shortText).max(25),
+    neverInventExperience: z.literal(true)
+  }).strict(),
+  palette: z.object({
+    ivory: z.string().regex(/^#[0-9A-F]{6}$/),
+    navy: z.string().regex(/^#[0-9A-F]{6}$/),
+    copper: z.string().regex(/^#[0-9A-F]{6}$/),
+    taupe: z.string().regex(/^#[0-9A-F]{6}$/),
+    highlight: z.string().regex(/^#[0-9A-F]{6}$/)
+  }).strict(),
+  hookRules: z.object({
+    minWords: z.number().int().positive(),
+    maxWords: z.number().int().positive(),
+    maxCharacters: z.number().int().positive().max(72),
+    recentWindow: z.number().int().nonnegative().max(100)
+  }).strict(),
+  recentUsage: z.array(z.object({
+    templateId: id,
+    coverHook: z.string().max(72),
+    createdAt: timestamp
+  }).strict()).max(30)
+}).strict();
+
+const brandVisualBriefSchema = z.object({
+  id,
+  postId: id,
+  postVersion: z.number().int().positive(),
+  profileVersion: z.number().int().positive(),
+  templateId: id,
+  templateVersion: z.number().int().positive(),
+  promptFormatVersion: z.number().int().positive(),
+  visualMode: z.enum(["EDITORIAL_STATEMENT", "EDITORIAL_METAPHOR"]),
+  coverHook: z.string().max(72),
+  conceptSummary: z.string().max(500),
+  topicLabel: z.string().max(24).nullable(),
+  generationPrompt: z.string().min(1).max(4_000),
+  negativeConstraints: z.array(shortText).max(50),
+  state: z.enum(["ready", "rendered"]),
+  createdAt: timestamp
+}).strict();
+
+const brandRenderProvenanceSchema = z.object({
+  seriesName: name,
+  profileVersion: z.number().int().positive(),
+  templateId: id,
+  templateVersion: z.number().int().positive(),
+  coverHook: z.string().max(72),
+  renderChecksum: checksum,
+  validationPassed: z.boolean(),
+  validation: z.object({
+    fixedLabelsPresent: z.boolean(),
+    textWithinSafeArea: z.boolean(),
+    sourceImageUsed: z.boolean()
+  }).strict()
+}).strict();
+
 const previewSchema = z.object({
   postId: id,
   versionId: id,
@@ -407,6 +486,18 @@ export const explainTargetMatchOutput = outputSchema(z.object({
 export const draftOutreachOutput = outputSchema(z.object({ draft: outreachDraftSchema }).strict());
 export const draftLinkedInPostOutput = outputSchema(z.object({ post: postDraftSchema }).strict());
 export const revisePostOutput = outputSchema(z.object({ post: postDraftSchema }).strict());
+export const getPmmBrandProfileOutput = outputSchema(z.object({
+  profile: pmmBrandProfileSchema
+}).strict());
+export const createBrandedVisualBriefOutput = outputSchema(z.object({
+  brief: brandVisualBriefSchema,
+  requiresSourceImage: z.boolean(),
+  proposedAltText: imageAltText
+}).strict());
+export const renderBrandedLinkedInCoverOutput = outputSchema(z.object({
+  post: postDraftSchema,
+  provenance: brandRenderProvenanceSchema
+}).strict());
 export const attachLinkedInPostImagesOutput = outputSchema(z.object({ post: postDraftSchema }).strict());
 export const setLinkedInPostImagesOutput = outputSchema(z.object({ post: postDraftSchema }).strict());
 export const openLinkedInReviewCardOutput = outputSchema(z.object({ post: postDraftSchema }).strict());
