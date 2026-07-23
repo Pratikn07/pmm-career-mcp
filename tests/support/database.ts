@@ -87,6 +87,8 @@ export async function createTestDatabase(options: {
           career_mcp.brand_profiles,
           career_mcp.post_media,
           career_mcp.post_drafts,
+          career_mcp.post_draft_owners,
+          career_mcp.runtime_role_owners,
           career_mcp.shortlist_entries,
           career_mcp.shortlists,
           career_mcp.outreach_drafts,

@@ -13,6 +13,8 @@ import {
 } from "../posts/post-checksum.js";
 
 export const POST_CHECKSUM_CONTRACT = "pmm-career-mcp.post-draft.sha256.v1";
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const POST_VISIBILITY_VALUES = ["PUBLIC", "CONNECTIONS"] as const;
 
 export type PostVisibility = typeof POST_VISIBILITY_VALUES[number];
@@ -42,7 +44,10 @@ export type CreatePostInput = {
 };
 
 /** `id` is the stable logical draft ID; `versionId` identifies one immutable row. */
-export type PostDraftVersion = Omit<PostDraft, "id" | "draftId" | "visibility"> & {
+export type PostDraftVersion = Omit<
+  PostDraft,
+  "id" | "draftId" | "ownerSubject" | "visibility"
+> & {
   id: string;
   versionId: string;
   visibility: PostVisibility;
@@ -126,7 +131,13 @@ function publicPostDraft(
       entity: "post_draft"
     });
   }
-  const { id: versionId, draftId: id, visibility, ...version } = row;
+  const {
+    id: versionId,
+    draftId: id,
+    ownerSubject: _ownerSubject,
+    visibility,
+    ...version
+  } = row;
   return { ...version, id, versionId, visibility, media: media.map(publicPostMedia) };
 }
 
@@ -166,7 +177,14 @@ export function computePostChecksum(exactText: string, version: number): string 
 
 export type DraftService = ReturnType<typeof createDraftService>;
 
-export function createDraftService(database: CareerDatabase) {
+export function createDraftService(
+  database: CareerDatabase,
+  dependencies: { subject: string }
+) {
+  if (!UUID_PATTERN.test(dependencies.subject)) {
+    throw new DomainError("AUTH_REQUIRED", "Authenticated request identity is required");
+  }
+  const subject = dependencies.subject.toLowerCase();
   return {
     async createOutreach(input: CreateOutreachInput): Promise<OutreachDraft> {
       if (typeof input !== "object" || input === null) {
@@ -237,6 +255,7 @@ export function createDraftService(database: CareerDatabase) {
 
       try {
         const created = await database.postDrafts.createVersionWithMedia({
+          ownerSubject: subject,
           text,
           visibility: input.visibility,
           checksum: (version, draftId) => checksumLinkedInPost({
@@ -261,6 +280,12 @@ export function createDraftService(database: CareerDatabase) {
     async revisePost(draftIdInput: string, textInput: string): Promise<PostDraftVersion> {
       const draftId = normalizedId("post.id", draftIdInput);
       const text = normalizedText("post.text", textInput, MAX_POST_TEXT_LENGTH);
+      const ownerSubject = await database.postDraftOwners.getOwner(draftId);
+      if (ownerSubject?.toLowerCase() !== subject) {
+        throw new DomainError("NOT_FOUND", "Post draft was not found", {
+          entity: "post_draft"
+        });
+      }
       const latest = (await database.postDrafts.listVersions(draftId)).at(-1);
       if (latest === undefined) {
         throw new DomainError("NOT_FOUND", "Post draft was not found", {
@@ -279,7 +304,7 @@ export function createDraftService(database: CareerDatabase) {
         const revised = await database.postDrafts.createVersionWithMedia({
           draftId,
           expectedVersion: latest.version,
-          ...(latestMedia.length === 0 ? {} : { ownerSubject: latestMedia[0]!.ownerSubject }),
+          ownerSubject: subject,
           text,
           visibility,
           checksum: (version, actualDraftId, media) => checksumLinkedInPost({
@@ -314,6 +339,8 @@ export function createDraftService(database: CareerDatabase) {
       if (!Number.isSafeInteger(version) || version < 1) {
         throw validationError("post.version", "must_be_positive_integer");
       }
+      const ownerSubject = await database.postDraftOwners.getOwner(draftId);
+      if (ownerSubject?.toLowerCase() !== subject) return undefined;
       const row = await database.postDrafts.getVersion(draftId, version);
       if (row === undefined) return undefined;
       const media = await database.postDraftMedia.listForVersion(row.id, row.version);
@@ -322,6 +349,8 @@ export function createDraftService(database: CareerDatabase) {
 
     async getPostHistory(draftIdInput: string): Promise<PostDraftVersion[]> {
       const draftId = normalizedId("post.id", draftIdInput);
+      const ownerSubject = await database.postDraftOwners.getOwner(draftId);
+      if (ownerSubject?.toLowerCase() !== subject) return [];
       const rows = await database.postDrafts.listVersions(draftId);
       return await Promise.all(rows.map(async (row) => publicPostDraft(
         row,

@@ -101,7 +101,7 @@ export function createPostMediaService(
   }
   const subject = dependencies.subject.toLowerCase();
   const privateMedia = createPrivateMediaStore(database, dependencies);
-  const drafts = createDraftService(database);
+  const drafts = createDraftService(database, { subject });
 
   function withMedia(version: PostDraftVersion): MediaPostDraftVersion {
     return version;

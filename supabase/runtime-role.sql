@@ -103,6 +103,44 @@ begin
     execute 'grant select on table career_mcp.brand_brief_source_claims to career_mcp_runtime';
   end if;
 
+  if pg_catalog.to_regclass('career_mcp.post_draft_owners') is not null then
+    execute 'revoke insert, update, delete, truncate on table career_mcp.post_draft_owners from career_mcp_runtime';
+    execute 'grant select on table career_mcp.post_draft_owners to career_mcp_runtime';
+  end if;
+
+  if pg_catalog.to_regclass('career_mcp.runtime_role_owners') is not null then
+    execute 'revoke insert, update, delete, truncate on table career_mcp.runtime_role_owners from career_mcp_runtime';
+    execute 'grant select on table career_mcp.runtime_role_owners to career_mcp_runtime';
+  end if;
+
+  if pg_catalog.to_regprocedure(
+    'career_mcp.claim_post_draft_owner()'
+  ) is not null then
+    execute 'revoke all on function career_mcp.claim_post_draft_owner() from public';
+    execute 'grant execute on function career_mcp.claim_post_draft_owner() to career_mcp_runtime';
+  end if;
+
+  if pg_catalog.to_regprocedure(
+    'career_mcp.keep_post_draft_owner_immutable()'
+  ) is not null then
+    execute 'revoke all on function career_mcp.keep_post_draft_owner_immutable() from public';
+    execute 'grant execute on function career_mcp.keep_post_draft_owner_immutable() to career_mcp_runtime';
+  end if;
+
+  if pg_catalog.to_regprocedure(
+    'career_mcp.reject_post_draft_owner_mutation()'
+  ) is not null then
+    execute 'revoke all on function career_mcp.reject_post_draft_owner_mutation() from public';
+    execute 'grant execute on function career_mcp.reject_post_draft_owner_mutation() to career_mcp_runtime';
+  end if;
+
+  if pg_catalog.to_regprocedure(
+    'career_mcp.reject_runtime_role_owner_mutation()'
+  ) is not null then
+    execute 'revoke all on function career_mcp.reject_runtime_role_owner_mutation() from public';
+    execute 'grant execute on function career_mcp.reject_runtime_role_owner_mutation() to career_mcp_runtime';
+  end if;
+
   if pg_catalog.to_regprocedure(
     'career_mcp.claim_brand_brief_source()'
   ) is not null then

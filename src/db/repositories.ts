@@ -14,6 +14,7 @@ import {
   outreachDrafts,
   people,
   postDraftMedia,
+  postDraftOwners,
   postDrafts,
   postMedia,
   postPreviews,
@@ -167,6 +168,7 @@ export type OutreachDraftVersionInput = {
 
 export type PostDraftVersionInput = {
   draftId?: string;
+  ownerSubject: string;
   text: string;
   visibility: string;
   checksum: string | ((version: number) => string);
@@ -178,7 +180,6 @@ export type PostMediaCreateInput = Omit<typeof postMedia.$inferInsert, "createdA
 };
 
 export type PostDraftVersionWithMediaInput = Omit<PostDraftVersionInput, "checksum"> & {
-  ownerSubject?: string;
   expectedVersion?: number;
   media: readonly { mediaId: string; altText: string }[];
   checksum: string | ((
@@ -627,6 +628,15 @@ async function lockLatestOwnedBrandBriefSource(
     eq(postDrafts.version, input.postVersion)
   )).limit(1).for("update");
   if (exact === undefined) {
+    throw brandBriefSourceNotFound();
+  }
+  const [ownership] = await transaction.select({
+    draftId: postDraftOwners.draftId
+  }).from(postDraftOwners).where(and(
+    eq(postDraftOwners.draftId, reference.draftId),
+    eq(postDraftOwners.ownerSubject, input.ownerSubject.toLowerCase())
+  )).limit(1);
+  if (ownership === undefined) {
     throw brandBriefSourceNotFound();
   }
   const sourceMediaOwners = await lockBrandBriefMediaOwners(
@@ -2030,6 +2040,7 @@ export function createRepositories(database: Database) {
           const [postRow] = await transaction.insert(postDrafts).values({
             id: randomUUID(),
             draftId: latest.draftId,
+            ownerSubject,
             text: exact.text,
             visibility: exact.visibility,
             version: nextVersion,
@@ -2188,9 +2199,26 @@ export function createRepositories(database: Database) {
         return listPostDraftMediaForVersion(database, postDraftId, version);
       }
     },
+    postDraftOwners: {
+      async getOwner(draftId: string): Promise<string | undefined> {
+        if (!isUuid(draftId)) {
+          return undefined;
+        }
+        const [owner] = await database.select({
+          ownerSubject: postDraftOwners.ownerSubject
+        }).from(postDraftOwners).where(
+          eq(postDraftOwners.draftId, draftId)
+        ).limit(1);
+        return owner?.ownerSubject;
+      }
+    },
     postDrafts: {
       async createVersion(input: PostDraftVersionInput): Promise<PostDraft> {
+        if (!isUuid(input.ownerSubject)) {
+          throw new Error("ownerSubject must be a valid UUID");
+        }
         const draftId = input.draftId ?? randomUUID();
+        const ownerSubject = input.ownerSubject.toLowerCase();
         return serializableTransaction(database, async (transaction) => {
           const [latest] = await transaction.select().from(postDrafts).where(
             eq(postDrafts.draftId, draftId)
@@ -2200,6 +2228,7 @@ export function createRepositories(database: Database) {
           const [post] = await transaction.insert(postDrafts).values({
             id: randomUUID(),
             draftId,
+            ownerSubject,
             text: input.text,
             visibility: input.visibility,
             version,
@@ -2216,9 +2245,10 @@ export function createRepositories(database: Database) {
       async createVersionWithMedia(
         input: PostDraftVersionWithMediaInput
       ): Promise<{ post: PostDraft; media: PostDraftMediaWithMetadata[] }> {
-        if (input.media.length > 0 && (input.ownerSubject === undefined || !isUuid(input.ownerSubject))) {
+        if (!isUuid(input.ownerSubject)) {
           throw new Error("ownerSubject must be a valid UUID");
         }
+        const ownerSubject = input.ownerSubject.toLowerCase();
         if (input.media.length > 4) {
           throw new Error("A post draft version can contain at most four media items");
         }
@@ -2260,8 +2290,8 @@ export function createRepositories(database: Database) {
               ).orderBy(asc(postMedia.id)).for("update");
           if (
             lockedMedia.length !== sortedMediaIds.length
-            || lockedMedia.some(({ ownerSubject }) => (
-              ownerSubject.toLowerCase() !== input.ownerSubject?.toLowerCase()
+            || lockedMedia.some(({ ownerSubject: mediaOwnerSubject }) => (
+              mediaOwnerSubject.toLowerCase() !== ownerSubject
             ))
           ) {
             throw new Error("Every media item must exist and be owned by the request subject");
@@ -2285,6 +2315,7 @@ export function createRepositories(database: Database) {
           const [postRow] = await transaction.insert(postDrafts).values({
             id: randomUUID(),
             draftId,
+            ownerSubject,
             text: input.text,
             visibility: input.visibility,
             version,

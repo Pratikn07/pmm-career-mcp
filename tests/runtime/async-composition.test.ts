@@ -201,6 +201,7 @@ it("passes production TLS intent from injected config instead of global process 
   expect(createDatabase).toHaveBeenCalledWith(
     "postgresql://career_mcp_runtime@database.example/postgres",
     {
+      legacyPostOwnerSubject: "123e4567-e89b-12d3-a456-426614174000",
       migrationDatabaseUrl: "postgresql://migration_owner@database.example/postgres",
       requireTls: true,
       tlsCaCertificate: databaseCaCertificate

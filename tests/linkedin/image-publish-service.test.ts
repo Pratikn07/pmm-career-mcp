@@ -247,6 +247,7 @@ describe("durable exact LinkedIn publishing", () => {
     await db.postDrafts.createVersionWithMedia({
       draftId: stale.post.draftId,
       expectedVersion: stale.post.version,
+      ownerSubject: subject,
       text: "Newer immutable version",
       visibility: "CONNECTIONS",
       state: "draft",

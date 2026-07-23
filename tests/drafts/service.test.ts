@@ -11,7 +11,8 @@ import { DomainError } from "../../src/domain/errors.js";
 import { checksumLinkedInPost } from "../../src/posts/post-checksum.js";
 
 const db = await createTestDatabase();
-const drafts = createDraftService(db);
+const SUBJECT = "123e4567-e89b-42d3-a456-426614174000";
+const drafts = createDraftService(db, { subject: SUBJECT });
 
 afterEach(async () => (await db.resetForTests()));
 afterAll(async () => (await db.close()));
@@ -261,8 +262,24 @@ describe("post drafts", () => {
     }));
   });
 
+  it("does not reveal or revise another subject's logical draft", async () => {
+    const first = await drafts.createPost({
+      text: "Owner-private draft",
+      visibility: "CONNECTIONS"
+    });
+    const foreignDrafts = createDraftService(db, { subject: randomUUID() });
+
+    expect(await foreignDrafts.getPostVersion(first.id, first.version)).toBeUndefined();
+    expect(await foreignDrafts.getPostHistory(first.id)).toEqual([]);
+    await expectDomainError(
+      () => foreignDrafts.revisePost(first.id, "Cross-owner revision"),
+      "NOT_FOUND"
+    );
+    expect(await drafts.getPostHistory(first.id)).toEqual([first]);
+  });
+
   it("copies ordered media into a new v2 version when revising post text", async () => {
-    const ownerSubject = randomUUID();
+    const ownerSubject = SUBJECT;
     const first = await drafts.createPost({ text: "First with images", visibility: "PUBLIC" });
     const stored = await Promise.all(["a", "b"].map(async (digit, index) => db.postMedia.create({
       id: randomUUID(),
@@ -318,7 +335,7 @@ describe("post drafts", () => {
   });
 
   it("rejects a text revision if media changes after its outside read", async () => {
-    const ownerSubject = randomUUID();
+    const ownerSubject = SUBJECT;
     const first = await drafts.createPost({ text: "Concurrent base", visibility: "PUBLIC" });
     const stored = await Promise.all(["c", "d"].map(async (digit) => db.postMedia.create({
       id: randomUUID(),
@@ -368,7 +385,7 @@ describe("post drafts", () => {
         }
       }
     } as typeof db;
-    const racingDrafts = createDraftService(racingDatabase);
+    const racingDrafts = createDraftService(racingDatabase, { subject: ownerSubject });
 
     await expectDomainError(
       () => racingDrafts.revisePost(first.id, "Must not restore stale media"),

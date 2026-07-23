@@ -60,6 +60,7 @@ async function startStack(): Promise<TestStack> {
       migrationDatabaseUrl: "postgresql://postgres:postgres@127.0.0.1:5432/postgres",
       baseUrl: "http://127.0.0.1:3000",
       authMode: "none",
+      allowedSubject: "123e4567-e89b-12d3-a456-426614174000",
       oidcDiscoveryTimeoutMs: 5_000,
       linkedinPublishEnabled: false,
       linkedinImagePublishEnabled: false,

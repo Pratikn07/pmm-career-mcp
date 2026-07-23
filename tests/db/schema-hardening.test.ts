@@ -24,6 +24,7 @@ afterAll(async () => {
 });
 
 async function seedConstraintGraph() {
+  const postOwner = randomUUID();
   const company = await db.companies.upsert({
     ycId: `constraint-company-${randomUUID()}`,
     name: "Constraint Company"
@@ -64,12 +65,13 @@ async function seedConstraintGraph() {
     throw new Error("Expected seeded shortlist entry");
   }
   const post = await db.postDrafts.createVersion({
+    ownerSubject: postOwner,
     text: "Constraint post",
     visibility: "PUBLIC",
     checksum: "constraint-checksum",
     state: "draft"
   });
-  const mediaOwner = randomUUID();
+  const mediaOwner = postOwner;
   const media = await db.postMedia.create({
     id: randomUUID(),
     ownerSubject: mediaOwner,
@@ -124,6 +126,14 @@ async function createPreClaimDatabase(): Promise<PGlite> {
   ]) {
     await client.exec(await readFile(resolve("drizzle", migration), "utf8"));
   }
+  return client;
+}
+
+async function createPreOwnerDatabase(): Promise<PGlite> {
+  const client = await createPreClaimDatabase();
+  await client.exec(
+    await readFile(resolve("drizzle/0005_brand_source_media_exclusive.sql"), "utf8")
+  );
   return client;
 }
 
@@ -443,6 +453,76 @@ describe("brand source-media exclusivity", () => {
 });
 
 describe("brand brief source claims", () => {
+  it("fails closed when a legacy text-only draft has no explicitly configured owner", async () => {
+    const client = await createPreOwnerDatabase();
+    try {
+      await client.exec(`
+        insert into career_mcp.post_drafts (
+          id, draft_id, text, visibility, version, checksum, state, created_at, updated_at
+        ) values (
+          '${randomUUID()}', '${randomUUID()}', 'Legacy text only', 'PUBLIC', 1,
+          'legacy-text-only', 'draft', now(), now()
+        )
+      `);
+
+      await expect(client.exec(
+        await readFile(resolve("drizzle/0006_brand_brief_source_claims.sql"), "utf8")
+      )).rejects.toMatchObject({
+        code: "23514",
+        constraint: "legacy_post_owner_required"
+      });
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("uses an explicit configured owner to backfill legacy text-only draft versions", async () => {
+    const client = await createPreOwnerDatabase();
+    const owner = randomUUID();
+    const draftId = randomUUID();
+    const versionIds = [randomUUID(), randomUUID()];
+    try {
+      await client.exec(`
+        insert into career_mcp.post_drafts (
+          id, draft_id, text, visibility, version, checksum, state, created_at, updated_at
+        ) values
+          (
+            '${versionIds[0]}', '${draftId}', 'Legacy one', 'PUBLIC', 1,
+            'legacy-one', 'draft', now(), now()
+          ),
+          (
+            '${versionIds[1]}', '${draftId}', 'Legacy two', 'PUBLIC', 2,
+            'legacy-two', 'draft', now(), now()
+          );
+        select pg_catalog.set_config(
+          'career_mcp.legacy_post_owner_subject',
+          '${owner}',
+          false
+        )
+      `);
+      await client.exec(
+        await readFile(resolve("drizzle/0006_brand_brief_source_claims.sql"), "utf8")
+      );
+
+      expect((await client.query(`
+        select draft_id, owner_subject
+        from career_mcp.post_draft_owners
+        where draft_id = '${draftId}'
+      `)).rows).toEqual([{ draft_id: draftId, owner_subject: owner }]);
+      expect((await client.query(`
+        select id, owner_subject
+        from career_mcp.post_drafts
+        where draft_id = '${draftId}'
+        order by version
+      `)).rows).toEqual([
+        { id: versionIds[0], owner_subject: owner },
+        { id: versionIds[1], owner_subject: owner }
+      ]);
+    } finally {
+      await client.close();
+    }
+  });
+
   it("backfills exact immutable owner and post-version lineage for legacy briefs", async () => {
     const client = await createPreClaimDatabase();
     try {
@@ -642,12 +722,14 @@ describe("database domain constraints", () => {
   });
 
   it("rejects post versions below one", async () => {
+    const ownerSubject = randomUUID();
     await expectCheckViolation(`
       insert into career_mcp.post_drafts (
-        id, draft_id, text, visibility, version, checksum, state, created_at, updated_at
+        id, draft_id, owner_subject, text, visibility, version, checksum, state, created_at, updated_at
       ) values (
         '${randomUUID()}',
         '${randomUUID()}',
+        '${ownerSubject}',
         'Invalid version',
         'PUBLIC',
         0,
@@ -660,12 +742,14 @@ describe("database domain constraints", () => {
   });
 
   it("rejects a post visibility outside the LinkedIn visibility domain", async () => {
+    const ownerSubject = randomUUID();
     await expectCheckViolation(`
       insert into career_mcp.post_drafts (
-        id, draft_id, text, visibility, version, checksum, state, created_at, updated_at
+        id, draft_id, owner_subject, text, visibility, version, checksum, state, created_at, updated_at
       ) values (
         '${randomUUID()}',
         '${randomUUID()}',
+        '${ownerSubject}',
         'Invalid visibility',
         'PRIVATE',
         1,
@@ -678,12 +762,14 @@ describe("database domain constraints", () => {
   });
 
   it("rejects a post state outside the publishing state machine", async () => {
+    const ownerSubject = randomUUID();
     await expectCheckViolation(`
       insert into career_mcp.post_drafts (
-        id, draft_id, text, visibility, version, checksum, state, created_at, updated_at
+        id, draft_id, owner_subject, text, visibility, version, checksum, state, created_at, updated_at
       ) values (
         '${randomUUID()}',
         '${randomUUID()}',
+        '${ownerSubject}',
         'Invalid state',
         'PUBLIC',
         1,

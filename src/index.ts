@@ -201,6 +201,9 @@ export async function createCareerApplication(
   const database = options.database ?? await createDatabase(options.config.databaseUrl, {
     migrationDatabaseUrl: options.config.migrationDatabaseUrl,
     requireTls: options.config.nodeEnv === "production",
+    ...(options.config.allowedSubject === undefined
+      ? {}
+      : { legacyPostOwnerSubject: options.config.allowedSubject }),
     ...(options.config.databaseCaCertificate === undefined
       ? {}
       : { tlsCaCertificate: options.config.databaseCaCertificate })
@@ -219,7 +222,6 @@ export async function createCareerApplication(
     now
   });
   const pipeline = createPipelineService(database);
-  const drafts = createDraftService(database);
   const previews = createPreviewService(database, { clock: now });
   const client = options.linkedinPublishingClient ?? (options.config.tokenEncryptionKey === undefined
     ? unavailableLinkedInClient()
@@ -230,6 +232,23 @@ export async function createCareerApplication(
   const linkedin = options.linkedinOAuth ?? unavailableLinkedInOAuth();
   const mediaStorageFactory = options.mediaStorageFactory ?? createSupabaseDraftMediaStorage;
   const createMcpServer = (context: RequestAuthContext | undefined): McpServer => {
+    const draftSubject = context?.subject ?? options.config.allowedSubject;
+    const drafts = draftSubject === undefined
+      ? {
+          async createOutreach(): Promise<never> {
+            throw new DomainError("AUTH_REQUIRED", "Authenticated request identity is required");
+          },
+          async createPost(): Promise<never> {
+            throw new DomainError("AUTH_REQUIRED", "Authenticated request identity is required");
+          },
+          async revisePost(): Promise<never> {
+            throw new DomainError("AUTH_REQUIRED", "Authenticated request identity is required");
+          },
+          async getPostHistory(): Promise<never> {
+            throw new DomainError("AUTH_REQUIRED", "Authenticated request identity is required");
+          }
+        }
+      : createDraftService(database, { subject: draftSubject });
     const connectionValid = createLinkedInConnectionPreflight(database, {
       ...(options.config.tokenEncryptionKey === undefined
         ? {}
@@ -385,6 +404,9 @@ export async function startServer(
   const database = await (dependencies.createDatabase ?? createDatabase)(config.databaseUrl, {
     migrationDatabaseUrl: config.migrationDatabaseUrl,
     requireTls: config.nodeEnv === "production",
+    ...(config.allowedSubject === undefined
+      ? {}
+      : { legacyPostOwnerSubject: config.allowedSubject }),
     ...(config.databaseCaCertificate === undefined
       ? {}
       : { tlsCaCertificate: config.databaseCaCertificate })

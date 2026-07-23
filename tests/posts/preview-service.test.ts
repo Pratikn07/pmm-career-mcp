@@ -15,7 +15,8 @@ import {
 } from "../../src/posts/preview-service.js";
 
 const db = await createTestDatabase();
-const drafts = createDraftService(db);
+const SUBJECT = "123e4567-e89b-42d3-a456-426614174000";
+const drafts = createDraftService(db, { subject: SUBJECT });
 let nowMs = Date.parse("2026-07-16T12:00:00.000Z");
 const clock = () => new Date(nowMs);
 const previews = createPreviewService(db, { clock });

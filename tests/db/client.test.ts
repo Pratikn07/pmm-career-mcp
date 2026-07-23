@@ -92,6 +92,39 @@ describe("production PostgreSQL client", () => {
     expect(mocks.postgres).not.toHaveBeenCalled();
   });
 
+  it("rejects URLs that override the protected legacy owner startup parameter", async () => {
+    const unsafeUrl = `${MIGRATION_DATABASE_URL}?career_mcp.legacy_post_owner_subject=00000000-0000-0000-0000-000000000001`;
+
+    await expect(createDatabase(DATABASE_URL, {
+      migrationDatabaseUrl: unsafeUrl,
+      requireTls: false
+    })).rejects.toThrow(/legacy_post_owner_subject/i);
+    expect(mocks.postgres).not.toHaveBeenCalled();
+  });
+
+  it("sets the configured legacy owner only on the migration connection", async () => {
+    const legacyPostOwnerSubject = "00000000-0000-0000-0000-000000000001";
+
+    const database = await createDatabase(DATABASE_URL, {
+      migrationDatabaseUrl: MIGRATION_DATABASE_URL,
+      requireTls: false,
+      legacyPostOwnerSubject
+    });
+
+    const postgresCalls = mocks.postgres.mock.calls as unknown as Array<[
+      string,
+      { connection: Record<string, unknown> }
+    ]>;
+    const migrationOptions = postgresCalls[0]![1];
+    const runtimeOptions = postgresCalls[1]![1];
+    expect(migrationOptions.connection["career_mcp.legacy_post_owner_subject"])
+      .toBe(legacyPostOwnerSubject);
+    expect(runtimeOptions.connection).not.toHaveProperty(
+      "career_mcp.legacy_post_owner_subject"
+    );
+    await database.close();
+  });
+
   it("uses separate migration and runtime pools with verified TLS and finite timeouts", async () => {
     process.env.NODE_ENV = "development";
 

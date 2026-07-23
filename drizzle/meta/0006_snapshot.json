@@ -1,5 +1,5 @@
 {
-  "id": "f0d36c52-aa00-4ed5-839a-3a006e80042a",
+  "id": "d94b02e0-e7a5-4713-a3a5-e0a81ed9abd2",
   "prevId": "841e3b55-f23f-4505-ae80-705db5c7d6b0",
   "version": "7",
   "dialect": "postgresql",
@@ -1328,6 +1328,62 @@
       },
       "isRLSEnabled": false
     },
+    "career_mcp.post_draft_owners": {
+      "name": "post_draft_owners",
+      "schema": "career_mcp",
+      "columns": {
+        "draft_id": {
+          "name": "draft_id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "owner_subject": {
+          "name": "owner_subject",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {
+        "post_draft_owners_owner_subject_idx": {
+          "name": "post_draft_owners_owner_subject_idx",
+          "columns": [
+            {
+              "expression": "owner_subject",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "post_draft_owners_draft_owner_unique": {
+          "name": "post_draft_owners_draft_owner_unique",
+          "nullsNotDistinct": false,
+          "columns": [
+            "draft_id",
+            "owner_subject"
+          ]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
     "career_mcp.post_drafts": {
       "name": "post_drafts",
       "schema": "career_mcp",
@@ -1340,6 +1396,12 @@
         },
         "draft_id": {
           "name": "draft_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "owner_subject": {
+          "name": "owner_subject",
           "type": "uuid",
           "primaryKey": false,
           "notNull": true
@@ -1387,8 +1449,47 @@
           "notNull": true
         }
       },
-      "indexes": {},
-      "foreignKeys": {},
+      "indexes": {
+        "post_drafts_owner_idx": {
+          "name": "post_drafts_owner_idx",
+          "columns": [
+            {
+              "expression": "draft_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "owner_subject",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "post_drafts_owner_fk": {
+          "name": "post_drafts_owner_fk",
+          "tableFrom": "post_drafts",
+          "tableTo": "post_draft_owners",
+          "schemaTo": "career_mcp",
+          "columnsFrom": [
+            "draft_id",
+            "owner_subject"
+          ],
+          "columnsTo": [
+            "draft_id",
+            "owner_subject"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {
         "post_draft_version_unique": {
@@ -1914,6 +2015,45 @@
           "value": "\"career_mcp\".\"publish_attempts\".\"media_count\" between 0 and 4"
         }
       },
+      "isRLSEnabled": false
+    },
+    "career_mcp.runtime_role_owners": {
+      "name": "runtime_role_owners",
+      "schema": "career_mcp",
+      "columns": {
+        "role_name": {
+          "name": "role_name",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "owner_subject": {
+          "name": "owner_subject",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "runtime_role_owners_owner_subject_unique": {
+          "name": "runtime_role_owners_owner_subject_unique",
+          "nullsNotDistinct": false,
+          "columns": [
+            "owner_subject"
+          ]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {},
       "isRLSEnabled": false
     },
     "career_mcp.settings": {

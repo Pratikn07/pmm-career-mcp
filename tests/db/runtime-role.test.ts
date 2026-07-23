@@ -106,6 +106,16 @@ describe("Supabase runtime-role operator template", () => {
     expect(sql).toMatch(
       /grant\s+execute\s+on\s+function\s+career_mcp\.claim_brand_brief_source\(\)\s+to\s+career_mcp_runtime/i
     );
+    for (const ledger of ["post_draft_owners", "runtime_role_owners"]) {
+      expect(sql).toMatch(new RegExp(
+        `revoke\\s+insert,\\s*update,\\s*delete,\\s*truncate\\s+on\\s+table\\s+career_mcp\\.${ledger}\\s+from\\s+career_mcp_runtime`,
+        "i"
+      ));
+      expect(sql).toMatch(new RegExp(
+        `grant\\s+select\\s+on\\s+table\\s+career_mcp\\.${ledger}\\s+to\\s+career_mcp_runtime`,
+        "i"
+      ));
+    }
     expect(sql).not.toMatch(/grant[\s\S]{0,120}\b(?:public|anon|authenticated)\b/i);
     expect(sql).not.toMatch(/grant\s+(?:create|all)(?:\s+privileges)?\s+on\s+schema/i);
   });
@@ -174,9 +184,23 @@ describe("Supabase runtime-role operator template", () => {
   it("backfills and enforces immutable owner-scoped brand brief source claims", async () => {
     const sql = await brandBriefSourceClaimsMigrationSql();
 
+    expect(sql).toMatch(/create\s+table\s+"career_mcp"\."post_draft_owners"/i);
+    expect(sql).toMatch(/create\s+table\s+"career_mcp"\."runtime_role_owners"/i);
+    expect(sql).toMatch(
+      /alter\s+table\s+"career_mcp"\."post_drafts"\s+add\s+column\s+"owner_subject"\s+uuid/i
+    );
+    expect(sql).toMatch(/career_mcp\.legacy_post_owner_subject/i);
+    expect(sql).toMatch(/legacy_post_owner_required[\s\S]*raise\s+exception/i);
+    expect(sql).toMatch(/legacy_post_owner_mismatch[\s\S]*raise\s+exception/i);
+    expect(sql).toMatch(
+      /brand_brief_source_owner_mismatch[\s\S]*raise\s+exception/i
+    );
+    expect(sql).toMatch(
+      /claim_brand_brief_source[\s\S]*join\s+"career_mcp"\."post_draft_owners"/i
+    );
     expect(sql).toMatch(/create\s+table\s+"career_mcp"\."brand_brief_source_claims"/i);
     expect(sql).toMatch(
-      /lock\s+table\s+"career_mcp"\."brand_visual_briefs"[\s\S]*share\s+row\s+exclusive/i
+      /lock\s+table[\s\S]*"career_mcp"\."brand_visual_briefs"[\s\S]*share\s+row\s+exclusive/i
     );
     expect(sql).toMatch(
       /insert\s+into\s+"career_mcp"\."brand_brief_source_claims"[\s\S]*select[\s\S]*from\s+"career_mcp"\."brand_visual_briefs"/i
@@ -191,11 +215,11 @@ describe("Supabase runtime-role operator template", () => {
     expect(sql).toMatch(
       /before\s+update\s+or\s+delete[\s\S]*on\s+"career_mcp"\."brand_brief_source_claims"[\s\S]*reject_brand_brief_source_claim_mutation/i
     );
-    expect(sql.match(/security\s+definer/gi)).toHaveLength(1);
-    expect(sql.match(/security\s+invoker/gi)).toHaveLength(2);
-    expect(sql.match(/set\s+search_path\s*=\s*''/gi)).toHaveLength(3);
+    expect(sql.match(/security\s+definer/gi)).toHaveLength(2);
+    expect(sql.match(/security\s+invoker/gi)).toHaveLength(5);
+    expect(sql.match(/set\s+search_path\s*=\s*''/gi)).toHaveLength(7);
     expect(sql.match(/revoke\s+all\s+on\s+function[\s\S]*?from\s+public/gi))
-      .toHaveLength(3);
+      .toHaveLength(7);
     expect(sql).toMatch(
       /revoke\s+insert,\s*update,\s*delete,\s*truncate\s+on\s+table\s+"career_mcp"\."brand_brief_source_claims"\s+from\s+career_mcp_runtime/i
     );
@@ -209,6 +233,9 @@ describe("Supabase runtime-role operator template", () => {
   it("records the brand brief source claim table and complete foreign-key indexes", async () => {
     const snapshot = await brandBriefSourceClaimsSnapshot();
 
+    expect(snapshot).toMatch(/career_mcp\.post_draft_owners/i);
+    expect(snapshot).toMatch(/career_mcp\.runtime_role_owners/i);
+    expect(snapshot).toMatch(/post_drafts_owner_fk/i);
     expect(snapshot).toMatch(/career_mcp\.brand_brief_source_claims/i);
     expect(snapshot).toMatch(/brand_brief_source_claims_brief_id_brand_visual_briefs_id_fk/i);
     expect(snapshot).toMatch(/brand_brief_source_claims_post_version_fk/i);

@@ -228,7 +228,7 @@ export function createBrandRenderService(
   }
   const subject = dependencies.subject.toLowerCase();
   const renderCover = dependencies.renderCover ?? renderBrandedCover;
-  const drafts = createDraftService(database);
+  const drafts = createDraftService(database, { subject });
 
   async function exactReadySource(
     input: RenderBrandCoverInput

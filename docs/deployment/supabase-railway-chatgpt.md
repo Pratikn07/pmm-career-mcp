@@ -160,7 +160,7 @@ The publish state machine does not automatically retry. `media_upload_failed` an
 | OAuth discovery or consent fails | Recheck `SUPABASE_URL`, the derived issuer, Site URL, Authorization Path `/oauth/consent`, OAuth 2.1/DCR settings, and `openid`/`email` scopes. |
 | Token is rejected | Run the private token verifier. Confirm the mandatory hook is enabled and check the exact issuer, canonical `BASE_URL` audience, expiry, one allowed subject, and `openid email` scopes. Do not bypass a mismatch. |
 | ChatGPT cannot initialize `/mcp` | Confirm the HTTPS connector URL, successful OAuth consent, protected-resource metadata, and a healthy `/ready` endpoint. |
-| Scheduled run cannot pass a generated image file | Save the text draft plus a detailed image brief and stop. Continue interactively; do not add an API key. |
+| Scheduled run cannot pass a generated image file | Save the text draft plus a branded visual brief and stop. Continue interactively; do not add an API key. |
 | `publish_unknown` | Do not retry. Inspect LinkedIn manually for the exact content before creating a new version and preview. |
 | Any secret appears in output | Revoke or rotate it using the provider, remove it from the exposed location, and repeat only the affected validation. |
 

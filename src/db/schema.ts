@@ -245,9 +245,26 @@ export const mediaUsageClaims = careerMcp.table("media_usage_claims", {
   )
 ]);
 
+export const runtimeRoleOwners = careerMcp.table("runtime_role_owners", {
+  roleName: text("role_name").primaryKey(),
+  ownerSubject: uuid("owner_subject").notNull().unique(),
+  createdAt: timestamptz("created_at").notNull()
+});
+
+export const postDraftOwners = careerMcp.table("post_draft_owners", {
+  draftId: uuid("draft_id").primaryKey(),
+  ownerSubject: uuid("owner_subject").notNull(),
+  createdAt: timestamptz("created_at").notNull()
+}, (table) => [
+  unique("post_draft_owners_draft_owner_unique")
+    .on(table.draftId, table.ownerSubject),
+  index("post_draft_owners_owner_subject_idx").on(table.ownerSubject)
+]);
+
 export const postDrafts = careerMcp.table("post_drafts", {
   id: uuid("id").primaryKey(),
   draftId: uuid("draft_id").notNull(),
+  ownerSubject: uuid("owner_subject").notNull(),
   text: text("text").notNull(),
   visibility: text("visibility").notNull(),
   version: integer("version").notNull(),
@@ -256,6 +273,12 @@ export const postDrafts = careerMcp.table("post_drafts", {
   createdAt: timestamptz("created_at").notNull(),
   updatedAt: timestamptz("updated_at").notNull()
 }, (table) => [
+  foreignKey({
+    name: "post_drafts_owner_fk",
+    columns: [table.draftId, table.ownerSubject],
+    foreignColumns: [postDraftOwners.draftId, postDraftOwners.ownerSubject]
+  }),
+  index("post_drafts_owner_idx").on(table.draftId, table.ownerSubject),
   unique("post_draft_version_unique").on(table.draftId, table.version),
   unique("post_draft_row_version_unique").on(table.id, table.version),
   check("post_drafts_version_check", sql`${table.version} >= 1`),
@@ -506,6 +529,8 @@ export const schema = {
   brandProfiles,
   postMedia,
   mediaUsageClaims,
+  runtimeRoleOwners,
+  postDraftOwners,
   postDrafts,
   brandVisualBriefs,
   brandBriefSourceClaims,

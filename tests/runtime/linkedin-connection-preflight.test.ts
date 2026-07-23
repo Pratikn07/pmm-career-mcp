@@ -13,6 +13,7 @@ afterAll(async () => db.close());
 it("rejects malformed encrypted production credentials before the composed publish claim", async () => {
   const subject = "123e4567-e89b-12d3-a456-426614174000";
   const created = await db.postDrafts.createVersionWithMedia({
+    ownerSubject: subject,
     text: "Credential preflight must happen first",
     visibility: "CONNECTIONS",
     state: "draft",

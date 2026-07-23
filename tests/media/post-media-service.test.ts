@@ -76,8 +76,9 @@ function service(database: CareerDatabase = db) {
   return createPostMediaService(database, dependencies);
 }
 
-async function textDraft(text = "Private PMM draft") {
+async function textDraft(text = "Private PMM draft", ownerSubject = subject) {
   return await db.postDrafts.createVersion({
+    ownerSubject,
     text,
     visibility: "CONNECTIONS",
     checksum: "legacy-v1",
@@ -226,7 +227,7 @@ describe("post media service", () => {
       downloadFile,
       inspectImage
     });
-    const otherDraft = await textDraft("Other owner");
+    const otherDraft = await textDraft("Other owner", otherSubject);
     await other.attachFiles({
       postId: otherDraft.draftId,
       expectedVersion: 1,
@@ -304,6 +305,7 @@ describe("post media service", () => {
     const racingDownload = vi.fn(async (file: OpenAiFileRef) => {
       await db.postDrafts.createVersion({
         draftId: first.draftId,
+        ownerSubject: subject,
         text: "Concurrent text revision",
         visibility: first.visibility,
         checksum: "concurrent-version",

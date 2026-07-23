@@ -9,7 +9,6 @@ import { hashApprovalCapabilityForSubject } from "../../src/posts/preview-servic
 import { createTestDatabase, queryTestDatabase } from "../support/database.js";
 
 const db = await createTestDatabase();
-const drafts = createDraftService(db);
 
 const SUBJECT = "123e4567-e89b-12d3-a456-426614174000";
 const OTHER_SUBJECT = "123e4567-e89b-12d3-a456-426614174099";
@@ -22,6 +21,7 @@ const MEDIA_IDS = [
 ] as const;
 const NOW = "2026-07-19T12:00:00.000Z";
 const ACCESS_TOKEN = "private-request-bearer-that-must-never-leak";
+const drafts = createDraftService(db, { subject: SUBJECT });
 
 type CreatedV2Draft = Awaited<ReturnType<typeof createV2Draft>>;
 
@@ -71,7 +71,7 @@ async function createV2Draft(input: {
   }
   const created = await db.postDrafts.createVersionWithMedia({
     draftId,
-    ...(mediaCount === 0 ? {} : { ownerSubject }),
+    ownerSubject,
     text,
     visibility,
     state: input.state ?? "draft",
@@ -207,6 +207,7 @@ describe("exact LinkedIn review creation", () => {
 
   it("rejects stored legacy-v1, corrupt-v2, stale, and invalid-state drafts without creating a preview", async () => {
     const legacy = await db.postDrafts.createVersion({
+      ownerSubject: SUBJECT,
       text: "Legacy text",
       visibility: "PUBLIC",
       state: "draft",
@@ -234,6 +235,7 @@ describe("exact LinkedIn review creation", () => {
     await db.postDrafts.createVersionWithMedia({
       draftId: stale.draftId,
       expectedVersion: stale.post.version,
+      ownerSubject: SUBJECT,
       text: "Newer exact version",
       visibility: "CONNECTIONS",
       state: "draft",
@@ -349,6 +351,7 @@ describe("exact LinkedIn review creation", () => {
         await db.postDrafts.createVersionWithMedia({
           draftId: raced.draftId,
           expectedVersion: raced.post.version,
+          ownerSubject: SUBJECT,
           text: "A concurrent revision",
           visibility: "CONNECTIONS",
           state: "draft",

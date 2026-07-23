@@ -17,6 +17,7 @@ export type DatabaseConnectionOptions = {
   migrationDatabaseUrl?: string;
   requireTls: boolean;
   tlsCaCertificate?: string;
+  legacyPostOwnerSubject?: string;
 };
 
 type DatabaseClientPurpose = "migration" | "runtime";
@@ -24,11 +25,14 @@ type DatabaseClientPurpose = "migration" | "runtime";
 const CONNECTION_TIMEOUT_SECONDS = 10;
 const IDLE_TIMEOUT_SECONDS = 30;
 const SESSION_TIMEOUT_MILLISECONDS = 30_000;
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const PROTECTED_STARTUP_PARAMETERS = new Set([
   "application_name",
   "statement_timeout",
-  "idle_in_transaction_session_timeout"
+  "idle_in_transaction_session_timeout",
+  "career_mcp.legacy_post_owner_subject"
 ]);
 
 function validateDatabaseUrl(
@@ -57,7 +61,8 @@ function connectionOptions(
   databaseUrl: URL,
   purpose: DatabaseClientPurpose,
   requireTls: boolean,
-  tlsCaCertificate?: string
+  tlsCaCertificate?: string,
+  legacyPostOwnerSubject?: string
 ) {
   return {
     max: purpose === "migration" ? 1 : 5,
@@ -66,7 +71,10 @@ function connectionOptions(
     connection: {
       application_name: `pmm-career-mcp-${purpose}`,
       statement_timeout: SESSION_TIMEOUT_MILLISECONDS,
-      idle_in_transaction_session_timeout: SESSION_TIMEOUT_MILLISECONDS
+      idle_in_transaction_session_timeout: SESSION_TIMEOUT_MILLISECONDS,
+      ...(purpose === "migration" && legacyPostOwnerSubject !== undefined
+        ? { "career_mcp.legacy_post_owner_subject": legacyPostOwnerSubject }
+        : {})
     },
     ...(requireTls
       ? {
@@ -110,9 +118,22 @@ export async function createDatabase(
   const tlsCaCertificate = options.requireTls
     ? validateDatabaseCaCertificate(options.tlsCaCertificate ?? "", "TLS CA certificate")
     : undefined;
+  const legacyPostOwnerSubject = options.legacyPostOwnerSubject?.toLowerCase();
+  if (
+    legacyPostOwnerSubject !== undefined
+    && !UUID_PATTERN.test(legacyPostOwnerSubject)
+  ) {
+    throw new Error("legacyPostOwnerSubject must be a UUID");
+  }
   const migrationClient = postgres(
     migrationDatabaseUrl,
-    connectionOptions(migrationUrl, "migration", options.requireTls, tlsCaCertificate)
+    connectionOptions(
+      migrationUrl,
+      "migration",
+      options.requireTls,
+      tlsCaCertificate,
+      legacyPostOwnerSubject
+    )
   );
   let runtimeClient: ReturnType<typeof postgres> | undefined;
   let migrationClosed = false;

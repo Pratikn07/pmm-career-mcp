@@ -71,7 +71,6 @@ function localNoAuthConfig(): AppConfig {
     supabasePublishableKey: _supabasePublishableKey,
     oidcIssuer: _oidcIssuer,
     oidcAudience: _oidcAudience,
-    allowedSubject: _allowedSubject,
     tokenEncryptionKey: _tokenEncryptionKey,
     ...local
   } = config();

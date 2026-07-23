@@ -15,6 +15,7 @@ import {
 } from "../support/database.js";
 
 let db: TestCareerDatabase;
+const DEFAULT_POST_OWNER = "123e4567-e89b-42d3-a456-426614174000";
 const queryLog: TestQueryLogEntry[] = [];
 beforeAll(async () => {
   db = await createTestDatabase({ queryLog });
@@ -51,6 +52,7 @@ async function addTarget(name = "Ada Example") {
 
 async function addPost() {
   return (await db.postDrafts.createVersion({
+    ownerSubject: DEFAULT_POST_OWNER,
     text: "Timestamp validation",
     visibility: "PUBLIC",
     checksum: "timestamp-checksum",
@@ -109,7 +111,7 @@ it("persists a target with evidence provenance", async () => {
 });
 
 describe("database lifecycle", () => {
-  it("migrates exactly the twenty-one application tables into the private schema", async () => {
+  it("migrates exactly the twenty-three application tables into the private schema", async () => {
     const tables = await queryTestDatabase<{ table_name: string }>(db, `
       select table_name
       from information_schema.tables
@@ -130,11 +132,13 @@ describe("database lifecycle", () => {
       "outreach_drafts",
       "people",
       "post_draft_media",
+      "post_draft_owners",
       "post_drafts",
       "post_media",
       "post_previews",
       "publish_attempt_media",
       "publish_attempts",
+      "runtime_role_owners",
       "settings",
       "shortlist_entries",
       "shortlists",
@@ -356,6 +360,7 @@ describe("PostgreSQL transaction retries", () => {
 
     await expect(repositories.postDrafts.createVersion({
       draftId: randomUUID(),
+      ownerSubject: DEFAULT_POST_OWNER,
       text: "Retry me",
       visibility: "PUBLIC",
       checksum: "checksum",
@@ -379,6 +384,7 @@ describe("PostgreSQL transaction retries", () => {
     const operation = repositoryName === "postDrafts"
       ? repositories.postDrafts.createVersion({
           draftId: randomUUID(),
+          ownerSubject: DEFAULT_POST_OWNER,
           text: "Retry me",
           visibility: "PUBLIC",
           checksum: "checksum",
@@ -416,6 +422,7 @@ describe("PostgreSQL transaction retries", () => {
 
     await expect(repositories.postDrafts.createVersion({
       draftId: randomUUID(),
+      ownerSubject: DEFAULT_POST_OWNER,
       text: "Do not retry",
       visibility: "PUBLIC",
       checksum: "checksum",
@@ -1519,6 +1526,7 @@ describe("Brand Studio repositories", () => {
         );
       } else if (lineage === "unattached_exact") {
         const unattachedFirst = await db.postDrafts.createVersion({
+          ownerSubject: source.post.ownerSubject,
           text: "Unattached exact source",
           visibility: "PUBLIC",
           state: "draft",
@@ -1526,6 +1534,7 @@ describe("Brand Studio repositories", () => {
         });
         await db.postDrafts.createVersion({
           draftId: unattachedFirst.draftId,
+          ownerSubject: source.post.ownerSubject,
           text: "Unattached latest source",
           visibility: "PUBLIC",
           state: "draft",
@@ -1569,9 +1578,10 @@ describe("Brand Studio repositories", () => {
         const latestPostId = randomUUID();
         await queryTestDatabase(db, `
           insert into career_mcp.post_drafts (
-            id, draft_id, text, visibility, version, checksum, state, created_at, updated_at
+            id, draft_id, owner_subject, text, visibility, version, checksum, state, created_at, updated_at
           ) values (
-            '${latestPostId}', '${source.post.draftId}', 'Foreign latest media',
+            '${latestPostId}', '${source.post.draftId}', '${source.post.ownerSubject}',
+            'Foreign latest media',
             'PUBLIC', 2, 'foreign-latest', 'draft',
             '2026-07-23T00:00:00.000Z', '2026-07-23T00:00:00.000Z'
           )
@@ -1656,6 +1666,76 @@ describe("Brand Studio repositories", () => {
         postVersion: source.post.version,
         state: "ready"
       });
+  });
+
+  it("rejects a raw brief that claims another owner for an owned text-only post", async () => {
+    const owner = randomUUID();
+    const otherOwner = randomUUID();
+    const source = await readyBrandedRender(owner);
+    const forgedBriefId = randomUUID();
+
+    await expect(queryTestDatabase(db, `
+      insert into career_mcp.brand_visual_briefs (
+        id, owner_subject, post_draft_id, post_version, brand_profile_id,
+        brand_profile_version, template_id, template_version, prompt_format_version,
+        visual_mode, cover_hook, concept_summary, topic_label, generation_prompt,
+        negative_constraints_json, state, created_at
+      ) values (
+        '${forgedBriefId}', '${otherOwner}', '${source.post.id}', ${source.post.version},
+        '${source.brief.brandProfileId}', ${source.brief.brandProfileVersion},
+        'editorial-statement-v1', 1, 1, 'EDITORIAL_STATEMENT',
+        'Forged owner hook', 'Forged owner concept', null, 'Forged owner prompt',
+        '[]'::jsonb, 'ready', now()
+      )
+    `)).rejects.toMatchObject({
+      code: "23514",
+      constraint: "brand_brief_source_owner_mismatch"
+    });
+
+    expect(await queryTestDatabase<{ count: number }>(db, `
+      select count(*)::int as count
+      from career_mcp.brand_brief_source_claims
+      where brief_id = '${forgedBriefId}'
+    `)).toEqual([{ count: 0 }]);
+  });
+
+  it("keeps every logical draft version bound to its first owner", async () => {
+    const owner = randomUUID();
+    const otherOwner = randomUUID();
+    const first = await db.postDrafts.createVersionWithMedia({
+      ownerSubject: owner,
+      text: "Owner-bound text draft",
+      visibility: "PUBLIC",
+      checksum: "owner-bound-v1",
+      state: "draft",
+      media: []
+    });
+
+    await expect(db.postDrafts.createVersionWithMedia({
+      draftId: first.post.draftId,
+      expectedVersion: first.post.version,
+      ownerSubject: otherOwner,
+      text: "Cross-owner version",
+      visibility: "PUBLIC",
+      checksum: "owner-bound-v2",
+      state: "draft",
+      media: []
+    })).rejects.toMatchObject({
+      cause: {
+        code: "23514",
+        constraint: "post_draft_owner_immutable"
+      }
+    });
+
+    expect(await queryTestDatabase(db, `
+      select draft_id, owner_subject
+      from career_mcp.post_draft_owners
+      where draft_id = '${first.post.draftId}'
+    `)).toEqual([{
+      draft_id: first.post.draftId,
+      owner_subject: owner
+    }]);
+    expect(await db.postDrafts.listVersions(first.post.draftId)).toHaveLength(1);
   });
 
   it.each([
@@ -1924,6 +2004,7 @@ describe("Brand Studio repositories", () => {
       purpose: "brand_source"
     }]);
     const attachTarget = await db.postDrafts.createVersion({
+      ownerSubject: firstOwner,
       text: "Direct attachment target",
       visibility: "PUBLIC",
       checksum: "direct-attachment-target",
@@ -2465,6 +2546,7 @@ it("rolls back a shortlist when a later target violates its foreign key", async 
 
 it("creates immutable post draft versions", async () => {
   const first = (await db.postDrafts.createVersion({
+    ownerSubject: DEFAULT_POST_OWNER,
     text: "First",
     visibility: "PUBLIC",
     checksum: "checksum-1",
@@ -2472,6 +2554,7 @@ it("creates immutable post draft versions", async () => {
   }));
   const second = (await db.postDrafts.createVersion({
     draftId: first.draftId,
+    ownerSubject: DEFAULT_POST_OWNER,
     text: "Second",
     visibility: "PUBLIC",
     checksum: "checksum-2",
@@ -2581,6 +2664,7 @@ it.each([0, 1])(
     if (existingVersionCount === 1) {
       await db.postDrafts.createVersion({
         draftId,
+        ownerSubject: DEFAULT_POST_OWNER,
         text: "Existing",
         visibility: "PUBLIC",
         checksum: (version) => computePostChecksum("Existing", version),
@@ -2591,6 +2675,7 @@ it.each([0, 1])(
     const created = await Promise.all(["Concurrent A", "Concurrent B"].map(async (text) => (
       db.postDrafts.createVersion({
         draftId,
+        ownerSubject: DEFAULT_POST_OWNER,
         text,
         visibility: "PUBLIC",
         checksum: (version) => computePostChecksum(text, version),
@@ -2652,6 +2737,7 @@ it("rolls back a discovery refresh when a later evidence row is invalid", async 
 
 it("consumes a preview at most once", async () => {
   const post = (await db.postDrafts.createVersion({
+    ownerSubject: DEFAULT_POST_OWNER,
     text: "Preview me",
     visibility: "PUBLIC",
     checksum: "checksum",
@@ -2673,6 +2759,7 @@ it("consumes a preview at most once", async () => {
 
 it("rejects a preview version that does not match its post draft row", async () => {
   const post = (await db.postDrafts.createVersion({
+    ownerSubject: DEFAULT_POST_OWNER,
     text: "Preview exact version",
     visibility: "PUBLIC",
     checksum: "checksum",
@@ -2689,6 +2776,7 @@ it("rejects a preview version that does not match its post draft row", async () 
 
 it("records publish attempts against an exact post version", async () => {
   const post = (await db.postDrafts.createVersion({
+    ownerSubject: DEFAULT_POST_OWNER,
     text: "Publish me",
     visibility: "PUBLIC",
     checksum: "checksum",
@@ -2761,12 +2849,14 @@ it("lists ordered publish-attempt media and conditionally advances durable uploa
 
 it("rolls back a publish claim whose attempt names a different exact post version", async () => {
   const claimedPost = await db.postDrafts.createVersion({
+    ownerSubject: DEFAULT_POST_OWNER,
     text: "Claim this post",
     visibility: "PUBLIC",
     checksum: "claimed-checksum",
     state: "draft"
   });
   const differentPost = await db.postDrafts.createVersion({
+    ownerSubject: DEFAULT_POST_OWNER,
     text: "Do not attach the attempt here",
     visibility: "PUBLIC",
     checksum: "different-checksum",
@@ -2807,6 +2897,7 @@ it("rolls back a publish claim whose attempt names a different exact post versio
 
 it("rejects a publish-attempt version that does not match its post draft row", async () => {
   const post = (await db.postDrafts.createVersion({
+    ownerSubject: DEFAULT_POST_OWNER,
     text: "Publish exact version",
     visibility: "PUBLIC",
     checksum: "checksum",
