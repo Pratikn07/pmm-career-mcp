@@ -4,6 +4,8 @@ export const LINKEDIN_REQUIRED_SCOPES = Object.freeze([
   "w_member_social"
 ] as const);
 
+const LINKEDIN_OPTIONAL_REPORTED_SCOPES = new Set<string>(["email"]);
+
 export function exactLinkedInScopes(value: unknown): readonly string[] | undefined {
   if (!Array.isArray(value) || value.length !== LINKEDIN_REQUIRED_SCOPES.length) {
     return undefined;
@@ -22,5 +24,16 @@ export function scopesFromTokenResponse(value: unknown): readonly string[] | und
   if (value === undefined) return [...LINKEDIN_REQUIRED_SCOPES];
   if (typeof value !== "string" || value.length > 1_024) return undefined;
   const scopes = value.trim() === "" ? [] : value.trim().split(/\s+/u);
-  return exactLinkedInScopes(scopes);
+  if (new Set(scopes).size !== scopes.length) return undefined;
+
+  const allowed = new Set<string>([
+    ...LINKEDIN_REQUIRED_SCOPES,
+    ...LINKEDIN_OPTIONAL_REPORTED_SCOPES
+  ]);
+  if (scopes.some((scope) => !allowed.has(scope))) return undefined;
+
+  const actual = new Set(scopes);
+  return LINKEDIN_REQUIRED_SCOPES.every((scope) => actual.has(scope))
+    ? [...LINKEDIN_REQUIRED_SCOPES]
+    : undefined;
 }

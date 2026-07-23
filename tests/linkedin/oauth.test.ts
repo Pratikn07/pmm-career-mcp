@@ -101,7 +101,7 @@ describe("LinkedIn OAuth", () => {
 
   it.each([
     ["a partial grant", "openid profile"],
-    ["an unexpected grant", "openid profile w_member_social email"],
+    ["an unknown extra grant", "openid profile w_member_social email r_liteprofile"],
     ["a duplicate grant", "openid profile w_member_social profile"],
     ["an empty grant", ""]
   ])("rejects %s reported by the token endpoint before identity lookup or persistence", async (_label, scope) => {
@@ -119,6 +119,30 @@ describe("LinkedIn OAuth", () => {
     });
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(await db.oauthTokens.getByProvider("linkedin")).toBeUndefined();
+  });
+
+  it("accepts LinkedIn's known optional email grant while storing only required publishing scopes", async () => {
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        access_token: "optional-email-scope-token",
+        expires_in: 3600,
+        scope: "openid profile email w_member_social"
+      }), { status: 200, headers: { "content-type": "application/json" } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ sub: "optional-email-person" }), {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      }));
+    const service = oauth(fetch);
+    const state = new URL(service.createAuthorizationUrl()).searchParams.get("state")!;
+
+    await expect(service.exchangeCallback({ code: "authorization-code", state })).resolves.toEqual({
+      connected: true
+    });
+    const stored = (await db.oauthTokens.getByProvider("linkedin"))!;
+    expect(decryptJson(JSON.parse(stored.ciphertext), KEY)).toMatchObject({
+      credentialVersion: 1,
+      grantedScopes: ["openid", "profile", "w_member_social"]
+    });
   });
 
   it("accepts the exact required scope set when LinkedIn reports it in a different order", async () => {
