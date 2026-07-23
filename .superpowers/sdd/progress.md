@@ -85,8 +85,8 @@ Started: 2026-07-22
 
 | Task | Status | Implementation | Review | Commit |
 | --- | --- | --- | --- | --- |
-| 1. Brand Studio database schema | In progress | In progress | Pending | — |
-| 2. Brand Studio repositories | Pending | Pending | Pending | — |
+| 1. Brand Studio database schema | Complete | Complete | Approved | `a7a6f9f`, `ee8fad9` |
+| 2. Brand Studio repositories | In progress | In progress | Pending | — |
 | 3. Brand profile, hook, templates, and prompt | Pending | Pending | Pending | — |
 | 4. Brand visual brief service | Pending | Pending | Pending | — |
 | 5. Fonts and deterministic renderer | Pending | Pending | Pending | — |
@@ -107,3 +107,5 @@ Started: 2026-07-22
 - Never expose database passwords, service-role keys, LinkedIn credentials, bearer tokens, or approval capabilities.
 - Deploy only `codex/supabase-migration`; do not merge or deploy `main`.
 - Do not initiate a paid Railway plan or billable upgrade.
+
+Task 1: complete (commits `a7a6f9f`, `ee8fad9`). The three private, versioned Brand Studio tables, exact composite foreign keys, generated migration/snapshot, and reset coverage were independently approved. The first review found one Minor public-schema hardening gap; the follow-up commit closed it, and the re-review returned 0 Critical, 0 Important, and 0 Minor findings. Verification: 908 full-suite tests plus 51 focused repository tests passed; no live service was called.
