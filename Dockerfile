@@ -4,10 +4,11 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
 COPY tsconfig.json ./
+COPY assets ./assets
 COPY drizzle ./drizzle
 COPY scripts ./scripts
 COPY src ./src
-RUN npm run build && test -f dist/public/review-card-client.js && npm prune --omit=dev && node -e "import('sharp')"
+RUN npm run build && test -f dist/public/review-card-client.js && npm prune --omit=dev && node -e "import('sharp')" && node -e "import('@resvg/resvg-js')"
 
 FROM node:22-bookworm-slim AS runtime
 
@@ -17,6 +18,7 @@ COPY --from=build --chown=node:node /app/package.json ./package.json
 COPY --from=build --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/dist ./dist
 COPY --from=build --chown=node:node /app/drizzle ./drizzle
+COPY assets ./assets
 
 USER node
 EXPOSE 3000

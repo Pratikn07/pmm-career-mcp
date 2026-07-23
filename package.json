@@ -26,6 +26,7 @@
   "type": "module",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
+    "@resvg/resvg-js": "2.6.2",
     "@supabase/supabase-js": "2.110.7",
     "cheerio": "^1.2.0",
     "drizzle-orm": "^0.45.2",

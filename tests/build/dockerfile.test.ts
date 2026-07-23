@@ -12,6 +12,17 @@ it("declares sharp as a pinned runtime dependency", async () => {
   expect(dockerfile).toMatch(/node -e ["']import\(['"]sharp['"]\)["']/);
 });
 
+it("pins the native SVG renderer and ships brand assets in both Docker stages", async () => {
+  const packageJson = JSON.parse(await readFile(resolve(process.cwd(), "package.json"), "utf8")) as {
+    dependencies?: Record<string, string>;
+  };
+  const dockerfile = await readFile(resolve(process.cwd(), "Dockerfile"), "utf8");
+
+  expect(packageJson.dependencies?.["@resvg/resvg-js"]).toBe("2.6.2");
+  expect(dockerfile.match(/^COPY assets \.\/assets$/gmu)).toHaveLength(2);
+  expect(dockerfile).toMatch(/node -e ["']import\(['"]@resvg\/resvg-js['"]\)["']/);
+});
+
 it("copies the consent build script before building the Docker image", async () => {
   const dockerfile = await readFile(resolve(process.cwd(), "Dockerfile"), "utf8");
   const scriptsCopy = dockerfile.indexOf("COPY scripts ./scripts");
