@@ -89,8 +89,8 @@ Started: 2026-07-22
 | 2. Brand Studio repositories | Complete | Complete | Approved | `e3fc681`, `636e414` |
 | 3. Brand profile, hook, templates, and prompt | Complete | Complete | Approved | `8c0dfd4`, `9239603` |
 | 4. Brand visual brief service | Complete | Complete | Approved | `0f142e6`, `8c01973` |
-| 5. Fonts and deterministic renderer | In progress | In progress | Pending | — |
-| 6. Reusable private-media ingestion | Pending | Pending | Pending | — |
+| 5. Fonts and deterministic renderer | Complete | Complete | Approved | `1a407c2`, `ca79fda`, `567a220` |
+| 6. Reusable private-media ingestion | In progress | In progress | Pending | — |
 | 7. Persisted branded render and atomic attachment | Pending | Pending | Pending | — |
 | 8. Brand Studio MCP tools | Pending | Pending | Pending | — |
 | 9. Request wiring and review-card provenance | Pending | Pending | Pending | — |
@@ -115,3 +115,5 @@ Task 2: complete (commits `e3fc681`, `636e414`). Owner-scoped profile, brief, an
 Task 3: complete (commits `8c0dfd4`, `9239603`). The immutable PMM Field Notes profile, exact uppercase identity, five-color palette, two collision-free 1080×1350 templates, deterministic hook/topic rules, and private curiosity-first source-art prompt are implemented. The first review found exact-casing, palette, line-control, URL/bullet, and geometry issues; every finding was fixed with regression tests. Final re-review returned 0 Critical, 0 Important, and 0 Minor findings. Verification: 940 full-suite tests plus 26 focused brand-domain tests passed; no live service was called.
 
 Task 4: complete (commits `0f142e6`, `8c01973`). The owner-scoped visual-brief service now binds to the exact latest post version, atomically initializes the canonical profile with the first brief, rejects recent hook reuse, returns model-safe provenance, and verifies media checksums. The first review found lock-order, transaction-atomicity, checksum-validation, and error-mapping issues; all were fixed and re-reviewed. Final review returned 0 Critical, 0 Important, and 0 Minor findings. Verification: 959 full-suite tests plus 76 focused service/repository tests passed; no live service was called.
+
+Task 5: complete (commits `1a407c2`, `ca79fda`, `567a220`). Exact checksum-pinned Cormorant/Inter fonts and licenses, Resvg 2.6.2, deterministic SVG/Sharp rendering, safe asset resolution, source-raster bounds, text fitting, XML safety, and two-stage Docker packaging are implemented. Reviews found resource-bound, word-tier, topic-fit, mutable-input, cache, XML, Docker-assertion, and pre-copy memory issues; all were fixed. Final review returned 0 Critical, 0 Important, and 0 Minor findings. Verification: 988 full-suite tests plus 35 focused renderer/Docker tests passed; Docker daemon validation remains deferred to Task 11.
