@@ -55,6 +55,17 @@ function shell(baseUrl: string, storageOrigin: string): string {
       <h2 id="media-title">Images and alt text</h2>
       <ol id="post-media"></ol>
     </section>
+    <section id="brand-provenance" aria-labelledby="brand-title" hidden>
+      <h2 id="brand-title">Brand provenance</h2>
+      <dl>
+        <dt>Series</dt><dd id="brand-series"></dd>
+        <dt>Brand profile</dt><dd id="brand-profile-version"></dd>
+        <dt>Template</dt><dd id="brand-template"></dd>
+        <dt>Cover hook</dt><dd id="brand-hook"></dd>
+        <dt>Render checksum</dt><dd id="brand-checksum"></dd>
+        <dt>Validation</dt><dd id="brand-validation"></dd>
+      </dl>
+    </section>
     <section aria-labelledby="validation-title">
       <h2 id="validation-title">Validation</h2>
       <p id="validation-status" aria-live="polite"></p>

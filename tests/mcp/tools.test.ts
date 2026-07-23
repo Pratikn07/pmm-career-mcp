@@ -984,8 +984,25 @@ it("opens a non-writing review card and keeps signed URLs widget-private", async
     }]
   };
   const previewCreate = vi.fn();
+  const getProvenanceForMedia = vi.fn(async () => ({
+    seriesName: "PMM FIELD NOTES",
+    profileVersion: 1,
+    templateId: "editorial-statement-v1",
+    templateVersion: 1,
+    coverHook: "Clarity beats capability.",
+    renderChecksum: "d".repeat(64),
+    validationPassed: true,
+    sourceMediaId: "private-source-media-id",
+    objectPath: "private/source.png",
+    signedUrl: "https://project.supabase.co/private-source"
+  }));
   const deps = dependencies();
   deps.previews.create = previewCreate;
+  deps.brand = {
+    getProfile: vi.fn(),
+    createBrief: vi.fn(),
+    getProvenanceForMedia
+  };
   deps.media = {
     attachFiles: vi.fn(),
     setMedia: vi.fn(),
@@ -1009,11 +1026,28 @@ it("opens a non-writing review card and keeps signed URLs widget-private", async
   await Promise.all([client.close(), server.close()]);
 
   expect(result.isError).not.toBe(true);
-  expect(result.structuredContent).toEqual({ data: { post } });
+  expect(result.structuredContent).toEqual({
+    data: {
+      post,
+      brand: {
+        seriesName: "PMM FIELD NOTES",
+        profileVersion: 1,
+        templateId: "editorial-statement-v1",
+        templateVersion: 1,
+        coverHook: "Clarity beats capability.",
+        renderChecksum: "d".repeat(64),
+        validationPassed: true
+      }
+    }
+  });
+  expect(getProvenanceForMedia).toHaveBeenCalledOnce();
+  expect(getProvenanceForMedia).toHaveBeenCalledWith(post.media[0]?.mediaId);
   expect(result._meta).toEqual({
     mediaUrls: ["https://project.supabase.co/storage/v1/object/sign/private"]
   });
   expect(JSON.stringify(result.structuredContent)).not.toContain("supabase.co");
+  expect(JSON.stringify(result.structuredContent)).not.toContain("private-source-media-id");
+  expect(JSON.stringify(result.structuredContent)).not.toContain("private/source.png");
   expect(JSON.stringify(result.content)).not.toContain("supabase.co");
   expect(JSON.stringify(result)).not.toContain("request-token-that-must-not-leak");
   expect(previewCreate).not.toHaveBeenCalled();

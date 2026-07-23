@@ -366,6 +366,16 @@ const brandRenderProvenanceSchema = z.object({
   }).strict()
 }).strict();
 
+const brandReviewProvenanceSchema = z.object({
+  seriesName: name,
+  profileVersion: z.number().int().positive(),
+  templateId: id,
+  templateVersion: z.number().int().positive(),
+  coverHook: z.string().max(72),
+  renderChecksum: checksum,
+  validationPassed: z.boolean()
+}).strict();
+
 const previewSchema = z.object({
   postId: id,
   versionId: id,
@@ -500,7 +510,10 @@ export const renderBrandedLinkedInCoverOutput = outputSchema(z.object({
 }).strict());
 export const attachLinkedInPostImagesOutput = outputSchema(z.object({ post: postDraftSchema }).strict());
 export const setLinkedInPostImagesOutput = outputSchema(z.object({ post: postDraftSchema }).strict());
-export const openLinkedInReviewCardOutput = outputSchema(z.object({ post: postDraftSchema }).strict());
+export const openLinkedInReviewCardOutput = outputSchema(z.object({
+  post: postDraftSchema,
+  brand: brandReviewProvenanceSchema.optional()
+}).strict());
 export const createExactLinkedInPreviewOutput = outputSchema(z.object({
   preview: exactPreviewSchema
 }).strict());

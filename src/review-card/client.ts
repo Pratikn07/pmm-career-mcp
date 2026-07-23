@@ -47,6 +47,10 @@ function element<T extends HTMLElement>(id: string, constructor: { new(): T }): 
   return value instanceof constructor ? value : undefined;
 }
 
+function abbreviatedChecksum(value: string): string {
+  return `${value.slice(0, 12)}…${value.slice(-8)}`;
+}
+
 function bootstrap(): void {
   const reviewRoot = element("review-root", HTMLElement);
   const postText = element("post-text", HTMLElement);
@@ -56,6 +60,13 @@ function bootstrap(): void {
   const postVersion = element("post-version", HTMLElement);
   const postChecksum = element("post-checksum", HTMLElement);
   const previewExpiry = element("preview-expiry", HTMLElement);
+  const brandProvenance = element("brand-provenance", HTMLElement);
+  const brandSeries = element("brand-series", HTMLElement);
+  const brandProfileVersion = element("brand-profile-version", HTMLElement);
+  const brandTemplate = element("brand-template", HTMLElement);
+  const brandHook = element("brand-hook", HTMLElement);
+  const brandChecksum = element("brand-checksum", HTMLElement);
+  const brandValidation = element("brand-validation", HTMLElement);
   const validationStatus = element("validation-status", HTMLElement);
   const validationErrors = element("validation-errors", HTMLUListElement);
   const createPreviewButton = element("create-preview", HTMLButtonElement);
@@ -70,6 +81,13 @@ function bootstrap(): void {
     || postVersion === undefined
     || postChecksum === undefined
     || previewExpiry === undefined
+    || brandProvenance === undefined
+    || brandSeries === undefined
+    || brandProfileVersion === undefined
+    || brandTemplate === undefined
+    || brandHook === undefined
+    || brandChecksum === undefined
+    || brandValidation === undefined
     || validationStatus === undefined
     || validationErrors === undefined
     || createPreviewButton === undefined
@@ -87,6 +105,13 @@ function bootstrap(): void {
   const safePostVersion = postVersion;
   const safePostChecksum = postChecksum;
   const safePreviewExpiry = previewExpiry;
+  const safeBrandProvenance = brandProvenance;
+  const safeBrandSeries = brandSeries;
+  const safeBrandProfileVersion = brandProfileVersion;
+  const safeBrandTemplate = brandTemplate;
+  const safeBrandHook = brandHook;
+  const safeBrandChecksum = brandChecksum;
+  const safeBrandValidation = brandValidation;
   const safeValidationStatus = validationStatus;
   const safeValidationErrors = validationErrors;
   const safeCreatePreviewButton = createPreviewButton;
@@ -110,6 +135,24 @@ function bootstrap(): void {
     safePostVersion.textContent = String(view.version);
     safePostChecksum.textContent = view.checksum;
     safePreviewExpiry.textContent = view.previewExpiresAt ?? "Not created";
+    if (view.brand === undefined) {
+      safeBrandProvenance.hidden = true;
+      safeBrandSeries.textContent = "";
+      safeBrandProfileVersion.textContent = "";
+      safeBrandTemplate.textContent = "";
+      safeBrandHook.textContent = "";
+      safeBrandChecksum.textContent = "";
+      safeBrandValidation.textContent = "";
+    } else {
+      safeBrandSeries.textContent = view.brand.seriesName;
+      safeBrandProfileVersion.textContent = `Version ${view.brand.profileVersion}`;
+      safeBrandTemplate.textContent =
+        `${view.brand.templateId} · version ${view.brand.templateVersion}`;
+      safeBrandHook.textContent = view.brand.coverHook;
+      safeBrandChecksum.textContent = abbreviatedChecksum(view.brand.renderChecksum);
+      safeBrandValidation.textContent = view.brand.validationPassed ? "Passed" : "Failed";
+      safeBrandProvenance.hidden = false;
+    }
     safeValidationStatus.textContent = view.previewExpiresAt === null
       ? "Private draft loaded. Create an exact preview before publishing."
       : "Exact preview created. Review every field before publishing.";

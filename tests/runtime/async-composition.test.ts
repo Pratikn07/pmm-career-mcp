@@ -1,4 +1,5 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { spawn } from "node:child_process";
 import express from "express";
@@ -10,6 +11,7 @@ import type { CareerDatabase } from "../../src/db/client.js";
 import type { Company } from "../../src/db/repositories.js";
 import { DomainError } from "../../src/domain/errors.js";
 import { createCareerApplication, startServer } from "../../src/index.js";
+import type { DraftMediaStorage } from "../../src/media/storage.js";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -308,6 +310,122 @@ it("waits for every imported YC company upsert before returning search results",
   } finally {
     await client.close();
     await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+it("composes one lazy owner-scoped Brand Studio per authenticated request and fails closed without authentication", async () => {
+  const subject = "123e4567-e89b-42d3-a456-426614174000";
+  const getActive = vi.fn(async () => undefined);
+  const listRecent = vi.fn(async () => []);
+  const database = {
+    ...fakeDatabase(),
+    brandProfiles: { getActive },
+    brandVisualBriefs: { listRecent }
+  } as unknown as CareerDatabase;
+  const storage: DraftMediaStorage = {
+    upload: vi.fn(async () => undefined),
+    download: vi.fn(async () => new Uint8Array()),
+    createSignedUrl: vi.fn(async () => "https://project.supabase.co/private"),
+    remove: vi.fn(async () => undefined)
+  };
+  const mediaStorageFactory = vi.fn(() => storage);
+  const runtime = await createCareerApplication({
+    config: {
+      ...testConfig(),
+      nodeEnv: "production",
+      baseUrl: "https://career.example",
+      supabaseUrl: "https://project.supabase.co",
+      supabasePublishableKey: `sb_publishable_${"a".repeat(31)}`,
+      authMode: "oauth",
+      oidcIssuer: "https://project.supabase.co/auth/v1",
+      oidcAudience: "https://career.example",
+      allowedSubject: subject
+    },
+    database,
+    mediaStorageFactory
+  });
+  const authenticatedServer = runtime.createMcpServer({
+    subject,
+    accessToken: "private-request-token"
+  });
+  const [authenticatedClientTransport, authenticatedServerTransport] =
+    InMemoryTransport.createLinkedPair();
+  const authenticatedClient = new Client({ name: "brand-composition", version: "1.0.0" });
+  await Promise.all([
+    authenticatedServer.connect(authenticatedServerTransport),
+    authenticatedClient.connect(authenticatedClientTransport)
+  ]);
+  const unauthenticatedServer = runtime.createMcpServer(undefined);
+  const [unauthenticatedClientTransport, unauthenticatedServerTransport] =
+    InMemoryTransport.createLinkedPair();
+  const unauthenticatedClient = new Client({ name: "brand-composition", version: "1.0.0" });
+  await Promise.all([
+    unauthenticatedServer.connect(unauthenticatedServerTransport),
+    unauthenticatedClient.connect(unauthenticatedClientTransport)
+  ]);
+
+  try {
+    const listed = await authenticatedClient.listTools();
+    expect(listed.tools.map(({ name }) => name)).toEqual(expect.arrayContaining([
+      "get_pmm_brand_profile",
+      "create_branded_visual_brief",
+      "render_branded_linkedin_cover"
+    ]));
+    expect(mediaStorageFactory).toHaveBeenCalledOnce();
+    expect(storage.upload).not.toHaveBeenCalled();
+    expect(storage.download).not.toHaveBeenCalled();
+    expect(storage.createSignedUrl).not.toHaveBeenCalled();
+    expect(storage.remove).not.toHaveBeenCalled();
+    expect(getActive).not.toHaveBeenCalled();
+    expect(listRecent).not.toHaveBeenCalled();
+
+    const profile = await authenticatedClient.callTool({
+      name: "get_pmm_brand_profile",
+      arguments: {}
+    });
+    expect(profile.isError).not.toBe(true);
+    expect(profile.structuredContent).toMatchObject({
+      data: { profile: { seriesName: "PMM FIELD NOTES" } }
+    });
+    expect(getActive).toHaveBeenCalledOnce();
+    expect(listRecent).toHaveBeenCalledOnce();
+
+    for (const call of [
+      { name: "get_pmm_brand_profile", arguments: {} },
+      {
+        name: "create_branded_visual_brief",
+        arguments: {
+          postId: "123e4567-e89b-42d3-a456-426614174001",
+          expectedVersion: 1,
+          coverHook: "Clarity beats capability.",
+          conceptSummary: "A restrained editorial concept about product clarity.",
+          visualMode: "EDITORIAL_STATEMENT"
+        }
+      },
+      {
+        name: "render_branded_linkedin_cover",
+        arguments: {
+          briefId: "123e4567-e89b-42d3-a456-426614174002",
+          postId: "123e4567-e89b-42d3-a456-426614174001",
+          expectedVersion: 1,
+          altText: "Editorial PMM Field Notes cover about product clarity."
+        }
+      }
+    ]) {
+      const result = await unauthenticatedClient.callTool(call);
+      expect(result.isError, call.name).toBe(true);
+      expect(result.structuredContent, call.name).toEqual({
+        data: { error: { code: "AUTH_REQUIRED" } }
+      });
+    }
+    expect(mediaStorageFactory).toHaveBeenCalledOnce();
+  } finally {
+    await Promise.all([
+      authenticatedClient.close(),
+      authenticatedServer.close(),
+      unauthenticatedClient.close(),
+      unauthenticatedServer.close()
+    ]);
   }
 });
 

@@ -26,12 +26,18 @@ it("uses safe DOM operations and no executable third-party content", async () =>
   expect(source).toContain("referrerPolicy = \"no-referrer\"");
   expect(source).toContain("image.alt = item.altText");
   expect(source).toContain("safePostId.textContent = view.postId");
+  expect(source).toContain("safeBrandSeries.textContent = view.brand.seriesName");
+  expect(source).toContain("safeBrandTemplate.textContent");
+  expect(source).toContain("safeBrandHook.textContent = view.brand.coverHook");
+  expect(source).toContain("abbreviatedChecksum(view.brand.renderChecksum)");
+  expect(source).toContain("safeBrandValidation.textContent");
   expect(source).toContain("safeValidationStatus.textContent");
   expect(source).toContain("replaceChildren");
   expect(source).toContain("textContent");
   expect(source).not.toMatch(/\.innerHTML\s*=|insertAdjacentHTML|document\.write|\beval\s*\(/);
   expect(source).not.toMatch(/https?:\/\//);
   expect(source).not.toMatch(/approvalCapability.*(?:console|textContent)/s);
+  expect(source).not.toMatch(/(?:sourceMediaId|objectPath|signedUrl).*textContent/s);
 });
 
 it("builds a minified IIFE review-card bundle without a source map", async () => {

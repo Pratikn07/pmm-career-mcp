@@ -3,6 +3,9 @@ import type { Express } from "express";
 import type { Server } from "node:http";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { RequestAuthContext } from "./auth/request-context.js";
+import { createBrandBriefService } from "./brand/brief-service.js";
+import { createBrandRenderService } from "./brand/render-service.js";
+import { renderBrandedCover } from "./brand/renderer.js";
 import { loadConfig, type AppConfig } from "./config.js";
 import {
   createDatabase,
@@ -22,6 +25,7 @@ import { createImagePublishService } from "./linkedin/image-publish-service.js";
 import { downloadOpenAiFile } from "./media/file-download.js";
 import { inspectLinkedInImage } from "./media/image-inspection.js";
 import { createPostMediaService } from "./media/post-media-service.js";
+import { createPrivateMediaStore } from "./media/private-media-store.js";
 import {
   createSupabaseDraftMediaStorage,
   type DraftMediaStorage
@@ -236,9 +240,23 @@ export async function createCareerApplication(
     let media;
     let reviews;
     let publish;
+    const brand = context === undefined
+      ? undefined
+      : createBrandBriefService(database, { subject: context.subject });
+    let brandRenderer;
     if (context !== undefined && hasPrivateMediaConfiguration(options.config)) {
       try {
         const storage = mediaStorageFactory(options.config, context);
+        const privateMedia = createPrivateMediaStore(database, {
+          subject: context.subject,
+          storage,
+          ...(options.mediaDownloadFile === undefined
+            ? {}
+            : { downloadFile: options.mediaDownloadFile }),
+          ...(options.mediaInspectImage === undefined
+            ? {}
+            : { inspectImage: options.mediaInspectImage })
+        });
         media = createPostMediaService(database, {
           subject: context.subject,
           storage,
@@ -263,6 +281,11 @@ export async function createCareerApplication(
           connectionValid,
           clock: now
         });
+        brandRenderer = createBrandRenderService(database, {
+          subject: context.subject,
+          privateMedia,
+          renderCover: renderBrandedCover
+        });
       } catch {
         // Authenticated tools return only safe unavailable errors when private
         // Storage cannot be composed; request credentials are never retained.
@@ -285,6 +308,8 @@ export async function createCareerApplication(
       previews,
       ...(reviews === undefined ? {} : { reviews }),
       ...(media === undefined ? {} : { media }),
+      ...(brand === undefined ? {} : { brand }),
+      ...(brandRenderer === undefined ? {} : { brandRenderer }),
       publish: publisher,
       linkedin,
       getLinkedInConnectionStatus: async () => {

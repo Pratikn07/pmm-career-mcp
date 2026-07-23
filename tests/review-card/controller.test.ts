@@ -17,6 +17,16 @@ const signedUrl = `${storageOrigin}/storage/v1/object/sign/linkedin-draft-media/
 const GENERIC_ERROR = "Unable to complete this action.";
 const EXPIRED_ERROR = "Exact preview expired. Create a new exact preview before publishing.";
 
+const brandProvenance = {
+  seriesName: "PMM FIELD NOTES",
+  profileVersion: 1,
+  templateId: "editorial-statement-v1",
+  templateVersion: 1,
+  coverHook: "Clarity beats capability.",
+  renderChecksum: "a".repeat(64),
+  validationPassed: true
+};
+
 const media = [{
   position: 0,
   mediaId,
@@ -228,6 +238,54 @@ describe("LinkedIn review-card controller", () => {
       previewExpiresAt: null
     })]);
     expect(result.publishingEnabled.at(-1)).toBe(false);
+  });
+
+  it("hydrates model-safe brand provenance and preserves it through exact preview", async () => {
+    const brandedOutput = {
+      data: {
+        ...draftOutput.data,
+        brand: brandProvenance
+      }
+    };
+    const result = harness({
+      initialGlobals: {
+        toolOutput: brandedOutput,
+        toolResponseMetadata: canonicalMetadata(brandedOutput, { mediaUrls: [signedUrl] })
+      }
+    });
+
+    await result.controller.start();
+
+    expect(result.views.at(-1)?.brand).toEqual(brandProvenance);
+
+    await result.controller.createPreview();
+
+    expect(result.views.at(-1)?.brand).toEqual(brandProvenance);
+  });
+
+  it("does not render provenance containing source or storage fields", async () => {
+    const brandedOutput = {
+      data: {
+        ...draftOutput.data,
+        brand: {
+          ...brandProvenance,
+          sourceMediaId: mediaId,
+          objectPath: "private/source.png",
+          signedUrl
+        }
+      }
+    };
+    const result = harness({
+      initialGlobals: {
+        toolOutput: brandedOutput,
+        toolResponseMetadata: canonicalMetadata(brandedOutput, { mediaUrls: [signedUrl] })
+      }
+    });
+
+    await result.controller.start();
+
+    expect(result.views.at(-1)?.brand).toBeUndefined();
+    expect(JSON.stringify(result.views)).not.toContain("private/source.png");
   });
 
   it("preserves multiline text and repeated spaces for exact pre-wrap rendering", async () => {

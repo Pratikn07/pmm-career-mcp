@@ -571,8 +571,26 @@ export function createCareerMcpServer(
         throw new DomainError("NOT_FOUND", "Post draft was not found", { entity: "post_draft" });
       }
       const mediaUrls = await media.createSignedUrls(post);
+      const positionZeroMedia = post.media.find(({ position }) => position === 0);
+      const provenance = positionZeroMedia === undefined || deps.brand === undefined
+        ? undefined
+        : await deps.brand.getProvenanceForMedia(positionZeroMedia.mediaId);
+      const brand = provenance === undefined
+        ? undefined
+        : {
+            seriesName: provenance.seriesName,
+            profileVersion: provenance.profileVersion,
+            templateId: provenance.templateId,
+            templateVersion: provenance.templateVersion,
+            coverHook: provenance.coverHook,
+            renderChecksum: provenance.renderChecksum,
+            validationPassed: provenance.validationPassed
+          };
       return {
-        ...response({ post }, `Opened private post version ${post.version} for review; no preview or publish action was created.`),
+        ...response({
+          post,
+          ...(brand === undefined ? {} : { brand })
+        }, `Opened private post version ${post.version} for review; no preview or publish action was created.`),
         _meta: { mediaUrls: [...mediaUrls] }
       };
     } catch (error) {

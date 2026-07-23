@@ -30,6 +30,16 @@ export type ReviewCardMedia = Readonly<{
   url: string | null;
 }>;
 
+export type ReviewCardBrand = Readonly<{
+  seriesName: string;
+  profileVersion: number;
+  templateId: string;
+  templateVersion: number;
+  coverHook: string;
+  renderChecksum: string;
+  validationPassed: boolean;
+}>;
+
 export type ReviewCardView = Readonly<{
   postId: string;
   versionId: string;
@@ -38,6 +48,7 @@ export type ReviewCardView = Readonly<{
   version: number;
   checksum: string;
   media: readonly ReviewCardMedia[];
+  brand?: ReviewCardBrand;
   previewExpiresAt: string | null;
 }>;
 
@@ -187,6 +198,48 @@ function mediaList(value: unknown): readonly SafeMedia[] | undefined {
   return parsed;
 }
 
+function safeBrand(value: unknown): ReviewCardBrand | undefined {
+  const brand = record(value);
+  if (brand === undefined
+    || !exactKeys(brand, [
+      "seriesName",
+      "profileVersion",
+      "templateId",
+      "templateVersion",
+      "coverHook",
+      "renderChecksum",
+      "validationPassed"
+    ])
+    || typeof brand.seriesName !== "string"
+    || [...brand.seriesName].length < 1
+    || [...brand.seriesName].length > 100
+    || /[\u0000-\u001f\u007f\u0085\u2028\u2029]/u.test(brand.seriesName)
+    || !Number.isSafeInteger(brand.profileVersion)
+    || (brand.profileVersion as number) < 1
+    || typeof brand.templateId !== "string"
+    || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(brand.templateId)
+    || !Number.isSafeInteger(brand.templateVersion)
+    || (brand.templateVersion as number) < 1
+    || typeof brand.coverHook !== "string"
+    || [...brand.coverHook].length < 1
+    || [...brand.coverHook].length > 72
+    || /[\u0000-\u001f\u007f\u0085\u2028\u2029]/u.test(brand.coverHook)
+    || typeof brand.renderChecksum !== "string"
+    || !CHECKSUM_PATTERN.test(brand.renderChecksum)
+    || typeof brand.validationPassed !== "boolean") {
+    return undefined;
+  }
+  return {
+    seriesName: brand.seriesName,
+    profileVersion: brand.profileVersion as number,
+    templateId: brand.templateId,
+    templateVersion: brand.templateVersion as number,
+    coverHook: brand.coverHook,
+    renderChecksum: brand.renderChecksum,
+    validationPassed: brand.validationPassed
+  };
+}
+
 function safePost(value: unknown, isPreview: boolean): SafePost | undefined {
   const post = record(value);
   const postId = isPreview ? post?.postId : post?.id;
@@ -227,6 +280,10 @@ function nestedData(value: unknown): Record<string, unknown> | undefined {
 
 function initialPost(value: unknown): SafePost | undefined {
   return safePost(nestedData(value)?.post, false);
+}
+
+function initialBrand(value: unknown): ReviewCardBrand | undefined {
+  return safeBrand(nestedData(value)?.brand);
 }
 
 function previewPost(value: unknown): SafePost | undefined {
@@ -370,7 +427,11 @@ function sameSelectedVersion(preview: SafePost, selected: SafePost): boolean {
     });
 }
 
-function view(post: SafePost, urls: readonly string[]): ReviewCardView {
+function view(
+  post: SafePost,
+  urls: readonly string[],
+  brand: ReviewCardBrand | undefined
+): ReviewCardView {
   return {
     postId: post.postId,
     versionId: post.versionId,
@@ -379,6 +440,7 @@ function view(post: SafePost, urls: readonly string[]): ReviewCardView {
     version: post.version,
     checksum: post.checksum,
     media: post.media.map((item) => ({ ...item, url: urls[item.position] ?? null })),
+    ...(brand === undefined ? {} : { brand }),
     previewExpiresAt: post.expiresAt
   };
 }
@@ -535,6 +597,7 @@ export function createReviewCardController(
     ? dependencies.metadataTimeoutMs as number
     : DEFAULT_METADATA_TIMEOUT_MS;
   let currentPost: SafePost | undefined;
+  let currentBrand: ReviewCardBrand | undefined;
   let approvalCapability: string | undefined;
   let busy = false;
   let terminal = false;
@@ -621,12 +684,16 @@ export function createReviewCardController(
               post.media.length,
               storageOrigin
             );
-          return post === undefined || urls === undefined ? undefined : { post, urls };
+          return post === undefined || urls === undefined
+            ? undefined
+            : { post, urls, brand: initialBrand(globals.toolOutput) };
         });
         currentPost = loaded.post;
-        dependencies.ui.render(view(loaded.post, loaded.urls));
+        currentBrand = loaded.brand;
+        dependencies.ui.render(view(loaded.post, loaded.urls, loaded.brand));
       } catch {
         currentPost = undefined;
+        currentBrand = undefined;
         disablePublishing();
         genericError();
       } finally {
@@ -672,7 +739,7 @@ export function createReviewCardController(
           storageOrigin
         ));
         currentPost = preview;
-        dependencies.ui.render(view(preview, metadata.urls));
+        dependencies.ui.render(view(preview, metadata.urls, currentBrand));
         approvalCapability = metadata.capability;
         if (!scheduleExpiry(preview)) {
           disablePublishing();
