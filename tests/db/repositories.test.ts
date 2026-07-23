@@ -441,9 +441,119 @@ describe("PostgreSQL transaction retries", () => {
 
     expect(transaction).toHaveBeenCalledTimes(1);
   });
+
+  it("retries the atomic profile-and-brief write only for the active-profile race", async () => {
+    const activeProfileRace = Object.assign(new Error("active profile race"), {
+      code: "23505",
+      constraint_name: "brand_profiles_one_active_owner_unique"
+    });
+    const unrelatedConflict = Object.assign(new Error("unrelated brief conflict"), {
+      code: "23505",
+      constraint_name: "brand_visual_briefs_pkey"
+    });
+    const input = {
+      profile: {
+        id: randomUUID(),
+        ownerSubject: randomUUID(),
+        publicName: "BHAGYASHREE NANDOSKAR",
+        roleLine: "PRODUCT MARKETING",
+        seriesName: "PMM FIELD NOTES",
+        monogram: "BN",
+        voiceJson: {},
+        paletteJson: {},
+        hookRulesJson: {}
+      },
+      brief: {
+        id: randomUUID(),
+        ownerSubject: randomUUID(),
+        postDraftId: randomUUID(),
+        postVersion: 1,
+        templateId: "editorial-statement-v1",
+        templateVersion: 1,
+        promptFormatVersion: 1,
+        visualMode: "EDITORIAL_STATEMENT",
+        coverHook: "Clarity beats capability.",
+        conceptSummary: "Restrained editorial geometry",
+        generationPrompt: "A text-free editorial illustration",
+        negativeConstraintsJson: ["no text"],
+        state: "ready"
+      }
+    };
+    input.brief.ownerSubject = input.profile.ownerSubject;
+
+    const retrying = databaseThatRejectsTransactions(activeProfileRace);
+    await expect(
+      retrying.repositories.brandVisualBriefs.createWithDefaultProfile(input)
+    ).rejects.toBe(activeProfileRace);
+    expect(retrying.transaction).toHaveBeenCalledTimes(3);
+
+    const notRetrying = databaseThatRejectsTransactions(unrelatedConflict);
+    await expect(
+      notRetrying.repositories.brandVisualBriefs.createWithDefaultProfile(input)
+    ).rejects.toBe(unrelatedConflict);
+    expect(notRetrying.transaction).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("Brand Studio repositories", () => {
+  function canonicalProfile(ownerSubject: string) {
+    return {
+      id: randomUUID(),
+      ownerSubject,
+      publicName: "BHAGYASHREE NANDOSKAR",
+      roleLine: "PRODUCT MARKETING",
+      seriesName: "PMM FIELD NOTES",
+      monogram: "BN",
+      voiceJson: {
+        persona: "curious PMM practitioner",
+        traits: [
+          "thoughtful",
+          "practical",
+          "observant",
+          "conversational",
+          "evidence-aware"
+        ],
+        neverInventExperience: true
+      },
+      paletteJson: {
+        ivory: "#F6F1E8",
+        navy: "#14233A",
+        copper: "#B97850",
+        taupe: "#C9B8A5",
+        highlight: "#FFFDF9"
+      },
+      hookRulesJson: {
+        minWords: 2,
+        maxWords: 8,
+        maxCharacters: 72,
+        recentWindow: 30
+      }
+    };
+  }
+
+  function atomicBrief(
+    ownerSubject: string,
+    post: { id: string; version: number },
+    overrides: Record<string, unknown> = {}
+  ) {
+    return {
+      id: randomUUID(),
+      ownerSubject,
+      postDraftId: post.id,
+      postVersion: post.version,
+      templateId: "editorial-statement-v1",
+      templateVersion: 1,
+      promptFormatVersion: 1,
+      visualMode: "EDITORIAL_STATEMENT",
+      coverHook: "Clarity beats capability.",
+      conceptSummary: "Restrained editorial geometry",
+      generationPrompt: "A text-free editorial illustration",
+      negativeConstraintsJson: ["no text"],
+      state: "ready",
+      ...overrides
+    };
+  }
+
   it("keeps the active profile and visual briefs scoped to their owner", async () => {
     const owner = randomUUID();
     const profile = await db.brandProfiles.ensureDefault({
@@ -637,17 +747,187 @@ describe("Brand Studio repositories", () => {
         actualVersion: second.version
       }
     });
-    expect(queryLog.some(({ query }) => (
-      query.includes('from "career_mcp"."post_drafts"')
-      && query.includes('order by "career_mcp"."post_drafts"."version" desc')
-      && /for update/i.test(query)
-    ))).toBe(true);
 
+    queryLog.length = 0;
     await expect(createBrief(second.id, second.version)).resolves.toMatchObject({
       postDraftId: second.id,
       postVersion: second.version
     });
+    const lockQueries = queryLog.filter(({ query }) => /for update/i.test(query));
+    const latestLockIndex = lockQueries.findIndex(({ query }) => (
+      query.includes('from "career_mcp"."post_drafts"')
+      && query.includes('order by "career_mcp"."post_drafts"."version" desc')
+      && !query.includes('join "career_mcp"."post_draft_media"')
+    ));
+    const exactPostLockIndex = lockQueries.findIndex(({ query }) => (
+      query.includes('from "career_mcp"."post_drafts"')
+      && !query.includes('order by "career_mcp"."post_drafts"."version" desc')
+      && !query.includes('join ')
+    ));
+    const draftMediaLockIndex = lockQueries.findIndex(({ query }) => (
+      query.includes('from "career_mcp"."post_draft_media"')
+      && !query.includes('join ')
+      && query.includes('order by "career_mcp"."post_draft_media"."position" asc')
+    ));
+    const mediaLockIndex = lockQueries.findIndex(({ query }) => (
+      query.includes('from "career_mcp"."post_media"')
+      && query.includes('order by "career_mcp"."post_media"."id" asc')
+    ));
+    const profileLockIndex = lockQueries.findIndex(({ query }) => (
+      query.includes('from "career_mcp"."brand_profiles"')
+    ));
+    const recentHooksLockIndex = lockQueries.findIndex(({ query }) => (
+      query.includes('from "career_mcp"."brand_visual_briefs"')
+    ));
+    expect(latestLockIndex).toBeGreaterThanOrEqual(0);
+    expect(exactPostLockIndex).toBeGreaterThan(latestLockIndex);
+    expect(draftMediaLockIndex).toBeGreaterThan(exactPostLockIndex);
+    expect(mediaLockIndex).toBeGreaterThan(draftMediaLockIndex);
+    expect(profileLockIndex).toBeGreaterThan(mediaLockIndex);
+    expect(recentHooksLockIndex).toBeGreaterThan(profileLockIndex);
     expect(await db.brandVisualBriefs.listRecent(owner, 30)).toHaveLength(1);
+  });
+
+  it("atomically initializes the canonical profile and first brief", async () => {
+    const owner = randomUUID();
+    const post = await addOwnedPost(owner);
+    const result = await db.brandVisualBriefs.createWithDefaultProfile({
+      profile: canonicalProfile(owner),
+      brief: atomicBrief(owner, post)
+    });
+
+    expect(result.profile).toMatchObject({
+      ownerSubject: owner,
+      version: 1,
+      state: "active",
+      publicName: "BHAGYASHREE NANDOSKAR",
+      roleLine: "PRODUCT MARKETING"
+    });
+    expect(result.brief).toMatchObject({
+      ownerSubject: owner,
+      brandProfileId: result.profile.id,
+      brandProfileVersion: 1,
+      postDraftId: post.id,
+      postVersion: post.version
+    });
+    expect(await db.brandProfiles.getActive(owner)).toEqual(result.profile);
+    expect(await db.brandVisualBriefs.getOwned(result.brief.id, owner)).toEqual(result.brief);
+  });
+
+  it("rolls back first-profile initialization when the first brief insert fails", async () => {
+    const owner = randomUUID();
+    const post = await addOwnedPost(owner);
+    const error = await db.brandVisualBriefs.createWithDefaultProfile({
+      profile: canonicalProfile(owner),
+      brief: atomicBrief(owner, post, { visualMode: "INVALID_MODE" })
+    }).then(
+      () => undefined,
+      (reason: unknown) => reason
+    );
+
+    expect(error).toBeDefined();
+    expect(error).not.toBeInstanceOf(TypeError);
+    expect(await db.brandProfiles.getActive(owner)).toBeUndefined();
+    expect(await db.brandVisualBriefs.listRecent(owner, 30)).toEqual([]);
+  });
+
+  it("serializes simultaneous identical owner hooks to one saved brief", async () => {
+    const owner = randomUUID();
+    const firstPost = await addOwnedPost(owner);
+    const secondPost = await addOwnedPost(owner);
+    const results = await Promise.allSettled([
+      db.brandVisualBriefs.createWithDefaultProfile({
+        profile: canonicalProfile(owner),
+        brief: atomicBrief(owner, firstPost)
+      }),
+      db.brandVisualBriefs.createWithDefaultProfile({
+        profile: canonicalProfile(owner),
+        brief: atomicBrief(owner, secondPost)
+      })
+    ]);
+
+    expect(results.filter(({ status }) => status === "fulfilled")).toHaveLength(1);
+    const rejected = results.find(({ status }) => status === "rejected");
+    expect(rejected).toMatchObject({
+      status: "rejected",
+      reason: {
+        code: "VALIDATION_ERROR",
+        details: { field: "coverHook", reason: "recent_duplicate" }
+      }
+    });
+    expect(await db.brandVisualBriefs.listRecent(owner, 30)).toHaveLength(1);
+    expect(await db.brandProfiles.getActive(owner)).toBeDefined();
+  });
+
+  it("serializes simultaneous post-version and first-brief creation without an orphan profile", async () => {
+    const owner = randomUUID();
+    const media = await addMedia({ ownerSubject: owner });
+    const first = (await db.postDrafts.createVersionWithMedia({
+      ownerSubject: owner,
+      text: "Initial version for concurrent brand brief",
+      visibility: "PUBLIC",
+      checksum: "concurrent-brand-brief-v1",
+      state: "draft",
+      media: [{ mediaId: media.id, altText: "Private source" }]
+    })).post;
+
+    const [versionResult, briefResult] = await Promise.allSettled([
+      db.postDrafts.createVersionWithMedia({
+        draftId: first.draftId,
+        expectedVersion: first.version,
+        ownerSubject: owner,
+        text: "New version racing the first brand brief",
+        visibility: "PUBLIC",
+        checksum: "concurrent-brand-brief-v2",
+        state: "draft",
+        media: [{ mediaId: media.id, altText: "Private source" }]
+      }),
+      db.brandVisualBriefs.createWithDefaultProfile({
+        profile: canonicalProfile(owner),
+        brief: atomicBrief(owner, first)
+      })
+    ]);
+
+    expect(versionResult.status).toBe("fulfilled");
+    if (briefResult.status === "rejected") {
+      expect(briefResult.reason).toMatchObject({
+        code: "CONFLICT",
+        message: "Post draft version is stale",
+        details: {
+          entity: "post_draft",
+          expectedVersion: first.version,
+          actualVersion: first.version + 1
+        }
+      });
+      expect(await db.brandProfiles.getActive(owner)).toBeUndefined();
+      expect(await db.brandVisualBriefs.listRecent(owner, 30)).toEqual([]);
+    } else {
+      expect(briefResult.value.brief).toMatchObject({
+        postDraftId: first.id,
+        postVersion: first.version
+      });
+      expect(await db.brandProfiles.getActive(owner)).toEqual(briefResult.value.profile);
+      expect(await db.brandVisualBriefs.listRecent(owner, 30)).toHaveLength(1);
+    }
+  });
+
+  it("does not link a brief when the active profile differs from the canonical input", async () => {
+    const owner = randomUUID();
+    const post = await addOwnedPost(owner);
+    await db.brandProfiles.ensureDefault({
+      ...canonicalProfile(owner),
+      publicName: "NONCANONICAL NAME"
+    });
+
+    await expect(db.brandVisualBriefs.createWithDefaultProfile({
+      profile: canonicalProfile(owner),
+      brief: atomicBrief(owner, post)
+    })).rejects.toMatchObject({
+      code: "DATA_INTEGRITY",
+      message: "Brand profile configuration is invalid",
+      details: { entity: "brand_profile" }
+    });
+    expect(await db.brandVisualBriefs.listRecent(owner, 30)).toEqual([]);
   });
 
   it("rejects exact hook reuse inside the latest thirty owner briefs", async () => {
@@ -742,6 +1022,7 @@ describe("Brand Studio repositories", () => {
 
     expect(await db.brandVisualRenders.getByRenderedMedia(owner, renderedMedia.id)).toMatchObject({
       id: renderId,
+      renderedMediaSha256: renderedMedia.sha256,
       brief: { id: brief.id },
       profile: { id: profile.id }
     });

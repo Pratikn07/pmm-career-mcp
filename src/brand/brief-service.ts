@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { CareerDatabase } from "../db/client.js";
 import type {
@@ -175,6 +175,13 @@ function mapWriteError(error: unknown): never {
   );
 }
 
+function safeExactTextEqual(left: string, right: string): boolean {
+  const leftBytes = Buffer.from(left, "utf8");
+  const rightBytes = Buffer.from(right, "utf8");
+  return leftBytes.length === rightBytes.length
+    && timingSafeEqual(leftBytes, rightBytes);
+}
+
 export function createBrandBriefService(
   database: CareerDatabase,
   dependencies: {
@@ -292,51 +299,6 @@ export function createBrandBriefService(
           template,
           input.conceptSummary
         );
-
-        let profile = await database.brandProfiles.getActive(subject);
-        if (profile === undefined) {
-          const profileId = createId();
-          if (!UUID_PATTERN.test(profileId)) {
-            throw safePersistenceError(
-              "Brand profile could not be initialized",
-              "brand_profile"
-            );
-          }
-          profile = await database.brandProfiles.ensureDefault(
-            profileInput(profileId, subject)
-          );
-        }
-        canonicalProfileRow(profile);
-
-        const briefId = createId();
-        if (!UUID_PATTERN.test(briefId)) {
-          throw safePersistenceError(
-            "Brand visual brief could not be saved",
-            "brand_visual_brief"
-          );
-        }
-        const brief = await database.brandVisualBriefs.create({
-          id: briefId,
-          ownerSubject: subject,
-          postDraftId: post.id,
-          postVersion: post.version,
-          brandProfileId: profile.id,
-          brandProfileVersion: profile.version,
-          templateId: template.id,
-          templateVersion: template.version,
-          promptFormatVersion: prompt.formatVersion,
-          visualMode: template.mode,
-          coverHook,
-          conceptSummary: input.conceptSummary
-            .normalize("NFC")
-            .replace(/[\r\n\v\f\u0085\u2028\u2029]+/gu, " ")
-            .trim()
-            .replace(/\s+/gu, " "),
-          ...(topicLabel === undefined ? {} : { topicLabel }),
-          generationPrompt: prompt.generationPrompt,
-          negativeConstraintsJson: [...prompt.negativeConstraints],
-          state: "ready"
-        });
         const proposedAltText =
           `Editorial PMM Field Notes cover reading “${coverHook}”.`;
         if ([...proposedAltText].length > 120) {
@@ -345,6 +307,45 @@ export function createBrandBriefService(
             "brand_visual_brief"
           );
         }
+        const profileId = createId();
+        if (!UUID_PATTERN.test(profileId)) {
+          throw safePersistenceError(
+            "Brand profile could not be initialized",
+            "brand_profile"
+          );
+        }
+        const briefId = createId();
+        if (!UUID_PATTERN.test(briefId)) {
+          throw safePersistenceError(
+            "Brand visual brief could not be saved",
+            "brand_visual_brief"
+          );
+        }
+        const { profile, brief } =
+          await database.brandVisualBriefs.createWithDefaultProfile({
+            profile: profileInput(profileId, subject),
+            brief: {
+              id: briefId,
+              ownerSubject: subject,
+              postDraftId: post.id,
+              postVersion: post.version,
+              templateId: template.id,
+              templateVersion: template.version,
+              promptFormatVersion: prompt.formatVersion,
+              visualMode: template.mode,
+              coverHook,
+              conceptSummary: input.conceptSummary
+                .normalize("NFC")
+                .replace(/[\r\n\v\f\u0085\u2028\u2029]+/gu, " ")
+                .trim()
+                .replace(/\s+/gu, " "),
+              ...(topicLabel === undefined ? {} : { topicLabel }),
+              generationPrompt: prompt.generationPrompt,
+              negativeConstraintsJson: [...prompt.negativeConstraints],
+              state: "ready"
+            }
+          });
+        canonicalProfileRow(profile);
         return {
           brief,
           profile: await modelSafeProfile(),
@@ -378,9 +379,13 @@ export function createBrandBriefService(
           templateVersion: provenance.brief.templateVersion,
           coverHook: provenance.brief.coverHook,
           renderChecksum: provenance.renderChecksum,
-          validationPassed: true
+          validationPassed: safeExactTextEqual(
+            provenance.renderChecksum,
+            provenance.renderedMediaSha256
+          )
         });
-      } catch {
+      } catch (error) {
+        if (error instanceof DomainError) throw error;
         throw safePersistenceError(
           "Brand render provenance could not be loaded",
           "brand_visual_render"

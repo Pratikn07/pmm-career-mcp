@@ -190,6 +190,28 @@ describe("Brand brief service", () => {
     }]);
   });
 
+  it("does not leave a first profile behind when first brief creation fails", async () => {
+    const owner = randomUUID();
+    const post = await addOwnedPost(owner);
+    const generatedIds = [randomUUID(), "invalid-brief-id"];
+    const service = createBrandBriefService(db, {
+      subject: owner,
+      createId: () => generatedIds.shift()!
+    });
+
+    const error = await expectDomainError(
+      () => service.createBrief(statementInput(post.draftId, post.version)),
+      "DATA_INTEGRITY"
+    );
+
+    expect(error).toMatchObject({
+      message: "Brand visual brief could not be saved",
+      details: { entity: "brand_visual_brief" }
+    });
+    expect(await db.brandProfiles.getActive(owner)).toBeUndefined();
+    expect(await db.brandVisualBriefs.listRecent(owner, 30)).toEqual([]);
+  });
+
   it("selects the metaphor template and returns its source-image requirement", async () => {
     const owner = randomUUID();
     const post = await addOwnedPost(owner);
@@ -305,7 +327,11 @@ describe("Brand brief service", () => {
     const service = createBrandBriefService(db, { subject: owner });
     const { brief } = await service.createBrief(statementInput(post.draftId, post.version));
     const renderedMedia = await addMedia(owner);
-    const checksum = "a".repeat(64);
+    const checksum = renderedMedia.sha256;
+    const mismatchedMedia = await addMedia(owner);
+    const mismatchedChecksum = mismatchedMedia.sha256 === "b".repeat(64)
+      ? "c".repeat(64)
+      : "b".repeat(64);
     await queryTestDatabase(db, `
       insert into career_mcp.brand_visual_renders (
         id, owner_subject, brief_id, version, rendered_media_id, alt_text,
@@ -313,6 +339,16 @@ describe("Brand brief service", () => {
       ) values (
         '${randomUUID()}', '${owner}', '${brief.id}', 1, '${renderedMedia.id}',
         'Reviewed editorial cover', '${checksum}', 1, '2026-07-22T10:00:00.000Z'
+      )
+    `);
+    await queryTestDatabase(db, `
+      insert into career_mcp.brand_visual_renders (
+        id, owner_subject, brief_id, version, rendered_media_id, alt_text,
+        render_checksum, renderer_version, created_at
+      ) values (
+        '${randomUUID()}', '${owner}', '${brief.id}', 2, '${mismatchedMedia.id}',
+        'Mismatched editorial cover', '${mismatchedChecksum}', 1,
+        '2026-07-22T10:01:00.000Z'
       )
     `);
 
@@ -325,11 +361,36 @@ describe("Brand brief service", () => {
       renderChecksum: checksum,
       validationPassed: true
     });
+    expect(await service.getProvenanceForMedia(mismatchedMedia.id)).toMatchObject({
+      renderChecksum: mismatchedChecksum,
+      validationPassed: false
+    });
     expect(
       await createBrandBriefService(db, { subject: randomUUID() })
         .getProvenanceForMedia(renderedMedia.id)
     ).toBeUndefined();
     expect(await service.getProvenanceForMedia(randomUUID())).toBeUndefined();
+  });
+
+  it("preserves safe domain errors raised while loading render provenance", async () => {
+    const owner = randomUUID();
+    const expected = new DomainError(
+      "DATA_INTEGRITY",
+      "Stored brand render provenance is invalid",
+      { entity: "brand_visual_render" }
+    );
+    const brokenDatabase = {
+      ...db,
+      brandVisualRenders: {
+        ...db.brandVisualRenders,
+        async getByRenderedMedia() {
+          throw expected;
+        }
+      }
+    };
+    const service = createBrandBriefService(brokenDatabase, { subject: owner });
+
+    await expect(service.getProvenanceForMedia(randomUUID())).rejects.toBe(expected);
   });
 
   it("requires an authenticated owner and validates the bounded optional topic label", async () => {

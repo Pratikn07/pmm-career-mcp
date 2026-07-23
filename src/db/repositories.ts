@@ -1,4 +1,5 @@
 import { randomUUID, timingSafeEqual } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { and, asc, desc, eq, inArray, isNull, notExists, sql } from "drizzle-orm";
 import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
 import {
@@ -51,6 +52,29 @@ export type BrandProfile = typeof brandProfiles.$inferSelect;
 export type BrandVisualBrief = typeof brandVisualBriefs.$inferSelect;
 export type BrandVisualRender = typeof brandVisualRenders.$inferSelect;
 export type PersonWithEvidence = Person & { evidence: Evidence[] };
+
+export type BrandProfileDefaultInput = {
+  id: string;
+  ownerSubject: string;
+  publicName: string;
+  roleLine: string;
+  seriesName: string;
+  monogram: string;
+  voiceJson: Record<string, unknown>;
+  paletteJson: Record<string, string>;
+  hookRulesJson: Record<string, unknown>;
+};
+
+export type BrandVisualBriefCreateInput =
+  Omit<typeof brandVisualBriefs.$inferInsert, "createdAt">;
+
+export type BrandVisualBriefWithDefaultProfileInput = {
+  profile: BrandProfileDefaultInput;
+  brief: Omit<
+    BrandVisualBriefCreateInput,
+    "brandProfileId" | "brandProfileVersion"
+  >;
+};
 
 export type CompanyUpsertInput = {
   ycId: string;
@@ -425,6 +449,163 @@ function exactPreviewSnapshotMatches(
   } catch {
     return false;
   }
+}
+
+type BrandBriefSourceInput = Pick<
+  BrandVisualBriefCreateInput,
+  "ownerSubject" | "postDraftId" | "postVersion" | "coverHook"
+>;
+
+function brandBriefSourceNotFound(): DomainError {
+  return new DomainError("NOT_FOUND", "Brand visual brief source was not found", {
+    entity: "post_draft"
+  });
+}
+
+async function lockBrandBriefMediaOwners(
+  transaction: Database,
+  postDraftId: string,
+  version: number
+): Promise<string[]> {
+  const draftMedia = await transaction.select({
+    mediaId: postDraftMedia.mediaId
+  }).from(postDraftMedia).where(and(
+    eq(postDraftMedia.postDraftId, postDraftId),
+    eq(postDraftMedia.version, version)
+  )).orderBy(asc(postDraftMedia.position)).for("update");
+  if (draftMedia.length === 0) {
+    return [];
+  }
+  const sortedMediaIds = draftMedia
+    .map(({ mediaId }) => mediaId.toLowerCase())
+    .sort();
+  if (new Set(sortedMediaIds).size !== sortedMediaIds.length) {
+    return [];
+  }
+  const media = await transaction.select({
+    id: postMedia.id,
+    ownerSubject: postMedia.ownerSubject
+  }).from(postMedia).where(
+    inArray(postMedia.id, sortedMediaIds)
+  ).orderBy(asc(postMedia.id)).for("update");
+  if (media.length !== sortedMediaIds.length) {
+    return [];
+  }
+  return media.map(({ ownerSubject }) => ownerSubject);
+}
+
+async function lockLatestOwnedBrandBriefSource(
+  transaction: Database,
+  input: BrandBriefSourceInput
+): Promise<void> {
+  const [reference] = await transaction.select({
+    draftId: postDrafts.draftId
+  }).from(postDrafts).where(and(
+    eq(postDrafts.id, input.postDraftId),
+    eq(postDrafts.version, input.postVersion)
+  )).limit(1);
+  if (reference === undefined) {
+    throw brandBriefSourceNotFound();
+  }
+
+  const [latest] = await transaction.select({
+    id: postDrafts.id,
+    version: postDrafts.version
+  }).from(postDrafts).where(
+    eq(postDrafts.draftId, reference.draftId)
+  ).orderBy(desc(postDrafts.version)).limit(1).for("update");
+  if (latest === undefined) {
+    throw brandBriefSourceNotFound();
+  }
+
+  const [exact] = await transaction.select({
+    id: postDrafts.id
+  }).from(postDrafts).where(and(
+    eq(postDrafts.id, input.postDraftId),
+    eq(postDrafts.version, input.postVersion)
+  )).limit(1).for("update");
+  if (exact === undefined) {
+    throw brandBriefSourceNotFound();
+  }
+  const sourceMediaOwners = await lockBrandBriefMediaOwners(
+    transaction,
+    input.postDraftId,
+    input.postVersion
+  );
+  if (
+    sourceMediaOwners.length === 0
+    || sourceMediaOwners.some((ownerSubject) => (
+      ownerSubject.toLowerCase() !== input.ownerSubject.toLowerCase()
+    ))
+  ) {
+    throw brandBriefSourceNotFound();
+  }
+
+  const latestMediaOwners = latest.id === input.postDraftId
+    ? sourceMediaOwners
+    : await lockBrandBriefMediaOwners(transaction, latest.id, latest.version);
+  if (
+    latestMediaOwners.length === 0
+    || latestMediaOwners.some((ownerSubject) => (
+      ownerSubject.toLowerCase() !== input.ownerSubject.toLowerCase()
+    ))
+  ) {
+    throw brandBriefSourceNotFound();
+  }
+
+  if (latest.id !== input.postDraftId || latest.version !== input.postVersion) {
+    throw new DomainError("CONFLICT", "Post draft version is stale", {
+      entity: "post_draft",
+      expectedVersion: input.postVersion,
+      actualVersion: latest.version
+    });
+  }
+}
+
+async function rejectRecentBrandHook(
+  transaction: Database,
+  input: Pick<BrandVisualBriefCreateInput, "ownerSubject" | "coverHook">
+): Promise<void> {
+  const recentHooks = await transaction.select({
+    coverHook: brandVisualBriefs.coverHook
+  }).from(brandVisualBriefs).where(
+    eq(brandVisualBriefs.ownerSubject, input.ownerSubject)
+  ).orderBy(
+    desc(brandVisualBriefs.createdAt),
+    desc(brandVisualBriefs.id)
+  ).limit(30).for("update");
+  if (recentHooks.some(({ coverHook }) => coverHook === input.coverHook)) {
+    throw new DomainError(
+      "VALIDATION_ERROR",
+      "Cover hook does not meet the brand rules.",
+      { field: "coverHook", reason: "recent_duplicate" }
+    );
+  }
+}
+
+function profileMatchesDefaultInput(
+  profile: BrandProfile,
+  input: BrandProfileDefaultInput
+): boolean {
+  return profile.version === 1
+    && profile.publicName === input.publicName
+    && profile.roleLine === input.roleLine
+    && profile.seriesName === input.seriesName
+    && profile.monogram === input.monogram
+    && isDeepStrictEqual(profile.voiceJson, input.voiceJson)
+    && isDeepStrictEqual(profile.paletteJson, input.paletteJson)
+    && isDeepStrictEqual(profile.hookRulesJson, input.hookRulesJson);
+}
+
+async function insertBrandVisualBrief(
+  transaction: Database,
+  input: BrandVisualBriefCreateInput
+): Promise<BrandVisualBrief> {
+  const [brief] = await transaction.insert(brandVisualBriefs).values({
+    ...input,
+    createdAt: nowIso()
+  }).returning();
+  return requiredRow(brief, "brand visual brief");
 }
 
 export function createRepositories(database: Database) {
@@ -1308,17 +1489,7 @@ export function createRepositories(database: Database) {
         )).limit(1);
         return profile === undefined ? undefined : normalizeRowTimestamps(profile);
       },
-      async ensureDefault(input: {
-        id: string;
-        ownerSubject: string;
-        publicName: string;
-        roleLine: string;
-        seriesName: string;
-        monogram: string;
-        voiceJson: Record<string, unknown>;
-        paletteJson: Record<string, string>;
-        hookRulesJson: Record<string, unknown>;
-      }): Promise<BrandProfile> {
+      async ensureDefault(input: BrandProfileDefaultInput): Promise<BrandProfile> {
         if (!isUuid(input.id) || !isUuid(input.ownerSubject)) {
           throw new Error("Brand profile id and ownerSubject must be valid UUIDs");
         }
@@ -1342,7 +1513,7 @@ export function createRepositories(database: Database) {
     },
     brandVisualBriefs: {
       async create(
-        input: Omit<typeof brandVisualBriefs.$inferInsert, "createdAt">
+        input: BrandVisualBriefCreateInput
       ): Promise<BrandVisualBrief> {
         if (
           !isUuid(input.id)
@@ -1353,78 +1524,7 @@ export function createRepositories(database: Database) {
           throw new Error("Brand visual brief identifiers must be valid UUIDs");
         }
         return serializableTransaction(database, async (transaction) => {
-          const sourceMedia = await transaction.select({
-            ownerSubject: postMedia.ownerSubject,
-            draftId: postDrafts.draftId
-          }).from(postDrafts).innerJoin(postDraftMedia, and(
-            eq(postDraftMedia.postDraftId, postDrafts.id),
-            eq(postDraftMedia.version, postDrafts.version)
-          )).innerJoin(postMedia, eq(postDraftMedia.mediaId, postMedia.id)).where(and(
-            eq(postDrafts.id, input.postDraftId),
-            eq(postDrafts.version, input.postVersion)
-          )).for("update");
-          if (
-            sourceMedia.length === 0
-            || sourceMedia.some(({ ownerSubject }) => (
-              ownerSubject.toLowerCase() !== input.ownerSubject.toLowerCase()
-            ))
-          ) {
-            throw new DomainError("NOT_FOUND", "Brand visual brief source was not found", {
-              entity: "post_draft"
-            });
-          }
-          const [latest] = await transaction.select({
-            id: postDrafts.id,
-            version: postDrafts.version
-          }).from(postDrafts).where(
-            eq(postDrafts.draftId, sourceMedia[0]!.draftId)
-          ).orderBy(desc(postDrafts.version)).limit(1).for("update");
-          if (latest === undefined) {
-            throw new DomainError("NOT_FOUND", "Brand visual brief source was not found", {
-              entity: "post_draft"
-            });
-          }
-          const latestMedia = await transaction.select({
-            ownerSubject: postMedia.ownerSubject
-          }).from(postDraftMedia).innerJoin(
-            postMedia,
-            eq(postDraftMedia.mediaId, postMedia.id)
-          ).where(and(
-            eq(postDraftMedia.postDraftId, latest.id),
-            eq(postDraftMedia.version, latest.version)
-          )).for("update");
-          if (
-            latestMedia.length === 0
-            || latestMedia.some(({ ownerSubject }) => (
-              ownerSubject.toLowerCase() !== input.ownerSubject.toLowerCase()
-            ))
-          ) {
-            throw new DomainError("NOT_FOUND", "Brand visual brief source was not found", {
-              entity: "post_draft"
-            });
-          }
-          if (latest.id !== input.postDraftId || latest.version !== input.postVersion) {
-            throw new DomainError("CONFLICT", "Post draft version is stale", {
-              entity: "post_draft",
-              expectedVersion: input.postVersion,
-              actualVersion: latest.version
-            });
-          }
-          const recentHooks = await transaction.select({
-            coverHook: brandVisualBriefs.coverHook
-          }).from(brandVisualBriefs).where(
-            eq(brandVisualBriefs.ownerSubject, input.ownerSubject)
-          ).orderBy(
-            desc(brandVisualBriefs.createdAt),
-            desc(brandVisualBriefs.id)
-          ).limit(30).for("update");
-          if (recentHooks.some(({ coverHook }) => coverHook === input.coverHook)) {
-            throw new DomainError(
-              "VALIDATION_ERROR",
-              "Cover hook does not meet the brand rules.",
-              { field: "coverHook", reason: "recent_duplicate" }
-            );
-          }
+          await lockLatestOwnedBrandBriefSource(transaction, input);
           const [profile] = await transaction.select({ id: brandProfiles.id }).from(brandProfiles).where(and(
             eq(brandProfiles.id, input.brandProfileId),
             eq(brandProfiles.version, input.brandProfileVersion),
@@ -1433,12 +1533,57 @@ export function createRepositories(database: Database) {
           if (profile === undefined) {
             throw new Error("Brand visual brief profile must be owned by the request subject");
           }
-          const [brief] = await transaction.insert(brandVisualBriefs).values({
-            ...input,
-            createdAt: nowIso()
-          }).returning();
-          return requiredRow(brief, "brand visual brief");
+          await rejectRecentBrandHook(transaction, input);
+          return insertBrandVisualBrief(transaction, input);
         });
+      },
+      async createWithDefaultProfile(
+        input: BrandVisualBriefWithDefaultProfileInput
+      ): Promise<{ profile: BrandProfile; brief: BrandVisualBrief }> {
+        if (
+          !isUuid(input.profile.id)
+          || !isUuid(input.profile.ownerSubject)
+          || !isUuid(input.brief.id)
+          || !isUuid(input.brief.ownerSubject)
+          || !isUuid(input.brief.postDraftId)
+          || input.profile.ownerSubject.toLowerCase()
+            !== input.brief.ownerSubject.toLowerCase()
+        ) {
+          throw new Error("Atomic brand profile and brief identifiers must be valid and owned");
+        }
+        return serializableTransaction(database, async (transaction) => {
+          await lockLatestOwnedBrandBriefSource(transaction, input.brief);
+          const [activeRow] = await transaction.select().from(brandProfiles).where(and(
+            eq(brandProfiles.ownerSubject, input.profile.ownerSubject),
+            eq(brandProfiles.state, "active")
+          )).limit(1).for("update");
+          let profile: BrandProfile;
+          if (activeRow === undefined) {
+            const [profileRow] = await transaction.insert(brandProfiles).values({
+              ...input.profile,
+              version: 1,
+              state: "active",
+              createdAt: nowIso()
+            }).returning();
+            profile = requiredRow(profileRow, "brand profile");
+          } else {
+            profile = normalizeRowTimestamps(activeRow);
+            if (!profileMatchesDefaultInput(profile, input.profile)) {
+              throw new DomainError(
+                "DATA_INTEGRITY",
+                "Brand profile configuration is invalid",
+                { entity: "brand_profile" }
+              );
+            }
+          }
+          await rejectRecentBrandHook(transaction, input.brief);
+          const brief = await insertBrandVisualBrief(transaction, {
+            ...input.brief,
+            brandProfileId: profile.id,
+            brandProfileVersion: profile.version
+          });
+          return { profile, brief };
+        }, "brand_profiles_one_active_owner_unique");
       },
       async getOwned(id: string, ownerSubject: string): Promise<BrandVisualBrief | undefined> {
         if (!isUuid(id) || !isUuid(ownerSubject)) {
@@ -1467,14 +1612,19 @@ export function createRepositories(database: Database) {
       async getByRenderedMedia(
         ownerSubject: string,
         mediaId: string
-      ): Promise<(BrandVisualRender & { brief: BrandVisualBrief; profile: BrandProfile }) | undefined> {
+      ): Promise<(BrandVisualRender & {
+        brief: BrandVisualBrief;
+        profile: BrandProfile;
+        renderedMediaSha256: string;
+      }) | undefined> {
         if (!isUuid(ownerSubject) || !isUuid(mediaId)) {
           return undefined;
         }
         const [row] = await database.select({
           render: brandVisualRenders,
           brief: brandVisualBriefs,
-          profile: brandProfiles
+          profile: brandProfiles,
+          renderedMediaSha256: postMedia.sha256
         }).from(brandVisualRenders).innerJoin(
           brandVisualBriefs,
           eq(brandVisualRenders.briefId, brandVisualBriefs.id)
@@ -1496,7 +1646,8 @@ export function createRepositories(database: Database) {
           : {
               ...normalizeRowTimestamps(row.render),
               brief: normalizeRowTimestamps(row.brief),
-              profile: normalizeRowTimestamps(row.profile)
+              profile: normalizeRowTimestamps(row.profile),
+              renderedMediaSha256: row.renderedMediaSha256
             };
       }
     },
