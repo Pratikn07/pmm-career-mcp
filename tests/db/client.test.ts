@@ -240,6 +240,29 @@ describe("production PostgreSQL client", () => {
     await database.close();
   });
 
+  it("sets the configured legacy owner transaction-locally before migrations run", async () => {
+    const legacyPostOwnerSubject = "00000000-0000-0000-0000-000000000001";
+
+    const database = await createDatabase(DATABASE_URL, {
+      migrationDatabaseUrl: MIGRATION_DATABASE_URL,
+      requireTls: false,
+      legacyPostOwnerSubject
+    });
+
+    expect(mocks.migrationTransactionSql).toHaveBeenCalledTimes(2);
+    const [lockQueryParts] = mocks.migrationTransactionSql.mock.calls[0]!;
+    const [ownerQueryParts, ownerValue] = mocks.migrationTransactionSql.mock.calls[1]!;
+    expect(lockQueryParts.join(" ")).toMatch(/pg_advisory_xact_lock/i);
+    expect(ownerQueryParts.join(" ")).toMatch(
+      /pg_catalog\.set_config\(\s*'career_mcp\.legacy_post_owner_subject',\s*,\s*true\s*\)/i
+    );
+    expect(ownerValue).toBe(legacyPostOwnerSubject);
+    expect(mocks.migrationTransactionSql.mock.invocationCallOrder[1])
+      .toBeLessThan(mocks.migrate.mock.invocationCallOrder[0]!);
+
+    await database.close();
+  });
+
   it("adapts the locked postgres.js transaction for Drizzle's nested migration transaction", async () => {
     mocks.drizzle.mockImplementationOnce((client) => ({ client }));
     mocks.migrate.mockImplementationOnce(async (database) => {

@@ -162,6 +162,15 @@ export async function createDatabase(
     );
     await migrationClient.begin(async (transactionClient) => {
       await transactionClient`select pg_advisory_xact_lock(hashtext('pmm-career-mcp:migrations'))`;
+      if (legacyPostOwnerSubject !== undefined) {
+        await transactionClient`
+          select pg_catalog.set_config(
+            'career_mcp.legacy_post_owner_subject',
+            ${legacyPostOwnerSubject},
+            true
+          )
+        `;
+      }
       // Drizzle expects a full postgres.js Sql client and opens its own
       // transaction. Inside an existing postgres.js transaction, the matching
       // safe operation is a savepoint; supply that narrow adapter while keeping
