@@ -86,8 +86,8 @@ Started: 2026-07-22
 | Task | Status | Implementation | Review | Commit |
 | --- | --- | --- | --- | --- |
 | 1. Brand Studio database schema | Complete | Complete | Approved | `a7a6f9f`, `ee8fad9` |
-| 2. Brand Studio repositories | In progress | In progress | Pending | — |
-| 3. Brand profile, hook, templates, and prompt | Pending | Pending | Pending | — |
+| 2. Brand Studio repositories | Complete | Complete | Approved | `e3fc681`, `636e414` |
+| 3. Brand profile, hook, templates, and prompt | In progress | In progress | Pending | — |
 | 4. Brand visual brief service | Pending | Pending | Pending | — |
 | 5. Fonts and deterministic renderer | Pending | Pending | Pending | — |
 | 6. Reusable private-media ingestion | Pending | Pending | Pending | — |
@@ -109,3 +109,5 @@ Started: 2026-07-22
 - Do not initiate a paid Railway plan or billable upgrade.
 
 Task 1: complete (commits `a7a6f9f`, `ee8fad9`). The three private, versioned Brand Studio tables, exact composite foreign keys, generated migration/snapshot, and reset coverage were independently approved. The first review found one Minor public-schema hardening gap; the follow-up commit closed it, and the re-review returned 0 Critical, 0 Important, and 0 Minor findings. Verification: 908 full-suite tests plus 51 focused repository tests passed; no live service was called.
+
+Task 2: complete (commits `e3fc681`, `636e414`). Owner-scoped profile, brief, and render repositories were added with version-safe default creation, bounded recency, and exact joins. The first review found a Critical cross-owner post-reference gap and an Important rendered-media ownership gap; both were closed with non-leaking regression tests. Final re-review returned 0 Critical, 0 Important, and 0 Minor findings. Verification: 914 full-suite tests plus 57 focused repository tests passed; no live service was called.
