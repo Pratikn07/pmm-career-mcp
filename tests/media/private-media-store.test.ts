@@ -296,6 +296,45 @@ describe("private media store", () => {
     expect(Buffer.from(upload.mock.calls[0]?.[1] ?? []).equals(expectedBytes)).toBe(true);
   });
 
+  it("isolates the private snapshot from upload-adapter mutation before resolution", async () => {
+    const expectedBytes = Buffer.from(fixturePng);
+    let retainedUploadBytes: Uint8Array | undefined;
+    let uploadMutated!: () => void;
+    let finishUpload!: () => void;
+    const mutated = new Promise<void>((resolve) => {
+      uploadMutated = resolve;
+    });
+    const finish = new Promise<void>((resolve) => {
+      finishUpload = resolve;
+    });
+    upload.mockImplementationOnce(async (_path, bytes) => {
+      retainedUploadBytes = bytes;
+      bytes.fill(0);
+      uploadMutated();
+      await finish;
+    });
+
+    const storing = createStore().storeBytes(expectedBytes, "image.png");
+    await mutated;
+    finishUpload();
+    const stored = await storing;
+    const row = await db.postMedia.get(stored.media.id);
+
+    expect(retainedUploadBytes).not.toBe(stored.bytes);
+    expect(stored.bytes.equals(expectedBytes)).toBe(true);
+    expect(stored.media).toMatchObject({
+      id: mediaId,
+      objectPath: `${owner}/${shaShard}/${mediaId}.png`,
+      sha256,
+      mimeType: "image/png",
+      byteSize: expectedBytes.byteLength,
+      width: pngInspection.width,
+      height: pngInspection.height,
+      frameCount: pngInspection.frameCount
+    });
+    expect(row).toMatchObject(stored.media);
+  });
+
   it("deduplicates SHA-256 only within the owner boundary", async () => {
     const first = await createStore().storeBytes(fixturePng, "first.png");
     upload.mockClear();
@@ -498,6 +537,58 @@ describe("private media store", () => {
     expect(stored.createdObjectPath).toBeUndefined();
     expect(remove).toHaveBeenCalledWith([provisionalPath]);
     expect(remove.mock.calls.flatMap(([paths]) => paths)).not.toContain(concurrent.objectPath);
+  });
+
+  it("snapshots a concurrent reconciliation row before delayed provisional cleanup", async () => {
+    const provisionalPath = `${owner}/${shaShard}/${mediaId}.png`;
+    const concurrent = mediaRow(otherMediaId, `${owner}/${shaShard}/${otherMediaId}.png`);
+    const expectedConcurrent = { ...concurrent };
+    const createError = new Error("private unique race");
+    const getByOwnerAndSha = vi.fn()
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(concurrent);
+    const create = vi.fn().mockRejectedValueOnce(createError);
+    const racingDatabase = {
+      ...db,
+      postMedia: { ...db.postMedia, getByOwnerAndSha, create }
+    } as CareerDatabase;
+    let cleanupStarted!: () => void;
+    let finishCleanup!: () => void;
+    const started = new Promise<void>((resolve) => {
+      cleanupStarted = resolve;
+    });
+    const finish = new Promise<void>((resolve) => {
+      finishCleanup = resolve;
+    });
+    remove.mockImplementationOnce(async () => {
+      cleanupStarted();
+      await finish;
+    });
+
+    const storing = createStore({ database: racingDatabase })
+      .storeBytes(fixturePng, "image.png");
+    await started;
+    Object.assign(concurrent, {
+      id: mediaId,
+      ownerSubject: otherOwner,
+      objectPath: "mutated/noncanonical.gif",
+      sha256: "0".repeat(64),
+      mimeType: "image/gif",
+      byteSize: 999,
+      width: 2,
+      height: 3,
+      frameCount: 4,
+      originalFilename: "mutated.gif",
+      createdAt: "2030-01-01T00:00:00.000Z"
+    });
+    finishCleanup();
+    const stored = await storing;
+
+    expect(remove).toHaveBeenCalledWith([provisionalPath]);
+    expect(stored.media).not.toBe(concurrent);
+    expect(Object.isFrozen(stored.media)).toBe(true);
+    expect(stored.media).toEqual(expectedConcurrent);
+    expect(stored.createdObjectPath).toBeUndefined();
   });
 
   it.each([

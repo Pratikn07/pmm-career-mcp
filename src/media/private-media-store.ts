@@ -99,30 +99,62 @@ export function createPrivateMediaStore(
   }
 
   function validatedReconciliationRow(
-    value: PostMedia,
+    value: unknown,
     inspected: ImageInspection
   ): PostMedia | undefined {
+    if (typeof value !== "object" || value === null) {
+      return undefined;
+    }
+    const candidate = value as Partial<PostMedia>;
+    const id = candidate.id;
+    const ownerSubject = candidate.ownerSubject;
+    const objectPath = candidate.objectPath;
+    const sha256 = candidate.sha256;
+    const mimeType = candidate.mimeType;
+    const byteSize = candidate.byteSize;
+    const width = candidate.width;
+    const height = candidate.height;
+    const frameCount = candidate.frameCount;
+    const originalFilename = candidate.originalFilename;
+    const createdAt = candidate.createdAt;
     if (
-      typeof value !== "object"
-      || value === null
-      || value.ownerSubject !== subject
-      || !NORMALIZED_UUID_PATTERN.test(value.ownerSubject)
-      || !NORMALIZED_UUID_PATTERN.test(value.id)
-      || !/^[0-9a-f]{64}$/.test(value.sha256)
-      || value.sha256 !== inspected.sha256
-      || value.mimeType !== inspected.mimeType
-      || value.byteSize !== inspected.byteSize
-      || value.width !== inspected.width
-      || value.height !== inspected.height
-      || value.frameCount !== inspected.frameCount
+      typeof id !== "string"
+      || !NORMALIZED_UUID_PATTERN.test(id)
+      || typeof ownerSubject !== "string"
+      || ownerSubject !== subject
+      || !NORMALIZED_UUID_PATTERN.test(ownerSubject)
+      || typeof objectPath !== "string"
+      || typeof sha256 !== "string"
+      || !/^[0-9a-f]{64}$/.test(sha256)
+      || sha256 !== inspected.sha256
+      || mimeType !== inspected.mimeType
+      || byteSize !== inspected.byteSize
+      || width !== inspected.width
+      || height !== inspected.height
+      || frameCount !== inspected.frameCount
+      || (originalFilename !== null && typeof originalFilename !== "string")
+      || typeof createdAt !== "string"
     ) {
       return undefined;
     }
-    const canonicalPath = canonicalCreatedPath(value);
-    if (canonicalPath === undefined || value.objectPath !== canonicalPath) {
+    const snapshot: PostMedia = Object.freeze({
+      id,
+      ownerSubject,
+      objectPath,
+      sha256,
+      mimeType,
+      byteSize,
+      width,
+      height,
+      frameCount,
+      originalFilename,
+      createdAt
+    });
+    const canonicalPath = canonicalCreatedPath(snapshot);
+    if (canonicalPath === undefined || snapshot.objectPath !== canonicalPath) {
       return undefined;
     }
-    return value;
+    return snapshot;
   }
 
   function snapshotDirectBytes(bytes: Buffer): Buffer {
@@ -226,7 +258,11 @@ export function createPrivateMediaStore(
     );
 
     try {
-      await dependencies.storage.upload(objectPath, bytes, inspected.mimeType);
+      await dependencies.storage.upload(
+        objectPath,
+        Buffer.from(bytes),
+        inspected.mimeType
+      );
     } catch (error) {
       await removeProvisionalObject(objectPath);
       throw error;
@@ -266,8 +302,9 @@ export function createPrivateMediaStore(
       if (validRow.id === mediaId && validRow.objectPath === objectPath) {
         return storedPrivateMedia(validRow, bytes, objectPath);
       }
+      const stored = storedPrivateMedia(validRow, bytes);
       await removeProvisionalObject(objectPath);
-      return storedPrivateMedia(validRow, bytes);
+      return stored;
     }
   }
 
