@@ -87,8 +87,8 @@ Started: 2026-07-22
 | --- | --- | --- | --- | --- |
 | 1. Brand Studio database schema | Complete | Complete | Approved | `a7a6f9f`, `ee8fad9` |
 | 2. Brand Studio repositories | Complete | Complete | Approved | `e3fc681`, `636e414` |
-| 3. Brand profile, hook, templates, and prompt | In progress | In progress | Pending | — |
-| 4. Brand visual brief service | Pending | Pending | Pending | — |
+| 3. Brand profile, hook, templates, and prompt | Complete | Complete | Approved | `8c0dfd4`, `9239603` |
+| 4. Brand visual brief service | In progress | In progress | Pending | — |
 | 5. Fonts and deterministic renderer | Pending | Pending | Pending | — |
 | 6. Reusable private-media ingestion | Pending | Pending | Pending | — |
 | 7. Persisted branded render and atomic attachment | Pending | Pending | Pending | — |
@@ -111,3 +111,5 @@ Started: 2026-07-22
 Task 1: complete (commits `a7a6f9f`, `ee8fad9`). The three private, versioned Brand Studio tables, exact composite foreign keys, generated migration/snapshot, and reset coverage were independently approved. The first review found one Minor public-schema hardening gap; the follow-up commit closed it, and the re-review returned 0 Critical, 0 Important, and 0 Minor findings. Verification: 908 full-suite tests plus 51 focused repository tests passed; no live service was called.
 
 Task 2: complete (commits `e3fc681`, `636e414`). Owner-scoped profile, brief, and render repositories were added with version-safe default creation, bounded recency, and exact joins. The first review found a Critical cross-owner post-reference gap and an Important rendered-media ownership gap; both were closed with non-leaking regression tests. Final re-review returned 0 Critical, 0 Important, and 0 Minor findings. Verification: 914 full-suite tests plus 57 focused repository tests passed; no live service was called.
+
+Task 3: complete (commits `8c0dfd4`, `9239603`). The immutable PMM Field Notes profile, exact uppercase identity, five-color palette, two collision-free 1080×1350 templates, deterministic hook/topic rules, and private curiosity-first source-art prompt are implemented. The first review found exact-casing, palette, line-control, URL/bullet, and geometry issues; every finding was fixed with regression tests. Final re-review returned 0 Critical, 0 Important, and 0 Minor findings. Verification: 940 full-suite tests plus 26 focused brand-domain tests passed; no live service was called.
