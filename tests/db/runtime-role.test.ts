@@ -60,13 +60,33 @@ describe("Supabase runtime-role operator template", () => {
     expect(sql).not.toMatch(/alter\s+role\s+career_mcp_runtime[\s\S]{0,180}\b(?:nosuperuser|nocreatedb|nocreaterole|noreplication|nobypassrls)\b/i);
   });
 
-  it("grants only the existing and future application data access the runtime needs", async () => {
+  it("keeps the claim ledger read-only after broad current and future application grants", async () => {
     const sql = await runtimeRoleSql();
 
     expect(sql).toMatch(/grant\s+usage\s+on\s+schema\s+career_mcp\s+to\s+career_mcp_runtime/i);
     expect(sql).toMatch(/grant\s+select,\s*insert,\s*update,\s*delete\s+on\s+all\s+tables\s+in\s+schema\s+career_mcp/i);
     expect(sql).toMatch(/grant\s+usage,\s*select\s+on\s+all\s+sequences\s+in\s+schema\s+career_mcp/i);
     expect(sql).toMatch(/alter\s+default\s+privileges\s+in\s+schema\s+career_mcp/i);
+    const broadCurrentGrant = sql.search(
+      /grant\s+select,\s*insert,\s*update,\s*delete\s+on\s+all\s+tables\s+in\s+schema\s+career_mcp/i
+    );
+    const broadDefaultGrant = sql.search(
+      /alter\s+default\s+privileges\s+in\s+schema\s+career_mcp[\s\S]*?grant\s+select,\s*insert,\s*update,\s*delete\s+on\s+tables\s+to\s+career_mcp_runtime/i
+    );
+    const claimMutationRevoke = sql.search(
+      /revoke\s+insert,\s*update,\s*delete,\s*truncate\s+on\s+table\s+career_mcp\.media_usage_claims\s+from\s+career_mcp_runtime/i
+    );
+    expect(claimMutationRevoke).toBeGreaterThan(broadCurrentGrant);
+    expect(claimMutationRevoke).toBeGreaterThan(broadDefaultGrant);
+    expect(sql).toMatch(
+      /grant\s+select\s+on\s+table\s+career_mcp\.media_usage_claims\s+to\s+career_mcp_runtime/i
+    );
+    expect(sql).toMatch(
+      /grant\s+execute\s+on\s+function\s+career_mcp\.claim_post_draft_media_usage\(\)\s+to\s+career_mcp_runtime/i
+    );
+    expect(sql).toMatch(
+      /grant\s+execute\s+on\s+function\s+career_mcp\.claim_brand_source_media_usage\(\)\s+to\s+career_mcp_runtime/i
+    );
     expect(sql).not.toMatch(/grant[\s\S]{0,120}\b(?:public|anon|authenticated)\b/i);
     expect(sql).not.toMatch(/grant\s+(?:create|all)(?:\s+privileges)?\s+on\s+schema/i);
   });
@@ -83,7 +103,7 @@ describe("Supabase runtime-role operator template", () => {
     expect(sql).not.toMatch(/enable\s+row\s+level\s+security/i);
   });
 
-  it("keeps source-media exclusivity inside the private schema with invoker trigger functions", async () => {
+  it("uses restricted definer trigger functions for the private immutable claim ledger", async () => {
     const sql = await brandSourceExclusivityMigrationSql();
 
     expect(sql).toMatch(/career_mcp[\s\S]*post_draft_media/i);
@@ -99,7 +119,26 @@ describe("Supabase runtime-role operator template", () => {
     expect(sql).toMatch(/on\s+conflict\s*\(\s*"media_id"\s*\)\s+do\s+update/i);
     expect(sql).toMatch(/constraint\s*=\s*'brand_source_media_exclusive'/i);
     expect(sql).not.toMatch(/pg_advisory_xact_lock/i);
-    expect(sql).not.toMatch(/security\s+definer/i);
+    expect(sql.match(/security\s+definer/gi)).toHaveLength(2);
+    expect(sql.match(/set\s+search_path\s*=\s*''/gi)).toHaveLength(2);
+    expect(sql).toMatch(
+      /revoke\s+all\s+on\s+function\s+"career_mcp"\."claim_post_draft_media_usage"\(\)\s+from\s+public/i
+    );
+    expect(sql).toMatch(
+      /revoke\s+all\s+on\s+function\s+"career_mcp"\."claim_brand_source_media_usage"\(\)\s+from\s+public/i
+    );
+    expect(sql).toMatch(
+      /revoke\s+insert,\s*update,\s*delete,\s*truncate\s+on\s+table\s+"career_mcp"\."media_usage_claims"\s+from\s+career_mcp_runtime/i
+    );
+    expect(sql).toMatch(
+      /grant\s+execute\s+on\s+function\s+"career_mcp"\."claim_post_draft_media_usage"\(\)\s+to\s+career_mcp_runtime/i
+    );
+    expect(sql).toMatch(
+      /grant\s+execute\s+on\s+function\s+"career_mcp"\."claim_brand_source_media_usage"\(\)\s+to\s+career_mcp_runtime/i
+    );
+    expect(sql).not.toMatch(
+      /alter\s+function[\s\S]{0,160}owner\s+to\s+career_mcp_runtime/i
+    );
     expect(sql).not.toMatch(/storage\s*\.\s*(?:buckets|objects)/i);
     expect(sql).not.toMatch(/\bgrant\b[\s\S]{0,100}\b(?:public|anon|authenticated)\b/i);
     expect(sql).not.toMatch(/\bservice_role\b/i);

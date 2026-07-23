@@ -75,7 +75,7 @@ $$;
 CREATE FUNCTION "career_mcp"."claim_post_draft_media_usage"()
 RETURNS trigger
 LANGUAGE plpgsql
-SECURITY INVOKER
+SECURITY DEFINER
 SET search_path = ''
 AS $$
 DECLARE
@@ -112,7 +112,7 @@ $$;
 CREATE FUNCTION "career_mcp"."claim_brand_source_media_usage"()
 RETURNS trigger
 LANGUAGE plpgsql
-SECURITY INVOKER
+SECURITY DEFINER
 SET search_path = ''
 AS $$
 DECLARE
@@ -149,6 +149,25 @@ BEGIN
   RETURN NEW;
 END;
 $$;
+--> statement-breakpoint
+REVOKE ALL ON FUNCTION "career_mcp"."claim_post_draft_media_usage"() FROM PUBLIC;
+--> statement-breakpoint
+REVOKE ALL ON FUNCTION "career_mcp"."claim_brand_source_media_usage"() FROM PUBLIC;
+--> statement-breakpoint
+DO $runtime_privileges$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM pg_catalog.pg_roles
+    WHERE rolname = 'career_mcp_runtime'
+  ) THEN
+    EXECUTE 'revoke insert, update, delete, truncate on table "career_mcp"."media_usage_claims" from career_mcp_runtime';
+    EXECUTE 'grant select on table "career_mcp"."media_usage_claims" to career_mcp_runtime';
+    EXECUTE 'grant execute on function "career_mcp"."claim_post_draft_media_usage"() to career_mcp_runtime';
+    EXECUTE 'grant execute on function "career_mcp"."claim_brand_source_media_usage"() to career_mcp_runtime';
+  END IF;
+END;
+$runtime_privileges$;
 --> statement-breakpoint
 CREATE TRIGGER "brand_source_media_exclusive_on_post_draft_media"
 BEFORE INSERT OR UPDATE OF "media_id"

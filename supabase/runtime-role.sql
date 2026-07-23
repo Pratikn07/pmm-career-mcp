@@ -57,6 +57,7 @@ alter role career_mcp_runtime
 revoke all privileges on schema career_mcp from career_mcp_runtime;
 revoke all privileges on all tables in schema career_mcp from career_mcp_runtime;
 revoke all privileges on all sequences in schema career_mcp from career_mcp_runtime;
+revoke all privileges on all functions in schema career_mcp from career_mcp_runtime;
 
 grant usage on schema career_mcp to career_mcp_runtime;
 grant select, insert, update, delete on all tables in schema career_mcp to career_mcp_runtime;
@@ -67,9 +68,37 @@ alter default privileges in schema career_mcp
 alter default privileges in schema career_mcp
   revoke all privileges on sequences from career_mcp_runtime;
 alter default privileges in schema career_mcp
+  revoke all privileges on functions from career_mcp_runtime;
+alter default privileges in schema career_mcp
   grant select, insert, update, delete on tables to career_mcp_runtime;
 alter default privileges in schema career_mcp
   grant usage, select on sequences to career_mcp_runtime;
+
+-- The durable claim ledger is trigger-managed. Keep this block after every
+-- broad current/default grant so an idempotent rerun cannot restore mutations.
+-- The guards also let operators provision the runtime role before migrations.
+do $ledger_privileges$
+begin
+  if pg_catalog.to_regclass('career_mcp.media_usage_claims') is not null then
+    execute 'revoke insert, update, delete, truncate on table career_mcp.media_usage_claims from career_mcp_runtime';
+    execute 'grant select on table career_mcp.media_usage_claims to career_mcp_runtime';
+  end if;
+
+  if pg_catalog.to_regprocedure(
+    'career_mcp.claim_post_draft_media_usage()'
+  ) is not null then
+    execute 'revoke all on function career_mcp.claim_post_draft_media_usage() from public';
+    execute 'grant execute on function career_mcp.claim_post_draft_media_usage() to career_mcp_runtime';
+  end if;
+
+  if pg_catalog.to_regprocedure(
+    'career_mcp.claim_brand_source_media_usage()'
+  ) is not null then
+    execute 'revoke all on function career_mcp.claim_brand_source_media_usage() from public';
+    execute 'grant execute on function career_mcp.claim_brand_source_media_usage() to career_mcp_runtime';
+  end if;
+end
+$ledger_privileges$;
 
 commit;
 

@@ -394,18 +394,22 @@ describe("brand source-media exclusivity", () => {
     ]);
   });
 
-  it("registers paired insert/update triggers using non-definer functions", async () => {
+  it("registers paired insert/update triggers using restricted non-runtime definer functions", async () => {
     const triggers = await queryTestDatabase<{
       trigger_name: string;
       definition: string;
       security_definer: boolean;
       function_definition: string;
+      function_owner: string;
+      function_acl: string | null;
     }>(db, `
       select
         trigger_row.tgname as trigger_name,
         pg_get_triggerdef(trigger_row.oid) as definition,
         procedure_row.prosecdef as security_definer,
-        pg_get_functiondef(procedure_row.oid) as function_definition
+        pg_get_functiondef(procedure_row.oid) as function_definition,
+        pg_get_userbyid(procedure_row.proowner) as function_owner,
+        procedure_row.proacl::text as function_acl
       from pg_trigger trigger_row
       join pg_proc procedure_row
         on procedure_row.oid = trigger_row.tgfoid
@@ -425,8 +429,11 @@ describe("brand source-media exclusivity", () => {
     ]);
     for (const trigger of triggers) {
       expect(trigger.definition).toMatch(/before insert or update/i);
-      expect(trigger.security_definer).toBe(false);
+      expect(trigger.security_definer).toBe(true);
+      expect(trigger.function_owner).not.toBe("career_mcp_runtime");
+      expect(trigger.function_acl).not.toMatch(/(?:^\{|,)=X\//);
       expect(trigger.function_definition).toMatch(/media_usage_claims/i);
+      expect(trigger.function_definition).toMatch(/set\s+search_path\s+to\s+''/i);
       expect(trigger.function_definition).toMatch(
         /on\s+conflict\s*\(\s*"?media_id"?\s*\)/i
       );

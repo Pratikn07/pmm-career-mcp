@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import { drizzle } from "drizzle-orm/postgres-js";
-import postgres, { type Sql } from "postgres";
+import postgres, { type Sql, type TransactionSql } from "postgres";
 import { describe, expect, it } from "vitest";
 import { createRepositories } from "../../src/db/repositories.js";
 import { DomainError } from "../../src/domain/errors.js";
@@ -139,6 +141,28 @@ async function assertMigrationApplied(sql: Sql): Promise<void> {
       )
   `;
   expect(row?.count).toBe(2);
+}
+
+async function applyRuntimeRoleTemplate(sql: Sql): Promise<void> {
+  const template = await readFile(resolve("supabase/runtime-role.sql"), "utf8");
+  const postgresSql = template
+    .split("\n")
+    .filter((line) => !line.trimStart().startsWith("\\"))
+    .join("\n");
+  await sql.unsafe(postgresSql, [], { prepare: false });
+}
+
+async function asRuntimeError(
+  sql: Sql,
+  operation: (transaction: TransactionSql) => Promise<unknown>
+): Promise<unknown> {
+  return await sql.begin(async (transaction) => {
+    await transaction`set local role career_mcp_runtime`;
+    return await operation(transaction);
+  }).then(
+    () => undefined,
+    (error: unknown) => error
+  );
 }
 
 async function seed(sql: Sql, stale = false): Promise<Seed> {
@@ -284,6 +308,228 @@ function expectSafeRoleConflict(error: unknown): void {
 }
 
 liveDescribe("Task 7 real PostgreSQL concurrency", () => {
+  it("keeps the claim ledger immutable to runtime across role-template reruns", async () => {
+    const clients = await createClients();
+    let seeded: Seed | undefined;
+    const extraSourceMediaId = randomUUID();
+    const extraRenderedMediaId = randomUUID();
+    try {
+      await assertMigrationApplied(clients.observer);
+      await applyRuntimeRoleTemplate(clients.observer);
+      seeded = await seed(clients.observer);
+      const current = seeded;
+
+      const [privileges] = await clients.observer<{
+        canSelect: boolean;
+        canInsert: boolean;
+        canUpdate: boolean;
+        canDelete: boolean;
+        canTruncate: boolean;
+      }[]>`
+        select
+          has_table_privilege(
+            'career_mcp_runtime',
+            'career_mcp.media_usage_claims',
+            'SELECT'
+          ) as "canSelect",
+          has_table_privilege(
+            'career_mcp_runtime',
+            'career_mcp.media_usage_claims',
+            'INSERT'
+          ) as "canInsert",
+          has_table_privilege(
+            'career_mcp_runtime',
+            'career_mcp.media_usage_claims',
+            'UPDATE'
+          ) as "canUpdate",
+          has_table_privilege(
+            'career_mcp_runtime',
+            'career_mcp.media_usage_claims',
+            'DELETE'
+          ) as "canDelete",
+          has_table_privilege(
+            'career_mcp_runtime',
+            'career_mcp.media_usage_claims',
+            'TRUNCATE'
+          ) as "canTruncate"
+      `;
+      expect(privileges).toEqual({
+        canSelect: true,
+        canInsert: false,
+        canUpdate: false,
+        canDelete: false,
+        canTruncate: false
+      });
+
+      const functions = await clients.observer<{
+        name: string;
+        securityDefiner: boolean;
+        owner: string;
+        acl: string | null;
+        runtimeCanExecute: boolean;
+      }[]>`
+        select
+          procedure_row.proname as name,
+          procedure_row.prosecdef as "securityDefiner",
+          pg_get_userbyid(procedure_row.proowner) as owner,
+          procedure_row.proacl::text as acl,
+          has_function_privilege(
+            'career_mcp_runtime',
+            procedure_row.oid,
+            'EXECUTE'
+          ) as "runtimeCanExecute"
+        from pg_proc procedure_row
+        join pg_namespace namespace_row
+          on namespace_row.oid = procedure_row.pronamespace
+        where namespace_row.nspname = 'career_mcp'
+          and procedure_row.proname in (
+            'claim_post_draft_media_usage',
+            'claim_brand_source_media_usage'
+          )
+        order by procedure_row.proname
+      `;
+      expect(functions).toHaveLength(2);
+      for (const fn of functions) {
+        expect(fn.securityDefiner).toBe(true);
+        expect(fn.owner).not.toBe("career_mcp_runtime");
+        expect(fn.acl).not.toMatch(/(?:^\{|,)=X\//);
+        expect(fn.runtimeCanExecute).toBe(true);
+      }
+
+      for (const operation of [
+        (transaction: TransactionSql) => transaction`
+          insert into career_mcp.media_usage_claims (
+            media_id, owner_subject, purpose, created_at
+          ) values (
+            ${current.sourceMediaId}, ${current.owner}, 'brand_source', now()
+          )
+        `,
+        (transaction: TransactionSql) => transaction`
+          update career_mcp.media_usage_claims
+          set purpose = 'brand_source'
+          where media_id = ${current.baseMediaId}
+        `,
+        (transaction: TransactionSql) => transaction`
+          delete from career_mcp.media_usage_claims
+          where media_id = ${current.baseMediaId}
+        `,
+        (transaction: TransactionSql) => transaction`
+          truncate table career_mcp.media_usage_claims
+        `
+      ]) {
+        expect(postgresField(
+          await asRuntimeError(clients.attach, operation),
+          "code"
+        )).toBe("42501");
+      }
+
+      await applyRuntimeRoleTemplate(clients.observer);
+      expect(postgresField(
+        await asRuntimeError(
+          clients.attach,
+          (transaction) => transaction`
+            delete from career_mcp.media_usage_claims
+            where media_id = ${current.baseMediaId}
+          `
+        ),
+        "code"
+      )).toBe("42501");
+
+      await clients.observer`
+        insert into career_mcp.post_media (
+          id, owner_subject, object_path, sha256, mime_type, byte_size,
+          width, height, frame_count, original_filename, created_at
+        ) values
+          (
+            ${extraSourceMediaId}, ${current.owner},
+            ${`${current.owner}/77/${extraSourceMediaId}.png`}, ${"7".repeat(64)},
+            'image/png', 1024, 1200, 627, 1, 'runtime-source.png', now()
+          ),
+          (
+            ${extraRenderedMediaId}, ${current.owner},
+            ${`${current.owner}/88/${extraRenderedMediaId}.png`}, ${"8".repeat(64)},
+            'image/png', 1024, 1080, 1350, 1, 'runtime-render.png', now()
+          )
+      `;
+
+      await clients.attach.begin(async (transaction) => {
+        await transaction`set local role career_mcp_runtime`;
+        await transaction`
+          insert into career_mcp.post_draft_media (
+            post_draft_id, version, position, media_id, alt_text
+          ) values (
+            ${current.firstPostId}, 1, 1, ${current.sourceMediaId},
+            'Runtime attachment claim'
+          )
+        `;
+      });
+      const renderConflict = await asRuntimeError(
+        clients.render,
+        (transaction) => transaction`
+          insert into career_mcp.brand_visual_renders (
+            id, owner_subject, brief_id, version, source_media_id, rendered_media_id,
+            alt_text, render_checksum, renderer_version, created_at
+          ) values (
+            ${randomUUID()}, ${current.owner}, ${current.briefId}, 1,
+            ${current.sourceMediaId}, ${current.renderedMediaId},
+            'Must conflict with runtime attachment', ${"9".repeat(64)}, 1, now()
+          )
+        `
+      );
+      expect(postgresField(renderConflict, "code")).toBe("23514");
+      expect(postgresField(renderConflict, "constraint_name"))
+        .toBe("brand_source_media_exclusive");
+
+      await clients.render.begin(async (transaction) => {
+        await transaction`set local role career_mcp_runtime`;
+        await transaction`
+          insert into career_mcp.brand_visual_renders (
+            id, owner_subject, brief_id, version, source_media_id, rendered_media_id,
+            alt_text, render_checksum, renderer_version, created_at
+          ) values (
+            ${randomUUID()}, ${current.owner}, ${current.briefId}, 1,
+            ${extraSourceMediaId}, ${extraRenderedMediaId},
+            'Runtime source claim', ${"a".repeat(64)}, 1, now()
+          )
+        `;
+      });
+      const attachmentConflict = await asRuntimeError(
+        clients.attach,
+        (transaction) => transaction`
+          insert into career_mcp.post_draft_media (
+            post_draft_id, version, position, media_id, alt_text
+          ) values (
+            ${current.firstPostId}, 1, 2, ${extraSourceMediaId},
+            'Must conflict with runtime source'
+          )
+        `
+      );
+      expect(postgresField(attachmentConflict, "code")).toBe("23514");
+      expect(postgresField(attachmentConflict, "constraint_name"))
+        .toBe("brand_source_media_exclusive");
+
+      const claims = await clients.observer<{ mediaId: string; purpose: string }[]>`
+        select media_id as "mediaId", purpose
+        from career_mcp.media_usage_claims
+        where media_id in (${current.sourceMediaId}, ${extraSourceMediaId})
+        order by media_id
+      `;
+      expect(new Map(claims.map((claim) => [claim.mediaId, claim.purpose]))).toEqual(
+        new Map([
+          [current.sourceMediaId, "attached"],
+          [extraSourceMediaId, "brand_source"]
+        ])
+      );
+    } finally {
+      if (seeded !== undefined) await cleanup(clients.observer, seeded);
+      await clients.observer`
+        delete from career_mcp.post_media
+        where id in (${extraSourceMediaId}, ${extraRenderedMediaId})
+      `;
+      await closeClients(clients);
+    }
+  });
+
   it("lets a direct READ COMMITTED attachment beat SERIALIZABLE commitAndAttach safely", async () => {
     const clients = await createClients();
     let seeded: Seed | undefined;
