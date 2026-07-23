@@ -278,6 +278,7 @@ describe("database lifecycle", () => {
         and table_name in (
           'settings', 'companies', 'people', 'evidence', 'targets', 'target_notes',
           'outreach_drafts', 'shortlists', 'shortlist_entries', 'post_drafts',
+          'brand_profiles', 'brand_visual_briefs', 'brand_visual_renders',
           'post_draft_media', 'post_media', 'post_previews', 'publish_attempt_media',
           'publish_attempts', 'oauth_tokens'
         )
