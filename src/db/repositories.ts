@@ -23,6 +23,7 @@ import {
   targetNotes,
   targets
 } from "./schema.js";
+import { DomainError } from "../domain/errors.js";
 import { checksumLinkedInPost } from "../posts/post-checksum.js";
 
 type Database = PgDatabase<PgQueryResultHKT, typeof schema>;
@@ -1351,19 +1352,40 @@ export function createRepositories(database: Database) {
         ) {
           throw new Error("Brand visual brief identifiers must be valid UUIDs");
         }
-        const [profile] = await database.select({ id: brandProfiles.id }).from(brandProfiles).where(and(
-          eq(brandProfiles.id, input.brandProfileId),
-          eq(brandProfiles.version, input.brandProfileVersion),
-          eq(brandProfiles.ownerSubject, input.ownerSubject)
-        )).limit(1);
-        if (profile === undefined) {
-          throw new Error("Brand visual brief profile must be owned by the request subject");
-        }
-        const [brief] = await database.insert(brandVisualBriefs).values({
-          ...input,
-          createdAt: nowIso()
-        }).returning();
-        return requiredRow(brief, "brand visual brief");
+        return serializableTransaction(database, async (transaction) => {
+          const sourceMedia = await transaction.select({
+            ownerSubject: postMedia.ownerSubject
+          }).from(postDrafts).innerJoin(postDraftMedia, and(
+            eq(postDraftMedia.postDraftId, postDrafts.id),
+            eq(postDraftMedia.version, postDrafts.version)
+          )).innerJoin(postMedia, eq(postDraftMedia.mediaId, postMedia.id)).where(and(
+            eq(postDrafts.id, input.postDraftId),
+            eq(postDrafts.version, input.postVersion)
+          )).for("update");
+          if (
+            sourceMedia.length === 0
+            || sourceMedia.some(({ ownerSubject }) => (
+              ownerSubject.toLowerCase() !== input.ownerSubject.toLowerCase()
+            ))
+          ) {
+            throw new DomainError("NOT_FOUND", "Brand visual brief source was not found", {
+              entity: "post_draft"
+            });
+          }
+          const [profile] = await transaction.select({ id: brandProfiles.id }).from(brandProfiles).where(and(
+            eq(brandProfiles.id, input.brandProfileId),
+            eq(brandProfiles.version, input.brandProfileVersion),
+            eq(brandProfiles.ownerSubject, input.ownerSubject)
+          )).limit(1).for("update");
+          if (profile === undefined) {
+            throw new Error("Brand visual brief profile must be owned by the request subject");
+          }
+          const [brief] = await transaction.insert(brandVisualBriefs).values({
+            ...input,
+            createdAt: nowIso()
+          }).returning();
+          return requiredRow(brief, "brand visual brief");
+        });
       },
       async getOwned(id: string, ownerSubject: string): Promise<BrandVisualBrief | undefined> {
         if (!isUuid(id) || !isUuid(ownerSubject)) {
@@ -1403,6 +1425,9 @@ export function createRepositories(database: Database) {
         }).from(brandVisualRenders).innerJoin(
           brandVisualBriefs,
           eq(brandVisualRenders.briefId, brandVisualBriefs.id)
+        ).innerJoin(
+          postMedia,
+          eq(brandVisualRenders.renderedMediaId, postMedia.id)
         ).innerJoin(brandProfiles, and(
           eq(brandVisualBriefs.brandProfileId, brandProfiles.id),
           eq(brandVisualBriefs.brandProfileVersion, brandProfiles.version)
@@ -1410,6 +1435,7 @@ export function createRepositories(database: Database) {
           eq(brandVisualRenders.ownerSubject, ownerSubject),
           eq(brandVisualRenders.renderedMediaId, mediaId),
           eq(brandVisualBriefs.ownerSubject, ownerSubject),
+          eq(postMedia.ownerSubject, ownerSubject),
           eq(brandProfiles.ownerSubject, ownerSubject)
         )).orderBy(desc(brandVisualRenders.createdAt), desc(brandVisualRenders.id)).limit(1);
         return row === undefined

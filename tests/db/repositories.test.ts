@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { postgresErrorKind } from "../../src/domain/errors.js";
+import { DomainError, postgresErrorKind } from "../../src/domain/errors.js";
 import { computePostChecksum } from "../../src/drafts/service.js";
 import { createRepositories } from "../../src/db/repositories.js";
 import { checksumLinkedInPost } from "../../src/posts/post-checksum.js";
@@ -79,6 +79,18 @@ async function addMedia(input: {
       ? {}
       : { originalFilename: input.originalFilename })
   });
+}
+
+async function addOwnedPost(ownerSubject: string) {
+  const media = await addMedia({ ownerSubject });
+  return (await db.postDrafts.createVersionWithMedia({
+    ownerSubject,
+    text: "Owner-scoped brand brief source",
+    visibility: "PUBLIC",
+    checksum: "owner-scoped-brand-brief-source",
+    state: "draft",
+    media: [{ mediaId: media.id, altText: "Owner-scoped source image" }]
+  })).post;
 }
 
 it("persists a target with evidence provenance", async () => {
@@ -456,7 +468,7 @@ describe("Brand Studio repositories", () => {
       paletteJson: {},
       hookRulesJson: {}
     });
-    const post = await addPost();
+    const post = await addOwnedPost(owner);
     const createBrief = async (coverHook: string) => db.brandVisualBriefs.create({
       id: randomUUID(),
       ownerSubject: owner,
@@ -510,6 +522,63 @@ describe("Brand Studio repositories", () => {
     expect(await db.brandVisualBriefs.listRecent("not-a-uuid", 10)).toEqual([]);
   });
 
+  it("rejects absent and foreign post versions with the same safe error", async () => {
+    const owner = randomUUID();
+    const foreignOwner = randomUUID();
+    const profile = await db.brandProfiles.ensureDefault({
+      ownerSubject: owner,
+      id: randomUUID(),
+      publicName: "Bhagyashree Nandoskar",
+      roleLine: "Product Marketing",
+      seriesName: "PMM FIELD NOTES",
+      monogram: "BN",
+      voiceJson: { persona: "curious PMM practitioner" },
+      paletteJson: { ivory: "#F6F1E8" },
+      hookRulesJson: { minWords: 2, maxWords: 8 }
+    });
+    const foreignPost = await addOwnedPost(foreignOwner);
+    const createBrief = (postDraftId: string, postVersion: number) => db.brandVisualBriefs.create({
+      id: randomUUID(),
+      ownerSubject: owner,
+      postDraftId,
+      postVersion,
+      brandProfileId: profile.id,
+      brandProfileVersion: profile.version,
+      templateId: "editorial-statement-v1",
+      templateVersion: 1,
+      promptFormatVersion: 1,
+      visualMode: "EDITORIAL_STATEMENT",
+      coverHook: "Start with the audience",
+      conceptSummary: "A concise visual concept",
+      generationPrompt: "A text-free editorial illustration",
+      negativeConstraintsJson: ["no text"],
+      state: "ready"
+    });
+    const rejection = async (postDraftId: string, postVersion: number) => {
+      const error = await createBrief(postDraftId, postVersion).then(
+        () => undefined,
+        (reason: unknown) => reason
+      );
+      expect(error).toBeInstanceOf(DomainError);
+      const domainError = error as DomainError;
+      return {
+        code: domainError.code,
+        message: domainError.message,
+        details: domainError.details
+      };
+    };
+
+    const foreign = await rejection(foreignPost.id, foreignPost.version);
+    const absent = await rejection(randomUUID(), 1);
+
+    expect(foreign).toEqual(absent);
+    expect(foreign).toEqual({
+      code: "NOT_FOUND",
+      message: "Brand visual brief source was not found",
+      details: { entity: "post_draft" }
+    });
+  });
+
   it("returns render provenance only for the owning subject", async () => {
     const owner = randomUUID();
     const profile = await db.brandProfiles.ensureDefault({
@@ -523,7 +592,7 @@ describe("Brand Studio repositories", () => {
       paletteJson: { ivory: "#F6F1E8" },
       hookRulesJson: { minWords: 2, maxWords: 8 }
     });
-    const post = await addPost();
+    const post = await addOwnedPost(owner);
     const brief = await db.brandVisualBriefs.create({
       id: randomUUID(),
       ownerSubject: owner,
@@ -561,6 +630,51 @@ describe("Brand Studio repositories", () => {
     expect(await db.brandVisualRenders.getByRenderedMedia(randomUUID(), renderedMedia.id)).toBeUndefined();
     expect(await db.brandVisualRenders.getByRenderedMedia("not-a-uuid", renderedMedia.id)).toBeUndefined();
     expect(await db.brandVisualRenders.getByRenderedMedia(owner, "not-a-uuid")).toBeUndefined();
+  });
+
+  it("does not return a render whose rendered media belongs to another owner", async () => {
+    const owner = randomUUID();
+    const profile = await db.brandProfiles.ensureDefault({
+      ownerSubject: owner,
+      id: randomUUID(),
+      publicName: "Bhagyashree Nandoskar",
+      roleLine: "Product Marketing",
+      seriesName: "PMM FIELD NOTES",
+      monogram: "BN",
+      voiceJson: { persona: "curious PMM practitioner" },
+      paletteJson: { ivory: "#F6F1E8" },
+      hookRulesJson: { minWords: 2, maxWords: 8 }
+    });
+    const post = await addOwnedPost(owner);
+    const brief = await db.brandVisualBriefs.create({
+      id: randomUUID(),
+      ownerSubject: owner,
+      postDraftId: post.id,
+      postVersion: post.version,
+      brandProfileId: profile.id,
+      brandProfileVersion: profile.version,
+      templateId: "editorial-statement-v1",
+      templateVersion: 1,
+      promptFormatVersion: 1,
+      visualMode: "EDITORIAL_STATEMENT",
+      coverHook: "Start with the audience",
+      conceptSummary: "A concise visual concept",
+      generationPrompt: "A text-free editorial illustration",
+      negativeConstraintsJson: ["no text"],
+      state: "ready"
+    });
+    const foreignMedia = await addMedia({ ownerSubject: randomUUID() });
+    await queryTestDatabase(db, `
+      insert into career_mcp.brand_visual_renders (
+        id, owner_subject, brief_id, version, rendered_media_id, alt_text,
+        render_checksum, renderer_version, created_at
+      ) values (
+        '${randomUUID()}', '${owner}', '${brief.id}', 1, '${foreignMedia.id}', 'Editorial cover',
+        '${"b".repeat(64)}', 1, '2026-07-22T10:00:00.000Z'
+      )
+    `);
+
+    expect(await db.brandVisualRenders.getByRenderedMedia(owner, foreignMedia.id)).toBeUndefined();
   });
 });
 
