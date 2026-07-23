@@ -579,6 +579,124 @@ describe("Brand Studio repositories", () => {
     });
   });
 
+  it("atomically rejects a no-longer-latest owned post version and accepts the latest", async () => {
+    const owner = randomUUID();
+    const profile = await db.brandProfiles.ensureDefault({
+      ownerSubject: owner,
+      id: randomUUID(),
+      publicName: "BHAGYASHREE NANDOSKAR",
+      roleLine: "PRODUCT MARKETING",
+      seriesName: "PMM FIELD NOTES",
+      monogram: "BN",
+      voiceJson: { persona: "curious PMM practitioner" },
+      paletteJson: { ivory: "#F6F1E8" },
+      hookRulesJson: { minWords: 2, maxWords: 8 }
+    });
+    const first = await addOwnedPost(owner);
+    const firstMedia = await db.postDraftMedia.listForVersion(first.id, first.version);
+    const second = (await db.postDrafts.createVersionWithMedia({
+      draftId: first.draftId,
+      expectedVersion: first.version,
+      ownerSubject: owner,
+      text: "Latest owner-scoped brand brief source",
+      visibility: "PUBLIC",
+      checksum: "latest-owner-scoped-brand-brief-source",
+      state: "draft",
+      media: firstMedia.map(({ mediaId, altText }) => ({ mediaId, altText }))
+    })).post;
+    const createBrief = (postDraftId: string, postVersion: number) => db.brandVisualBriefs.create({
+      id: randomUUID(),
+      ownerSubject: owner,
+      postDraftId,
+      postVersion,
+      brandProfileId: profile.id,
+      brandProfileVersion: profile.version,
+      templateId: "editorial-statement-v1",
+      templateVersion: 1,
+      promptFormatVersion: 1,
+      visualMode: "EDITORIAL_STATEMENT",
+      coverHook: "Clarity beats capability.",
+      conceptSummary: "Restrained editorial geometry",
+      generationPrompt: "A text-free editorial illustration",
+      negativeConstraintsJson: ["no text"],
+      state: "ready"
+    });
+
+    queryLog.length = 0;
+    const staleError = await createBrief(first.id, first.version).then(
+      () => undefined,
+      (error: unknown) => error
+    );
+    expect(staleError).toBeInstanceOf(DomainError);
+    expect(staleError).toMatchObject({
+      code: "CONFLICT",
+      message: "Post draft version is stale",
+      details: {
+        entity: "post_draft",
+        expectedVersion: first.version,
+        actualVersion: second.version
+      }
+    });
+    expect(queryLog.some(({ query }) => (
+      query.includes('from "career_mcp"."post_drafts"')
+      && query.includes('order by "career_mcp"."post_drafts"."version" desc')
+      && /for update/i.test(query)
+    ))).toBe(true);
+
+    await expect(createBrief(second.id, second.version)).resolves.toMatchObject({
+      postDraftId: second.id,
+      postVersion: second.version
+    });
+    expect(await db.brandVisualBriefs.listRecent(owner, 30)).toHaveLength(1);
+  });
+
+  it("rejects exact hook reuse inside the latest thirty owner briefs", async () => {
+    const owner = randomUUID();
+    const profile = await db.brandProfiles.ensureDefault({
+      ownerSubject: owner,
+      id: randomUUID(),
+      publicName: "BHAGYASHREE NANDOSKAR",
+      roleLine: "PRODUCT MARKETING",
+      seriesName: "PMM FIELD NOTES",
+      monogram: "BN",
+      voiceJson: { persona: "curious PMM practitioner" },
+      paletteJson: { ivory: "#F6F1E8" },
+      hookRulesJson: { minWords: 2, maxWords: 8, recentWindow: 30 }
+    });
+    const post = await addOwnedPost(owner);
+    const createBrief = () => db.brandVisualBriefs.create({
+      id: randomUUID(),
+      ownerSubject: owner,
+      postDraftId: post.id,
+      postVersion: post.version,
+      brandProfileId: profile.id,
+      brandProfileVersion: profile.version,
+      templateId: "editorial-statement-v1",
+      templateVersion: 1,
+      promptFormatVersion: 1,
+      visualMode: "EDITORIAL_STATEMENT",
+      coverHook: "Clarity beats capability.",
+      conceptSummary: "Restrained editorial geometry",
+      generationPrompt: "A text-free editorial illustration",
+      negativeConstraintsJson: ["no text"],
+      state: "ready"
+    });
+    await createBrief();
+
+    const error = await createBrief().then(
+      () => undefined,
+      (reason: unknown) => reason
+    );
+
+    expect(error).toBeInstanceOf(DomainError);
+    expect(error).toMatchObject({
+      code: "VALIDATION_ERROR",
+      message: "Cover hook does not meet the brand rules.",
+      details: { field: "coverHook", reason: "recent_duplicate" }
+    });
+    expect(await db.brandVisualBriefs.listRecent(owner, 30)).toHaveLength(1);
+  });
+
   it("returns render provenance only for the owning subject", async () => {
     const owner = randomUUID();
     const profile = await db.brandProfiles.ensureDefault({

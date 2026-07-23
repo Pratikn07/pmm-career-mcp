@@ -1354,7 +1354,8 @@ export function createRepositories(database: Database) {
         }
         return serializableTransaction(database, async (transaction) => {
           const sourceMedia = await transaction.select({
-            ownerSubject: postMedia.ownerSubject
+            ownerSubject: postMedia.ownerSubject,
+            draftId: postDrafts.draftId
           }).from(postDrafts).innerJoin(postDraftMedia, and(
             eq(postDraftMedia.postDraftId, postDrafts.id),
             eq(postDraftMedia.version, postDrafts.version)
@@ -1371,6 +1372,58 @@ export function createRepositories(database: Database) {
             throw new DomainError("NOT_FOUND", "Brand visual brief source was not found", {
               entity: "post_draft"
             });
+          }
+          const [latest] = await transaction.select({
+            id: postDrafts.id,
+            version: postDrafts.version
+          }).from(postDrafts).where(
+            eq(postDrafts.draftId, sourceMedia[0]!.draftId)
+          ).orderBy(desc(postDrafts.version)).limit(1).for("update");
+          if (latest === undefined) {
+            throw new DomainError("NOT_FOUND", "Brand visual brief source was not found", {
+              entity: "post_draft"
+            });
+          }
+          const latestMedia = await transaction.select({
+            ownerSubject: postMedia.ownerSubject
+          }).from(postDraftMedia).innerJoin(
+            postMedia,
+            eq(postDraftMedia.mediaId, postMedia.id)
+          ).where(and(
+            eq(postDraftMedia.postDraftId, latest.id),
+            eq(postDraftMedia.version, latest.version)
+          )).for("update");
+          if (
+            latestMedia.length === 0
+            || latestMedia.some(({ ownerSubject }) => (
+              ownerSubject.toLowerCase() !== input.ownerSubject.toLowerCase()
+            ))
+          ) {
+            throw new DomainError("NOT_FOUND", "Brand visual brief source was not found", {
+              entity: "post_draft"
+            });
+          }
+          if (latest.id !== input.postDraftId || latest.version !== input.postVersion) {
+            throw new DomainError("CONFLICT", "Post draft version is stale", {
+              entity: "post_draft",
+              expectedVersion: input.postVersion,
+              actualVersion: latest.version
+            });
+          }
+          const recentHooks = await transaction.select({
+            coverHook: brandVisualBriefs.coverHook
+          }).from(brandVisualBriefs).where(
+            eq(brandVisualBriefs.ownerSubject, input.ownerSubject)
+          ).orderBy(
+            desc(brandVisualBriefs.createdAt),
+            desc(brandVisualBriefs.id)
+          ).limit(30).for("update");
+          if (recentHooks.some(({ coverHook }) => coverHook === input.coverHook)) {
+            throw new DomainError(
+              "VALIDATION_ERROR",
+              "Cover hook does not meet the brand rules.",
+              { field: "coverHook", reason: "recent_duplicate" }
+            );
           }
           const [profile] = await transaction.select({ id: brandProfiles.id }).from(brandProfiles).where(and(
             eq(brandProfiles.id, input.brandProfileId),
