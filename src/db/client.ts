@@ -28,12 +28,11 @@ const SESSION_TIMEOUT_MILLISECONDS = 30_000;
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-const PROTECTED_STARTUP_PARAMETERS = new Set([
-  "application_name",
-  "statement_timeout",
-  "idle_in_transaction_session_timeout",
-  "career_mcp.legacy_post_owner_subject"
-]);
+// Application database URLs intentionally carry credentials and routing only.
+// postgres.js forwards otherwise-unknown query keys as PostgreSQL startup
+// parameters, including `options=-c ...`; accepting an unreviewed key here
+// would let a URL override role, search_path, timeouts, or private GUCs.
+const ALLOWED_DATABASE_URL_QUERY_PARAMETERS = new Set<string>();
 
 function validateDatabaseUrl(
   databaseUrl: string,
@@ -50,8 +49,8 @@ function validateDatabaseUrl(
   }
   for (const key of parsed.searchParams.keys()) {
     const normalizedKey = key.toLowerCase();
-    if (PROTECTED_STARTUP_PARAMETERS.has(normalizedKey)) {
-      throw new Error(`${name} must not override the ${normalizedKey} connection parameter`);
+    if (!ALLOWED_DATABASE_URL_QUERY_PARAMETERS.has(normalizedKey)) {
+      throw new Error(`${name} contains unsupported query parameter ${normalizedKey}`);
     }
   }
   return parsed;

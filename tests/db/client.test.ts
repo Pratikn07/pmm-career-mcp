@@ -102,6 +102,60 @@ describe("production PostgreSQL client", () => {
     expect(mocks.postgres).not.toHaveBeenCalled();
   });
 
+  it.each([
+    [
+      "migration encoded options GUC",
+      DATABASE_URL,
+      `${MIGRATION_DATABASE_URL}?options=-c%20career_mcp.legacy_post_owner_subject%3D00000000-0000-0000-0000-000000000002`,
+      /options/i
+    ],
+    [
+      "runtime options search path",
+      `${DATABASE_URL}?options=-c%20search_path%3Dpublic`,
+      MIGRATION_DATABASE_URL,
+      /options/i
+    ],
+    [
+      "runtime case-varied options",
+      `${DATABASE_URL}?OpTiOnS=-c%20role%3Dpostgres`,
+      MIGRATION_DATABASE_URL,
+      /options/i
+    ],
+    [
+      "migration duplicate options",
+      DATABASE_URL,
+      `${MIGRATION_DATABASE_URL}?options=-c%20statement_timeout%3D0&OPTIONS=-c%20career_mcp.legacy_post_owner_subject%3D00000000-0000-0000-0000-000000000002`,
+      /options/i
+    ],
+    [
+      "runtime direct role",
+      `${DATABASE_URL}?role=postgres`,
+      MIGRATION_DATABASE_URL,
+      /role/i
+    ],
+    [
+      "migration direct search path",
+      DATABASE_URL,
+      `${MIGRATION_DATABASE_URL}?search_path=public`,
+      /search_path/i
+    ],
+    [
+      "runtime TLS mode",
+      `${DATABASE_URL}?sslmode=disable`,
+      MIGRATION_DATABASE_URL,
+      /sslmode/i
+    ]
+  ])(
+    "rejects unsupported database URL query parameters: %s",
+    async (_label, runtimeUrl, migrationDatabaseUrl, expectedError) => {
+      await expect(createDatabase(runtimeUrl, {
+        migrationDatabaseUrl,
+        requireTls: false
+      })).rejects.toThrow(expectedError);
+      expect(mocks.postgres).not.toHaveBeenCalled();
+    }
+  );
+
   it("sets the configured legacy owner only on the migration connection", async () => {
     const legacyPostOwnerSubject = "00000000-0000-0000-0000-000000000001";
 

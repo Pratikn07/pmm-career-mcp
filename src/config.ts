@@ -247,15 +247,14 @@ function requirePostgresUrl(value: string, name: "DATABASE_URL" | "MIGRATION_DAT
   if (url.protocol !== "postgres:" && url.protocol !== "postgresql:") {
     throw new Error(`${name} must be a PostgreSQL URL in production`);
   }
-  const protectedStartupParameters = new Set([
-    "application_name",
-    "statement_timeout",
-    "idle_in_transaction_session_timeout"
-  ]);
+  // postgres.js can translate arbitrary URL query keys into PostgreSQL startup
+  // parameters. Keep this list fail-closed so credentials/routing cannot smuggle
+  // `options=-c ...`, role/search_path changes, timeouts, or private GUCs.
+  const allowedDatabaseUrlQueryParameters = new Set<string>();
   for (const key of url.searchParams.keys()) {
     const normalizedKey = key.toLowerCase();
-    if (protectedStartupParameters.has(normalizedKey)) {
-      throw new Error(`${name} must not override the ${normalizedKey} connection parameter`);
+    if (!allowedDatabaseUrlQueryParameters.has(normalizedKey)) {
+      throw new Error(`${name} contains unsupported query parameter ${normalizedKey}`);
     }
   }
   return url;

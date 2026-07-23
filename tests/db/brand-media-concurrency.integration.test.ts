@@ -33,8 +33,26 @@ export function task7LocalDatabaseUrl(
   }
 }
 
+export function task7RuntimeDatabaseUrl(
+  env: Readonly<Record<string, string | undefined>>,
+  password: string
+): string | undefined {
+  const localDatabaseUrl = task7LocalDatabaseUrl(env);
+  if (localDatabaseUrl === undefined) return undefined;
+  const parsed = new URL(localDatabaseUrl);
+  parsed.username = "career_mcp_runtime";
+  parsed.password = password;
+  return parsed.toString();
+}
+
 const databaseUrl = task7LocalDatabaseUrl(process.env);
 const liveDescribe = databaseUrl === undefined ? describe.skip : describe;
+const localClientOptions = {
+  max: 1,
+  prepare: false,
+  idle_timeout: 2,
+  connect_timeout: 5
+} as const;
 
 type Deferred = Readonly<{
   promise: Promise<void>;
@@ -99,21 +117,30 @@ describe("Task 7 PostgreSQL integration safety gate", () => {
       TASK7_POSTGRES_TEST_ACK: "local-docker-only"
     })).toBeUndefined();
   });
+
+  it("derives runtime credentials only from an acknowledged loopback database URL", () => {
+    const runtimeUrl = task7RuntimeDatabaseUrl({
+      TASK7_POSTGRES_TEST_DATABASE_URL: localUrl,
+      TASK7_POSTGRES_TEST_ACK: "local-docker-only"
+    }, "temporary runtime password");
+
+    expect(runtimeUrl).toBe(
+      "postgres://career_mcp_runtime:temporary%20runtime%20password@127.0.0.1:54322/career_mcp_test"
+    );
+    expect(task7RuntimeDatabaseUrl({
+      TASK7_POSTGRES_TEST_DATABASE_URL: "postgres://postgres:postgres@db.example.com/postgres",
+      TASK7_POSTGRES_TEST_ACK: "local-docker-only"
+    }, "temporary runtime password")).toBeUndefined();
+  });
 });
 
 async function createClients() {
   if (databaseUrl === undefined) {
     throw new Error("TASK7_POSTGRES_TEST_DATABASE_URL is required");
   }
-  const options = {
-    max: 1,
-    prepare: false,
-    idle_timeout: 2,
-    connect_timeout: 5
-  } as const;
-  const attach = postgres(databaseUrl, options);
-  const render = postgres(databaseUrl, options);
-  const observer = postgres(databaseUrl, options);
+  const attach = postgres(databaseUrl, localClientOptions);
+  const render = postgres(databaseUrl, localClientOptions);
+  const observer = postgres(databaseUrl, localClientOptions);
   await Promise.all([
     attach`set statement_timeout = '3s'`,
     render`set statement_timeout = '3s'`,
@@ -137,10 +164,12 @@ async function assertMigrationApplied(sql: Sql): Promise<void> {
     where not tgisinternal
       and tgname in (
         'brand_source_media_exclusive_on_post_draft_media',
-        'brand_source_media_exclusive_on_render'
+        'brand_source_media_exclusive_on_render',
+        'claim_post_draft_owner_before_insert',
+        'claim_brand_brief_source_after_insert'
       )
   `;
-  expect(row?.count).toBe(2);
+  expect(row?.count).toBe(4);
 }
 
 async function applyRuntimeRoleTemplate(sql: Sql): Promise<void> {
@@ -150,6 +179,92 @@ async function applyRuntimeRoleTemplate(sql: Sql): Promise<void> {
     .filter((line) => !line.trimStart().startsWith("\\"))
     .join("\n");
   await sql.unsafe(postgresSql, [], { prepare: false });
+}
+
+type RuntimeLogin = Readonly<{
+  client: Sql;
+  ownerSubject: string;
+  insertedOwnerMapping: boolean;
+  roleExisted: boolean;
+  previousPasswordHash: string | null;
+}>;
+
+async function restoreRuntimePassword(sql: Sql, login: RuntimeLogin): Promise<void> {
+  if (!login.roleExisted || login.previousPasswordHash === null) {
+    await sql.unsafe("alter role career_mcp_runtime password null", [], { prepare: false });
+    return;
+  }
+  await sql`alter role career_mcp_runtime password ${login.previousPasswordHash}`;
+}
+
+async function createAuthenticatedRuntimeLogin(sql: Sql): Promise<RuntimeLogin> {
+  const [previousRole] = await sql<{
+    roleExisted: boolean;
+    passwordHash: string | null;
+  }[]>`
+    select
+      exists (
+        select 1
+        from pg_catalog.pg_roles
+        where rolname = 'career_mcp_runtime'
+      ) as "roleExisted",
+      (
+        select rolpassword
+        from pg_catalog.pg_authid
+        where rolname = 'career_mcp_runtime'
+      ) as "passwordHash"
+  `;
+  await applyRuntimeRoleTemplate(sql);
+
+  const [existingMapping] = await sql<{ ownerSubject: string }[]>`
+    select owner_subject as "ownerSubject"
+    from career_mcp.runtime_role_owners
+    where role_name = 'career_mcp_runtime'
+  `;
+  const ownerSubject = existingMapping?.ownerSubject ?? randomUUID();
+  const insertedOwnerMapping = existingMapping === undefined;
+  if (insertedOwnerMapping) {
+    await sql`
+      insert into career_mcp.runtime_role_owners (
+        role_name, owner_subject, created_at
+      ) values (
+        'career_mcp_runtime', ${ownerSubject}, now()
+      )
+    `;
+  }
+
+  const temporaryPassword = `task7-${randomUUID()}-${randomUUID()}`;
+  const runtimeUrl = task7RuntimeDatabaseUrl(process.env, temporaryPassword);
+  if (runtimeUrl === undefined) {
+    throw new Error("Runtime login requires the acknowledged loopback PostgreSQL target");
+  }
+  await sql`alter role career_mcp_runtime password ${temporaryPassword}`;
+  const client = postgres(runtimeUrl, localClientOptions);
+  const login: RuntimeLogin = {
+    client,
+    ownerSubject,
+    insertedOwnerMapping,
+    roleExisted: previousRole?.roleExisted ?? false,
+    previousPasswordHash: previousRole?.passwordHash ?? null
+  };
+  try {
+    await client`set statement_timeout = '3s'`;
+    return login;
+  } catch (error) {
+    await client.end({ timeout: 1 }).catch(() => undefined);
+    if (login.insertedOwnerMapping) {
+      await sql.begin(async (transaction) => {
+        await transaction`set local session_replication_role = replica`;
+        await transaction`
+          delete from career_mcp.runtime_role_owners
+          where role_name = 'career_mcp_runtime'
+            and owner_subject = ${login.ownerSubject}
+        `;
+      });
+    }
+    await restoreRuntimePassword(sql, login);
+    throw error;
+  }
 }
 
 async function asRuntimeError(
@@ -207,19 +322,23 @@ async function seed(sql: Sql, stale = false): Promise<Seed> {
   `;
   await sql`
     insert into career_mcp.post_drafts (
-      id, draft_id, text, visibility, version, checksum, state, created_at, updated_at
+      id, draft_id, owner_subject, text, visibility, version, checksum, state,
+      created_at, updated_at
     ) values (
-      ${result.firstPostId}, ${result.draftId}, 'Task 7 concurrency source',
-      'PUBLIC', 1, ${firstChecksum}, 'draft', now(), now()
+      ${result.firstPostId}, ${result.draftId}, ${result.owner},
+      'Task 7 concurrency source', 'PUBLIC', 1, ${firstChecksum}, 'draft',
+      now(), now()
     )
   `;
   if (stale) {
     await sql`
       insert into career_mcp.post_drafts (
-        id, draft_id, text, visibility, version, checksum, state, created_at, updated_at
+        id, draft_id, owner_subject, text, visibility, version, checksum, state,
+        created_at, updated_at
       ) values (
-        ${latestPostId}, ${result.draftId}, 'Task 7 newer immutable version',
-        'PUBLIC', 2, ${latestChecksum}, 'draft', now(), now()
+        ${latestPostId}, ${result.draftId}, ${result.owner},
+        'Task 7 newer immutable version', 'PUBLIC', 2, ${latestChecksum}, 'draft',
+        now(), now()
       )
     `;
   }
@@ -266,19 +385,61 @@ async function seed(sql: Sql, stale = false): Promise<Seed> {
   return { ...result, latestPostId };
 }
 
-async function cleanup(sql: Sql, seeded: Seed): Promise<void> {
-  await sql`delete from career_mcp.brand_visual_renders where brief_id = ${seeded.briefId}`;
-  await sql`
-    delete from career_mcp.post_draft_media
-    where post_draft_id in (${seeded.firstPostId}, ${seeded.latestPostId})
-  `;
-  await sql`delete from career_mcp.brand_visual_briefs where id = ${seeded.briefId}`;
-  await sql`delete from career_mcp.brand_profiles where id = ${seeded.profileId}`;
-  await sql`delete from career_mcp.post_drafts where draft_id = ${seeded.draftId}`;
-  await sql`
-    delete from career_mcp.post_media
-    where id in (${seeded.baseMediaId}, ${seeded.sourceMediaId}, ${seeded.renderedMediaId})
-  `;
+async function cleanup(
+  sql: Sql,
+  seeded: Seed,
+  options: Readonly<{
+    additionalMediaIds?: readonly string[];
+  }> = {}
+): Promise<void> {
+  const postIds = [seeded.firstPostId, seeded.latestPostId];
+  const mediaIds = [
+    seeded.baseMediaId,
+    seeded.sourceMediaId,
+    seeded.renderedMediaId,
+    ...(options.additionalMediaIds ?? [])
+  ];
+  await sql.begin(async (transaction) => {
+    // The explicit loopback+ack gate limits this trigger bypass to a disposable
+    // local integration database. Every delete remains scoped to random test IDs.
+    await transaction`set local session_replication_role = replica`;
+    await transaction`
+      delete from career_mcp.brand_visual_renders
+      where brief_id = ${seeded.briefId}
+    `;
+    await transaction`
+      delete from career_mcp.post_draft_media
+      where post_draft_id = any(${postIds}::uuid[])
+    `;
+    await transaction`
+      delete from career_mcp.media_usage_claims
+      where media_id = any(${mediaIds}::uuid[])
+    `;
+    await transaction`
+      delete from career_mcp.brand_brief_source_claims
+      where brief_id = ${seeded.briefId}
+    `;
+    await transaction`
+      delete from career_mcp.brand_visual_briefs
+      where id = ${seeded.briefId}
+    `;
+    await transaction`
+      delete from career_mcp.brand_profiles
+      where id = ${seeded.profileId}
+    `;
+    await transaction`
+      delete from career_mcp.post_drafts
+      where draft_id = ${seeded.draftId}
+    `;
+    await transaction`
+      delete from career_mcp.post_draft_owners
+      where draft_id = ${seeded.draftId}
+    `;
+    await transaction`
+      delete from career_mcp.post_media
+      where id = any(${mediaIds}::uuid[])
+    `;
+  });
 }
 
 async function waitUntilBlocked(sql: Sql, pid: number): Promise<void> {
@@ -308,6 +469,231 @@ function expectSafeRoleConflict(error: unknown): void {
 }
 
 liveDescribe("Task 7 real PostgreSQL concurrency", () => {
+  it("authenticates as runtime and enforces authoritative ownership ledgers", async () => {
+    const clients = await createClients();
+    const draftId = randomUUID();
+    const profileId = randomUUID();
+    const briefId = randomUUID();
+    const forgedDraftId = randomUUID();
+    const forgedPostId = randomUUID();
+    const forgedBriefId = randomUUID();
+    const otherOwner = randomUUID();
+    let login: RuntimeLogin | undefined;
+    try {
+      await assertMigrationApplied(clients.observer);
+      login = await createAuthenticatedRuntimeLogin(clients.observer);
+      const current = login;
+      const [identity] = await current.client<{
+        sessionUser: string;
+        currentUser: string;
+      }[]>`
+        select
+          session_user::text as "sessionUser",
+          current_user::text as "currentUser"
+      `;
+      expect(identity).toEqual({
+        sessionUser: "career_mcp_runtime",
+        currentUser: "career_mcp_runtime"
+      });
+
+      const repositories = createRepositories(drizzle(current.client, { schema }));
+      const first = await repositories.postDrafts.createVersion({
+        draftId,
+        ownerSubject: current.ownerSubject,
+        text: "Runtime ownership integration version one",
+        visibility: "CONNECTIONS",
+        checksum: "b".repeat(64),
+        state: "draft"
+      });
+      const second = await repositories.postDrafts.createVersion({
+        draftId,
+        ownerSubject: current.ownerSubject,
+        text: "Runtime ownership integration version two",
+        visibility: "CONNECTIONS",
+        checksum: "c".repeat(64),
+        state: "draft"
+      });
+      expect([first.version, second.version]).toEqual([1, 2]);
+
+      const [nextProfile] = await current.client<{ version: number }[]>`
+        select coalesce(max(version), 0)::int + 1 as version
+        from career_mcp.brand_profiles
+        where owner_subject = ${current.ownerSubject}
+      `;
+      const profileVersion = nextProfile?.version ?? 1;
+      await current.client`
+        insert into career_mcp.brand_profiles (
+          id, owner_subject, version, state, public_name, role_line, series_name,
+          monogram, voice_json, palette_json, hook_rules_json, created_at
+        ) values (
+          ${profileId}, ${current.ownerSubject}, ${profileVersion}, 'retired',
+          'Runtime Ownership Test', 'Product Marketing', 'PMM FIELD NOTES',
+          'RT', '{}'::jsonb, '{}'::jsonb, '{}'::jsonb, now()
+        )
+      `;
+      const brief = await repositories.brandVisualBriefs.create({
+        id: briefId,
+        ownerSubject: current.ownerSubject,
+        postDraftId: second.id,
+        postVersion: second.version,
+        brandProfileId: profileId,
+        brandProfileVersion: profileVersion,
+        templateId: "editorial-statement-v1",
+        templateVersion: 1,
+        promptFormatVersion: 1,
+        visualMode: "EDITORIAL_STATEMENT",
+        coverHook: `Runtime proof ${draftId.slice(0, 8)}`,
+        conceptSummary: "Guarded runtime ownership integration",
+        topicLabel: null,
+        generationPrompt: "A test-only editorial visual",
+        negativeConstraintsJson: ["no external systems"],
+        state: "ready"
+      });
+      expect(brief.id).toBe(briefId);
+
+      const [ownership] = await clients.observer<{
+        postOwner: string;
+        briefOwner: string;
+        claimedPostId: string;
+        claimedPostVersion: number;
+      }[]>`
+        select
+          owner.owner_subject as "postOwner",
+          claim.owner_subject as "briefOwner",
+          claim.post_draft_id as "claimedPostId",
+          claim.post_version as "claimedPostVersion"
+        from career_mcp.post_draft_owners owner
+        join career_mcp.brand_brief_source_claims claim
+          on claim.brief_id = ${briefId}
+        where owner.draft_id = ${draftId}
+      `;
+      expect(ownership).toEqual({
+        postOwner: current.ownerSubject,
+        briefOwner: current.ownerSubject,
+        claimedPostId: second.id,
+        claimedPostVersion: second.version
+      });
+
+      const forgedPostError = await current.client`
+        insert into career_mcp.post_drafts (
+          id, draft_id, owner_subject, text, visibility, version, checksum,
+          state, created_at, updated_at
+        ) values (
+          ${forgedPostId}, ${forgedDraftId}, ${otherOwner},
+          'Raw cross-owner insert must fail', 'PUBLIC', 1, ${"d".repeat(64)},
+          'draft', now(), now()
+        )
+      `.then(
+        () => undefined,
+        (error: unknown) => error
+      );
+      expect(postgresField(forgedPostError, "code")).toBe("23514");
+      expect(postgresField(forgedPostError, "constraint_name"))
+        .toBe("post_draft_owner_unauthorized");
+
+      const forgedBriefError = await current.client`
+        insert into career_mcp.brand_visual_briefs (
+          id, owner_subject, post_draft_id, post_version, brand_profile_id,
+          brand_profile_version, template_id, template_version, prompt_format_version,
+          visual_mode, cover_hook, concept_summary, topic_label, generation_prompt,
+          negative_constraints_json, state, created_at
+        ) values (
+          ${forgedBriefId}, ${otherOwner}, ${second.id}, ${second.version},
+          ${profileId}, 1, 'editorial-statement-v1', 1, 1,
+          'EDITORIAL_STATEMENT', 'Cross-owner brief', 'Must fail', null,
+          'A test-only visual', '[]'::jsonb, 'ready', now()
+        )
+      `.then(
+        () => undefined,
+        (error: unknown) => error
+      );
+      expect(postgresField(forgedBriefError, "code")).toBe("23514");
+      expect(postgresField(forgedBriefError, "constraint_name"))
+        .toBe("brand_brief_source_owner_mismatch");
+
+      for (const operation of [
+        () => current.client`
+          insert into career_mcp.post_draft_owners (
+            draft_id, owner_subject, created_at
+          ) values (${forgedDraftId}, ${otherOwner}, now())
+        `,
+        () => current.client`
+          update career_mcp.post_draft_owners
+          set owner_subject = ${otherOwner}
+          where draft_id = ${draftId}
+        `,
+        () => current.client`
+          delete from career_mcp.post_draft_owners
+          where draft_id = ${draftId}
+        `,
+        () => current.client`truncate table career_mcp.post_draft_owners`,
+        () => current.client`
+          insert into career_mcp.runtime_role_owners (
+            role_name, owner_subject, created_at
+          ) values ('forged_runtime', ${otherOwner}, now())
+        `,
+        () => current.client`
+          update career_mcp.runtime_role_owners
+          set owner_subject = ${otherOwner}
+          where role_name = 'career_mcp_runtime'
+        `,
+        () => current.client`
+          delete from career_mcp.brand_brief_source_claims
+          where brief_id = ${briefId}
+        `
+      ]) {
+        const error = await operation().then(
+          () => undefined,
+          (operationError: unknown) => operationError
+        );
+        expect(postgresField(error, "code")).toBe("42501");
+      }
+    } finally {
+      try {
+        if (login !== undefined) {
+          const currentLogin = login;
+          await currentLogin.client.end({ timeout: 1 });
+          try {
+            await clients.observer.begin(async (transaction) => {
+              await transaction`set local session_replication_role = replica`;
+              await transaction`
+                delete from career_mcp.brand_brief_source_claims
+                where brief_id in (${briefId}, ${forgedBriefId})
+              `;
+              await transaction`
+                delete from career_mcp.brand_visual_briefs
+                where id in (${briefId}, ${forgedBriefId})
+              `;
+              await transaction`
+                delete from career_mcp.brand_profiles
+                where id = ${profileId}
+              `;
+              await transaction`
+                delete from career_mcp.post_drafts
+                where draft_id in (${draftId}, ${forgedDraftId})
+              `;
+              await transaction`
+                delete from career_mcp.post_draft_owners
+                where draft_id in (${draftId}, ${forgedDraftId})
+              `;
+              if (currentLogin.insertedOwnerMapping) {
+                await transaction`
+                  delete from career_mcp.runtime_role_owners
+                  where role_name = 'career_mcp_runtime'
+                    and owner_subject = ${currentLogin.ownerSubject}
+                `;
+              }
+            });
+          } finally {
+            await restoreRuntimePassword(clients.observer, currentLogin);
+          }
+        }
+      } finally {
+        await closeClients(clients);
+      }
+    }
+  });
+
   it("keeps the claim ledger immutable to runtime across role-template reruns", async () => {
     const clients = await createClients();
     let seeded: Seed | undefined;
@@ -521,11 +907,11 @@ liveDescribe("Task 7 real PostgreSQL concurrency", () => {
         ])
       );
     } finally {
-      if (seeded !== undefined) await cleanup(clients.observer, seeded);
-      await clients.observer`
-        delete from career_mcp.post_media
-        where id in (${extraSourceMediaId}, ${extraRenderedMediaId})
-      `;
+      if (seeded !== undefined) {
+        await cleanup(clients.observer, seeded, {
+          additionalMediaIds: [extraSourceMediaId, extraRenderedMediaId]
+        });
+      }
       await closeClients(clients);
     }
   });

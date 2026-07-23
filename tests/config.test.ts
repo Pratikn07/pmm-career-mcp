@@ -205,6 +205,30 @@ describe("loadConfig", () => {
   });
 
   it.each([
+    [
+      "MIGRATION_DATABASE_URL",
+      "options=-c%20career_mcp.legacy_post_owner_subject%3D00000000-0000-0000-0000-000000000002",
+      "options"
+    ],
+    ["DATABASE_URL", "OpTiOnS=-c%20search_path%3Dpublic", "options"],
+    [
+      "MIGRATION_DATABASE_URL",
+      "options=-c%20statement_timeout%3D0&OPTIONS=-c%20role%3Dpostgres",
+      "options"
+    ],
+    ["DATABASE_URL", "role=postgres", "role"],
+    ["MIGRATION_DATABASE_URL", "search_path=public", "search_path"],
+    ["DATABASE_URL", "sslmode=disable", "sslmode"]
+  ])(
+    "rejects unsupported production %s query parameters: %s",
+    (key, query, expectedParameter) => {
+      const value = `${productionConfig[key as "DATABASE_URL" | "MIGRATION_DATABASE_URL"]}?${query}`;
+      expect(() => loadConfig({ ...productionConfig, [key]: value }))
+        .toThrow(new RegExp(`${key}.*${expectedParameter}`, "i"));
+    }
+  );
+
+  it.each([
     ["DATABASE_URL", "postgresql://db.example/postgres"],
     ["MIGRATION_DATABASE_URL", "postgresql://db.example/postgres"]
   ])("requires an explicit production role in %s", (key, value) => {
