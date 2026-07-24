@@ -140,7 +140,7 @@ type HarnessOptions = {
   publishResult?: unknown;
   publishThrows?: string;
   confirmation?: boolean | Promise<boolean> | (() => boolean | Promise<boolean>);
-  timeoutMs?: number;
+  timeoutMs?: number | null;
   throwOnSubscription?: number;
   now?: () => Date;
 };
@@ -193,7 +193,9 @@ function harness(options: HarnessOptions = {}) {
   const controller = createReviewCardController({
     storageOrigin,
     globals,
-    metadataTimeoutMs: options.timeoutMs ?? 20,
+    ...(options.timeoutMs === null
+      ? {}
+      : { metadataTimeoutMs: options.timeoutMs ?? 20 }),
     callTool,
     ui,
     now: options.now ?? (() => new Date("2026-07-19T12:00:00.000Z"))
@@ -315,6 +317,34 @@ describe("LinkedIn review-card controller", () => {
     expect(result.views).toHaveLength(1);
     expect(result.globals.listeners.size).toBe(0);
     expect(result.callTool).not.toHaveBeenCalled();
+  });
+
+  it("keeps waiting for the initial launcher payload past the short preview timeout", async () => {
+    vi.useFakeTimers();
+    const result = harness({ initialGlobals: {}, timeoutMs: null });
+
+    const start = result.controller.start();
+    await vi.advanceTimersByTimeAsync(2_001);
+    result.globals.emit(launcherGlobals());
+    await start;
+
+    expect(result.views).toHaveLength(1);
+    expect(result.errors).toEqual([]);
+  });
+
+  it("explains when the launcher returned a safe error instead of a private draft", async () => {
+    const result = harness({
+      initialGlobals: {
+        toolOutput: { data: { error: { code: "MEDIA_STORAGE_ERROR" } } }
+      }
+    });
+
+    await result.controller.start();
+
+    expect(result.views).toEqual([]);
+    expect(result.errors).toEqual([
+      "The private draft could not be loaded. Nothing was previewed, uploaded to LinkedIn, or published."
+    ]);
   });
 
   it("accepts legacy raw metadata only when canonical wrapper keys are absent", async () => {

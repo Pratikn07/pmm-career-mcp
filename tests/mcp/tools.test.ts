@@ -1092,6 +1092,8 @@ it("makes publishing, research, and branded-cover safety rules prominent in inst
   expect(instructions.slice(0, 512)).toContain("Never claim complete employee coverage");
   expect(instructions.slice(0, 512)).toContain("current user explicitly asks to publish the exact preview");
   expect(instructions.slice(0, 512)).toContain("Never batch or retry publishing");
+  expect(instructions).toContain("If a user supplies exact draft text, a cover hook, images, alt text, or visibility, use it exactly once");
+  expect(instructions).toContain("stop and report the validation error; never silently substitute or retry with altered content");
   expect(instructions).toContain("curiosity covers, not post summaries");
   expect(instructions).toContain("source art must contain no text");
 });

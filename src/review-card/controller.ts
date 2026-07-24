@@ -8,7 +8,9 @@ const SIGNED_MEDIA_PATH_PREFIX = "/storage/v1/object/sign/linkedin-draft-media/"
 const CANONICAL_METADATA_KEYS = ["status", "call_tool_result", "mcp_tool_result"] as const;
 const MAX_MEDIA = 4;
 const DEFAULT_METADATA_TIMEOUT_MS = 2_000;
+const DEFAULT_INITIAL_METADATA_TIMEOUT_MS = 10_000;
 const MAX_CAPTURED_SNAPSHOTS = 64;
+const INITIAL_LOAD_ERROR = "The private draft could not be loaded. Nothing was previewed, uploaded to LinkedIn, or published.";
 
 export type ReviewCardVisibility = "PUBLIC" | "CONNECTIONS";
 
@@ -284,6 +286,11 @@ function initialPost(value: unknown): SafePost | undefined {
 
 function initialBrand(value: unknown): ReviewCardBrand | undefined {
   return safeBrand(nestedData(value)?.brand);
+}
+
+function initialLaunchFailed(value: unknown): boolean {
+  const error = record(nestedData(value)?.error);
+  return error !== undefined && typeof error.code === "string";
 }
 
 function previewPost(value: unknown): SafePost | undefined {
@@ -596,6 +603,11 @@ export function createReviewCardController(
     && (dependencies.metadataTimeoutMs as number) <= 10_000
     ? dependencies.metadataTimeoutMs as number
     : DEFAULT_METADATA_TIMEOUT_MS;
+  const initialTimeoutMs = Number.isSafeInteger(dependencies.metadataTimeoutMs)
+    && (dependencies.metadataTimeoutMs as number) > 0
+    && (dependencies.metadataTimeoutMs as number) <= 10_000
+    ? dependencies.metadataTimeoutMs as number
+    : DEFAULT_INITIAL_METADATA_TIMEOUT_MS;
   let currentPost: SafePost | undefined;
   let currentBrand: ReviewCardBrand | undefined;
   let approvalCapability: string | undefined;
@@ -673,8 +685,11 @@ export function createReviewCardController(
       disablePublishing();
       let capture: GlobalsCapture | undefined;
       try {
-        capture = beginGlobalsCapture(dependencies.globals, timeoutMs);
+        capture = beginGlobalsCapture(dependencies.globals, initialTimeoutMs);
         const loaded = await capture.waitFor((globals) => {
+          if (initialLaunchFailed(globals.toolOutput)) {
+            return { failure: true as const };
+          }
           const post = initialPost(globals.toolOutput);
           const urls = post === undefined
             ? undefined
@@ -686,8 +701,15 @@ export function createReviewCardController(
             );
           return post === undefined || urls === undefined
             ? undefined
-            : { post, urls, brand: initialBrand(globals.toolOutput) };
+            : { failure: false as const, post, urls, brand: initialBrand(globals.toolOutput) };
         });
+        if (loaded.failure) {
+          currentPost = undefined;
+          currentBrand = undefined;
+          disablePublishing();
+          dependencies.ui.showError(INITIAL_LOAD_ERROR);
+          return;
+        }
         currentPost = loaded.post;
         currentBrand = loaded.brand;
         dependencies.ui.render(view(loaded.post, loaded.urls, loaded.brand));

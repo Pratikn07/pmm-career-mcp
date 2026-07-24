@@ -77,7 +77,7 @@ import {
   updateOutreachStatusOutput
 } from "./schemas.js";
 
-export const CAREER_MCP_INSTRUCTIONS = "Never fetch LinkedIn for research. Never claim complete employee coverage. Never claim complete YC-company coverage. Scheduled and model-driven flows must stop after saving private drafts and may only open the non-writing review card. Exact preview and publish actions are app-only, never model-callable, and available only after the current user explicitly asks to publish the exact preview. Never batch or retry publishing. Research is restricted to YC companies and allowed public sources. Drafts and pipeline data stay private. Branded visuals are curiosity covers, not post summaries; source art must contain no text.";
+export const CAREER_MCP_INSTRUCTIONS = "Never fetch LinkedIn for research. Never claim complete employee coverage. Never claim complete YC-company coverage. Scheduled and model-driven flows must stop after saving private drafts and may only open the non-writing review card. Exact preview and publish actions are app-only, never model-callable, and available only after the current user explicitly asks to publish the exact preview. Never batch or retry publishing. If a user supplies exact draft text, a cover hook, images, alt text, or visibility, use it exactly once. If the corresponding tool returns a validation error, stop and report the validation error; never silently substitute or retry with altered content. Research is restricted to YC companies and allowed public sources. Drafts and pipeline data stay private. Branded visuals are curiosity covers, not post summaries; source art must contain no text.";
 
 type YcProvider = { searchYcCompanies(query: CompanySearchQuery): Promise<CompanyResult[]> };
 type ConnectionStatus = {
@@ -164,7 +164,12 @@ function response<T extends Record<string, unknown>>(value: T, summary: string) 
 function safeError(error: unknown) {
   const code = error instanceof DomainError ? error.code : "DATA_INTEGRITY";
   return {
-    content: [{ type: "text" as const, text: `Operation failed (${code}).` }],
+    content: [{
+      type: "text" as const,
+      text: code === "VALIDATION_ERROR"
+        ? "Validation failed. If the request specified exact text, a cover hook, images, alt text, or visibility, stop and ask the user for direction; do not retry with altered content."
+        : `Operation failed (${code}).`
+    }],
     structuredContent: { data: { error: { code } } },
     isError: true
   };
@@ -439,7 +444,7 @@ export function createCareerMcpServer(
 
   server.registerTool("create_branded_visual_brief", {
     title: "Create branded visual brief",
-    description: "Save one private PMM Field Notes curiosity-cover brief. This does not attach an image, create a preview, or publish.",
+    description: "Save one private PMM Field Notes curiosity-cover brief. When the user supplied an exact hook, use it once exactly; if validation rejects it, stop and report the error rather than substituting another hook. This does not attach an image, create a preview, or publish.",
     inputSchema: createBrandedVisualBriefInput,
     outputSchema: createBrandedVisualBriefOutput,
     annotations: privateWrite,
