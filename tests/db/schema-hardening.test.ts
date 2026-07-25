@@ -1250,6 +1250,37 @@ describe("database domain constraints", () => {
     `);
   });
 
+  it.each([
+    {
+      label: "a request ID without a payload hash",
+      requestIdSql: "'request-with-null-hash'",
+      payloadHashSql: "null"
+    },
+    {
+      label: "a payload hash without a request ID",
+      requestIdSql: "null",
+      payloadHashSql: `'${"a".repeat(64)}'`
+    }
+  ])("rejects $label", async ({ requestIdSql, payloadHashSql }) => {
+    const { target } = await seedConstraintGraph();
+    await expectCheckViolation(`
+      insert into career_mcp.outreach_drafts (
+        id, target_id, purpose, text, request_id, request_payload_hash, version, evidence_ids_json, created_at, updated_at
+      ) values (
+        '${randomUUID()}',
+        '${target.id}',
+        'connection_note',
+        'Invalid request identity pair',
+        ${requestIdSql},
+        ${payloadHashSql},
+        99,
+        '[]'::jsonb,
+        '2026-07-18T00:00:00.000Z',
+        '2026-07-18T00:00:00.000Z'
+      )
+    `);
+  });
+
   it("rejects shortlist positions below zero", async () => {
     const { target } = await seedConstraintGraph();
     const shortlist = await db.shortlists.create({

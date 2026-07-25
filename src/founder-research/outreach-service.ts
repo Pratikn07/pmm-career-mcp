@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import type { CareerDatabase } from "../db/client.js";
 import type { OutreachDraft } from "../db/repositories.js";
 import { DomainError } from "../domain/errors.js";
-import { createPipelineService, type PipelineTarget } from "../pipeline/service.js";
+import { normalizeTargetScore } from "../pipeline/service.js";
 
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
@@ -268,7 +268,7 @@ function payloadHash(runId: string, entry: ValidatedEntry): string {
 
 function publicDraft(
   personId: string,
-  target: Pick<PipelineTarget, "id">,
+  target: Readonly<{ id: string }>,
   draft: OutreachDraft
 ): SavedFounderOutreachDraft {
   if (draft.requestId === null || draft.requestPayloadHash === null) {
@@ -307,8 +307,6 @@ export function createFounderOutreachService(
     throw new DomainError("AUTH_REQUIRED", "Authenticated request identity is required");
   }
   const subject = dependencies.subject.toLowerCase();
-  const pipeline = createPipelineService(database);
-
   return Object.freeze({
     async saveBatch(input: SaveFounderOutreachBatchInput): Promise<SaveFounderOutreachBatchResult> {
       if (typeof input !== "object" || input === null || Array.isArray(input)) {
@@ -403,7 +401,7 @@ export function createFounderOutreachService(
             throw evidenceMismatch(`entries[${index}].text`);
           }
 
-          const target = existingTarget ?? await pipeline.saveTarget({
+          const score = normalizeTargetScore({
             personId: person.id,
             companyId: company.id,
             companyName: company.name,
@@ -416,15 +414,28 @@ export function createFounderOutreachService(
             reasons: [...entry.reasons],
             missingEvidence: [...entry.missingEvidence]
           });
-          const draft = await database.outreachDrafts.createOrReuseVersion({
-            targetId: target.id,
+          const saved = await database.outreachDrafts.saveTargetAndCreateOrReuseVersion({
+            target: {
+              personId: score.personId,
+              pmmOpportunity: score.pmmOpportunity,
+              referralPotential: score.referralPotential,
+              networkValue: score.networkValue,
+              totalScore: score.total,
+              confidence: score.confidence,
+              rationale: JSON.stringify({
+                version: 1,
+                reasons: score.reasons,
+                missingEvidence: score.missingEvidence
+              })
+            },
             purpose: LINKEDIN_CONNECTION_REQUEST_PURPOSE,
             text: entry.text,
             evidenceIds: [...entry.evidenceIds],
-            requestId: scopedRequestId(subject, person.id, target.id, requestId),
+            ownerSubject: subject,
+            requestId,
             requestPayloadHash: entryPayloadHash
           });
-          drafts.push(publicDraft(person.id, target, draft));
+          drafts.push(publicDraft(person.id, saved.target, saved.draft));
       }
 
       return frozenResult(drafts, needsVerification);

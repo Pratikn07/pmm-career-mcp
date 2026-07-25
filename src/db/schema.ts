@@ -183,7 +183,11 @@ export const outreachDrafts = careerMcp.table("outreach_drafts", {
     "outreach_drafts_request_identity_check",
     sql`(
       (${table.requestId} is null and ${table.requestPayloadHash} is null)
-      or (${table.requestId} is not null and ${table.requestPayloadHash} ~ '^[0-9a-f]{64}$')
+      or (
+        ${table.requestId} is not null
+        and ${table.requestPayloadHash} is not null
+        and ${table.requestPayloadHash} ~ '^[0-9a-f]{64}$'
+      )
     )`
   )
 ]);

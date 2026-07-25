@@ -1,4 +1,4 @@
-import { randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { and, asc, desc, eq, inArray, isNull, notExists, or, sql } from "drizzle-orm";
 import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
@@ -344,6 +344,21 @@ export type IdempotentOutreachDraftVersionInput = OutreachDraftVersionInput & {
   requestPayloadHash: string;
 };
 
+export type FounderOutreachTargetDraftInput = Readonly<{
+  target: TargetUpsertInput;
+  purpose: string;
+  text: string;
+  evidenceIds: string[];
+  ownerSubject: string;
+  requestId: string;
+  requestPayloadHash: string;
+}>;
+
+export type FounderOutreachTargetDraft = Readonly<{
+  target: Target;
+  draft: OutreachDraft;
+}>;
+
 export type PostDraftVersionInput = {
   draftId?: string;
   ownerSubject: string;
@@ -529,6 +544,21 @@ async function serializableTransaction<T>(
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+function founderOutreachRequestIdentity(
+  ownerSubject: string,
+  personId: string,
+  targetId: string,
+  requestId: string
+): string {
+  return createHash("sha256").update(JSON.stringify({
+    contract: "founder-outreach.request-identity.v1",
+    subject: ownerSubject,
+    personId,
+    targetId,
+    requestId
+  }), "utf8").digest("hex");
 }
 
 function assertIsoTimestamp(field: string, value: string): string {
@@ -2886,6 +2916,72 @@ export function createRepositories(database: Database) {
             updatedAt: now
           }).returning();
           return decodeOutreachDraft(requiredRow(row, "outreach draft"));
+        }, "outreach_target_purpose_version_unique");
+      },
+      async saveTargetAndCreateOrReuseVersion(
+        input: FounderOutreachTargetDraftInput
+      ): Promise<FounderOutreachTargetDraft> {
+        return serializableTransaction(database, async (transaction) => {
+          const now = nowIso();
+          await transaction.insert(targets).values({
+            id: randomUUID(),
+            ...input.target,
+            status: "discovered",
+            createdAt: now,
+            updatedAt: now
+          }).onConflictDoNothing({ target: targets.personId });
+          const [establishedTarget] = await transaction.select().from(targets).where(
+            eq(targets.personId, input.target.personId)
+          ).for("update");
+          const target = requiredRow(establishedTarget, "target");
+          const requestId = founderOutreachRequestIdentity(
+            input.ownerSubject,
+            input.target.personId,
+            target.id,
+            input.requestId
+          );
+          const [existing] = await transaction.select().from(outreachDrafts).where(and(
+            eq(outreachDrafts.targetId, target.id),
+            eq(outreachDrafts.purpose, input.purpose),
+            eq(outreachDrafts.requestId, requestId)
+          )).limit(1).for("update");
+          if (existing !== undefined) {
+            if (existing.requestPayloadHash !== input.requestPayloadHash) {
+              throw new DomainError("CONFLICT", "Outreach request ID conflicts with saved content", {
+                entity: "outreach_draft"
+              });
+            }
+            return Object.freeze({ target, draft: decodeOutreachDraft(existing) });
+          }
+          const [updatedTarget] = await transaction.update(targets).set({
+            pmmOpportunity: input.target.pmmOpportunity,
+            referralPotential: input.target.referralPotential,
+            networkValue: input.target.networkValue,
+            totalScore: input.target.totalScore,
+            confidence: input.target.confidence,
+            rationale: input.target.rationale,
+            updatedAt: now
+          }).where(eq(targets.id, target.id)).returning();
+          const [latest] = await transaction.select().from(outreachDrafts).where(and(
+            eq(outreachDrafts.targetId, target.id),
+            eq(outreachDrafts.purpose, input.purpose)
+          )).orderBy(desc(outreachDrafts.version)).limit(1).for("update");
+          const [draft] = await transaction.insert(outreachDrafts).values({
+            id: randomUUID(),
+            targetId: target.id,
+            purpose: input.purpose,
+            text: input.text,
+            requestId,
+            requestPayloadHash: input.requestPayloadHash,
+            version: (latest?.version ?? 0) + 1,
+            evidenceIdsJson: input.evidenceIds,
+            createdAt: now,
+            updatedAt: now
+          }).returning();
+          return Object.freeze({
+            target: requiredRow(updatedTarget, "target"),
+            draft: decodeOutreachDraft(requiredRow(draft, "outreach draft"))
+          });
         }, "outreach_target_purpose_version_unique");
       },
       async getByRequest(

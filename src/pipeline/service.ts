@@ -189,7 +189,7 @@ function parseTarget(row: Target): PipelineTarget {
   };
 }
 
-function normalizeScore(score: TargetScore): TargetScore {
+export function normalizeTargetScore(score: TargetScore): TargetScore {
   if (typeof score !== "object" || score === null) {
     throw validationError("score", "must_be_object");
   }
@@ -318,7 +318,7 @@ export type PipelineService = ReturnType<typeof createPipelineService>;
 export function createPipelineService(database: CareerDatabase) {
   return {
     async saveTarget(input: TargetScore): Promise<PipelineTarget> {
-      const score = normalizeScore(input);
+      const score = normalizeTargetScore(input);
       return await withPipelinePersistenceBoundary("target", async () => {
         const person = await database.people.get(score.personId);
         if (person === undefined) {

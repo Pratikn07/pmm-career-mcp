@@ -491,6 +491,47 @@ describe("founder outreach batches", () => {
     expect(await db.outreachDrafts.listForTarget(target!.id)).toHaveLength(1);
   });
 
+  it("atomically arbitrates conflicting first requests before either target score can be overwritten", async () => {
+    const context = await addRunPerson();
+    const firstEntry = entryFor(context);
+    const secondEntry = entryFor(context, {
+      pmmOpportunity: 31,
+      total: 76,
+      reasons: ["Competing score"]
+    });
+    const requests = [firstEntry, secondEntry].map((entry) => service().saveBatch({
+      runId: context.run.id,
+      requestId: "concurrent-conflicting-first-request",
+      entries: [entry]
+    }));
+    const outcomes = await Promise.allSettled(requests);
+    const fulfilled = outcomes.flatMap((outcome, index) => (
+      outcome.status === "fulfilled" ? [{ index, value: outcome.value }] : []
+    ));
+    const rejected = outcomes.filter((outcome) => outcome.status === "rejected");
+
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]?.reason).toMatchObject({ code: "CONFLICT" });
+    const target = await db.targets.getByPerson(context.person.id);
+    const winner = [firstEntry, secondEntry][fulfilled[0]!.index]!;
+    const targetId = fulfilled[0]!.value.drafts[0]!.targetId;
+
+    expect(await db.outreachDrafts.listForTarget(targetId)).toHaveLength(1);
+    expect(target).toMatchObject({
+      pmmOpportunity: winner.pmmOpportunity,
+      referralPotential: winner.referralPotential,
+      networkValue: winner.networkValue,
+      totalScore: winner.total,
+      confidence: winner.confidence,
+      rationale: JSON.stringify({
+        version: 1,
+        reasons: winner.reasons,
+        missingEvidence: winner.missingEvidence
+      })
+    });
+  });
+
   it("durably reuses request A after request B and rejects a changed request-A payload", async () => {
     const context = await addRunPerson();
     const requestA = {
