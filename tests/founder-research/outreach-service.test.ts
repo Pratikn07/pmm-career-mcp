@@ -132,7 +132,7 @@ function entryFor(
     missingEvidence: [],
     evidenceIds: [context.evidence.id],
     personalizationClaims: [{
-      text: "Atlas launch",
+      text: "Atlas launch at Evidence Labs",
       evidenceIds: [context.evidence.id]
     }],
     text: "Hi Ada — I appreciated the Atlas launch at Evidence Labs. I’d value connecting.",
@@ -197,6 +197,14 @@ describe("founder outreach batches", () => {
     const context = await addRunPerson();
     const decomposed = "Cafe\u0301";
     const atLimit = "🙂".repeat(LINKEDIN_CONNECTION_NOTE_MAX_CODE_POINTS);
+    const caféEvidence = await db.evidence.add({
+      personId: context.person.id,
+      sourceUrl: "https://evidence.example/cafe",
+      factType: "public_role",
+      fact: "Café",
+      checkedAt: CHECKED_AT,
+      confidence: 0.95
+    });
     const saved = await service().saveBatch({
       runId: context.run.id,
       requestId: "unicode-at-limit",
@@ -211,8 +219,8 @@ describe("founder outreach batches", () => {
       requestId: "unicode-normalization",
       entries: [entryFor(context, {
         text: `Hi ${decomposed}`,
-        evidenceIds: [],
-        personalizationClaims: []
+        evidenceIds: [caféEvidence.id],
+        personalizationClaims: [{ text: "Café", evidenceIds: [caféEvidence.id] }]
       })]
     });
 
@@ -283,6 +291,18 @@ describe("founder outreach batches", () => {
         requestId: "unclaimed-series-b",
         entries: [entryFor(context, {
           text: "Congrats on your Series B — I’d value connecting.",
+          evidenceIds: [],
+          personalizationClaims: []
+        })]
+      }),
+      "EVIDENCE_MISMATCH"
+    );
+    await expectDomainError(
+      () => service().saveBatch({
+        runId: context.run.id,
+        requestId: "unclaimed-keynote",
+        entries: [entryFor(context, {
+          text: "I enjoyed your keynote at SaaStr and would value connecting.",
           evidenceIds: [],
           personalizationClaims: []
         })]
@@ -372,7 +392,7 @@ describe("founder outreach batches", () => {
       runId: context.run.id,
       requestId: "changed-note",
       entries: [entryFor(context, {
-        text: "Hi Ada — I appreciated the Atlas launch and would value connecting."
+        text: "Hi Ada — I appreciated the Atlas launch at Evidence Labs and would value connecting."
       })]
     });
 
@@ -387,11 +407,12 @@ describe("founder outreach batches", () => {
       requestId: "concurrent-batch-request",
       entries: [entryFor(context)]
     };
-    const outreach = service();
+    const firstService = service();
+    const secondService = service();
 
     const [first, second] = await Promise.all([
-      outreach.saveBatch(input),
-      outreach.saveBatch(structuredClone(input))
+      firstService.saveBatch(input),
+      secondService.saveBatch(structuredClone(input))
     ]);
     const target = await db.targets.getByPerson(context.person.id);
 

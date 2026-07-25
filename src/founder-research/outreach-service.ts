@@ -10,7 +10,17 @@ const MAX_REQUEST_ID_LENGTH = 200;
 const MAX_CLAIM_LENGTH = 500;
 const MAX_CLAIMS_PER_ENTRY = 25;
 const MAX_EVIDENCE_IDS = 25;
-const UNSUPPORTED_UNCLAIMED_PERSONALIZATION = /(?:\bseries\s+[a-z0-9]+\b|\bfund(?:ing|ed)\b|\braised\b|\blaunch(?:ed)?\b|\bmilestone\b|\baward\b|\bacquisition\b|\bhiring\b|\byour\s+(?:product|company|team|work|launch|funding|series|round)\b)/iu;
+const ALPHANUMERIC_TOKENS = /[\p{L}\p{N}]+/gu;
+const GENERIC_INVITATION_TOKENS: ReadonlySet<string> = new Set([
+  "a", "about", "an", "and", "appreciate", "appreciated", "are", "best",
+  "chat", "connect", "connecting", "connection", "congrats", "congratulations",
+  "d", "dear", "exchange", "forward", "from", "great", "hello", "hey", "hi",
+  "hope", "i", "ideas", "idea", "in", "interested", "interest", "it", "learn",
+  "like", "looking", "love", "marketing", "me", "my", "on", "opportunity", "out",
+  "product", "reach", "regards", "share", "stay", "talk", "thank", "thanks", "the",
+  "thoughts", "time", "to", "touch", "us", "value", "we", "well", "with", "work",
+  "would", "you", "your"
+]);
 
 export const LINKEDIN_CONNECTION_NOTE_MAX_CODE_POINTS = 200;
 export const LINKEDIN_CONNECTION_REQUEST_PURPOSE = "linkedin_connection_request";
@@ -126,15 +136,20 @@ function comparable(value: string): string {
   return value.normalize("NFC").replace(/\s+/gu, " ").trim().toLocaleLowerCase("en-US");
 }
 
-function hasUnsupportedUnclaimedPersonalization(
+function isGenericInvitation(
   text: string,
+  personName: string,
   claims: readonly Readonly<{ text: string }> []
 ): boolean {
-  let unexplained = comparable(text);
+  let remaining = comparable(text);
   for (const claim of claims) {
-    unexplained = unexplained.replaceAll(comparable(claim.text), " ");
+    remaining = remaining.replaceAll(comparable(claim.text), " ");
   }
-  return UNSUPPORTED_UNCLAIMED_PERSONALIZATION.test(unexplained);
+  const permitted = new Set(GENERIC_INVITATION_TOKENS);
+  for (const token of comparable(personName).match(ALPHANUMERIC_TOKENS) ?? []) {
+    permitted.add(token);
+  }
+  return (remaining.match(ALPHANUMERIC_TOKENS) ?? []).every((token) => permitted.has(token));
 }
 
 function validatedEntry(value: unknown, index: number): ValidatedEntry {
@@ -206,13 +221,6 @@ function publicDraft(
   });
 }
 
-function isSameSavedDraft(draft: OutreachDraft, entry: ValidatedEntry): boolean {
-  return draft.purpose === LINKEDIN_CONNECTION_REQUEST_PURPOSE
-    && draft.text === entry.text
-    && draft.evidenceIds.length === entry.evidenceIds.length
-    && draft.evidenceIds.every((evidenceId, index) => evidenceId === entry.evidenceIds[index]);
-}
-
 function frozenResult(
   drafts: readonly SavedFounderOutreachDraft[],
   needsVerification: readonly FounderOutreachNeedsVerification[]
@@ -234,8 +242,6 @@ export function createFounderOutreachService(
   }
   const subject = dependencies.subject.toLowerCase();
   const pipeline = createPipelineService(database);
-  const completedRequests = new Map<string, SaveFounderOutreachBatchResult>();
-  const inFlightRequests = new Map<string, Promise<SaveFounderOutreachBatchResult>>();
 
   return Object.freeze({
     async saveBatch(input: SaveFounderOutreachBatchInput): Promise<SaveFounderOutreachBatchResult> {
@@ -243,30 +249,24 @@ export function createFounderOutreachService(
         throw validationError("input", "must_be_object");
       }
       const runId = normalizedId("runId", input.runId);
-      const requestId = normalizedText("requestId", input.requestId, MAX_REQUEST_ID_LENGTH);
-      const idempotencyKey = `${runId}\u0000${requestId}`;
-      const existing = completedRequests.get(idempotencyKey);
-      if (existing !== undefined) return existing;
-      const inFlight = inFlightRequests.get(idempotencyKey);
-      if (inFlight !== undefined) return await inFlight;
-      const operation = (async (): Promise<SaveFounderOutreachBatchResult> => {
-        if (!Array.isArray(input.entries) || input.entries.length === 0 || input.entries.length > MAX_BATCH_ENTRIES) {
-          throw validationError("entries", "invalid_collection", MAX_BATCH_ENTRIES);
-        }
-        const entries = input.entries.map(validatedEntry);
-        if (new Set(entries.map(({ personId }) => personId)).size !== entries.length) {
-          throw new DomainError("CONFLICT", "A batch may include a person only once", { entity: "person" });
-        }
-        if ((await database.founderResearchRuns.getOwned(runId, subject)) === undefined) {
-          throw notFound("founder_research_run");
-        }
-        const runPeople = new Map((await database.founderResearchPeople.listForRun(runId, subject)).map(
-          (runPerson) => [runPerson.personId, runPerson] as const
-        ));
-        const drafts: SavedFounderOutreachDraft[] = [];
-        const needsVerification: FounderOutreachNeedsVerification[] = [];
+      normalizedText("requestId", input.requestId, MAX_REQUEST_ID_LENGTH);
+      if (!Array.isArray(input.entries) || input.entries.length === 0 || input.entries.length > MAX_BATCH_ENTRIES) {
+        throw validationError("entries", "invalid_collection", MAX_BATCH_ENTRIES);
+      }
+      const entries = input.entries.map(validatedEntry);
+      if (new Set(entries.map(({ personId }) => personId)).size !== entries.length) {
+        throw new DomainError("CONFLICT", "A batch may include a person only once", { entity: "person" });
+      }
+      if ((await database.founderResearchRuns.getOwned(runId, subject)) === undefined) {
+        throw notFound("founder_research_run");
+      }
+      const runPeople = new Map((await database.founderResearchPeople.listForRun(runId, subject)).map(
+        (runPerson) => [runPerson.personId, runPerson] as const
+      ));
+      const drafts: SavedFounderOutreachDraft[] = [];
+      const needsVerification: FounderOutreachNeedsVerification[] = [];
 
-        for (const [index, entry] of entries.entries()) {
+      for (const [index, entry] of entries.entries()) {
           const runPerson = runPeople.get(entry.personId);
           if (runPerson === undefined) throw notFound("founder_research_person");
           const canonical = await database.founderProfileCandidates.getCanonicalForPerson(
@@ -310,25 +310,12 @@ export function createFounderOutreachService(
               throw evidenceMismatch(`entries[${index}].personalizationClaims`);
             }
           }
-          if (hasUnsupportedUnclaimedPersonalization(entry.text, entry.personalizationClaims)) {
+          if (!isGenericInvitation(entry.text, person.name, entry.personalizationClaims)) {
             throw evidenceMismatch(`entries[${index}].text`);
           }
 
           const existingTarget = await database.targets.getByPerson(person.id);
-          const latest = existingTarget === undefined
-            ? undefined
-            : (await database.outreachDrafts.listForTarget(existingTarget.id))
-              .filter(({ purpose }) => purpose === LINKEDIN_CONNECTION_REQUEST_PURPOSE)
-              .at(-1);
-          if (
-            existingTarget !== undefined
-            && latest !== undefined
-            && isSameSavedDraft(latest, entry)
-          ) {
-            drafts.push(publicDraft(person.id, existingTarget, latest));
-            continue;
-          }
-          const target = await pipeline.saveTarget({
+          const target = existingTarget ?? await pipeline.saveTarget({
             personId: person.id,
             companyId: company.id,
             companyName: company.name,
@@ -341,27 +328,16 @@ export function createFounderOutreachService(
             reasons: [...entry.reasons],
             missingEvidence: [...entry.missingEvidence]
           });
-          const draft = await database.outreachDrafts.createVersion({
+          const draft = await database.outreachDrafts.createOrReuseVersion({
             targetId: target.id,
             purpose: LINKEDIN_CONNECTION_REQUEST_PURPOSE,
             text: entry.text,
             evidenceIds: [...entry.evidenceIds]
           });
           drafts.push(publicDraft(person.id, target, draft));
-        }
-
-        const result = frozenResult(drafts, needsVerification);
-        completedRequests.set(idempotencyKey, result);
-        return result;
-      })();
-      inFlightRequests.set(idempotencyKey, operation);
-      try {
-        return await operation;
-      } finally {
-        if (inFlightRequests.get(idempotencyKey) === operation) {
-          inFlightRequests.delete(idempotencyKey);
-        }
       }
+
+      return frozenResult(drafts, needsVerification);
     }
   });
 }

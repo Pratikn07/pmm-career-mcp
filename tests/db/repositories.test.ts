@@ -3381,6 +3381,37 @@ it("creates immutable outreach draft versions with evidence IDs", async () => {
   expect((await db.outreachDrafts.listForTarget(target.id))).toHaveLength(2);
 });
 
+it("serializes identical outreach draft retries and versions changed content", async () => {
+  const { person, target } = await addTarget("Idempotent outreach");
+  const source = await db.evidence.add({
+    personId: person.id,
+    sourceUrl: "https://acme.example/idempotent-team",
+    fact: "Founder",
+    checkedAt: "2026-07-16T00:00:00.000Z",
+    confidence: 0.9
+  });
+  const input = {
+    targetId: target.id,
+    purpose: "connection_note",
+    text: "Hello Ada",
+    evidenceIds: [source.id]
+  };
+
+  const [first, duplicate] = await Promise.all([
+    db.outreachDrafts.createOrReuseVersion(input),
+    db.outreachDrafts.createOrReuseVersion({ ...input, evidenceIds: [...input.evidenceIds] })
+  ]);
+  const changed = await db.outreachDrafts.createOrReuseVersion({
+    ...input,
+    text: "Hello Ada — revised"
+  });
+
+  expect(duplicate).toEqual(first);
+  expect(first.version).toBe(1);
+  expect(changed.version).toBe(2);
+  expect(await db.outreachDrafts.listForTarget(target.id)).toHaveLength(2);
+});
+
 it.each([0, 1])(
   "allocates concurrent outreach versions contiguously from a sequence containing %i rows",
   async (existingVersionCount) => {

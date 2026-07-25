@@ -2841,6 +2841,36 @@ export function createRepositories(database: Database) {
           return decodeOutreachDraft(requiredRow(row, "outreach draft"));
         }, "outreach_target_purpose_version_unique");
       },
+      async createOrReuseVersion(input: OutreachDraftVersionInput): Promise<OutreachDraft> {
+        return serializableTransaction(database, async (transaction) => {
+          await transaction.select({ id: targets.id }).from(targets).where(
+            eq(targets.id, input.targetId)
+          ).for("update");
+          const [latest] = await transaction.select().from(outreachDrafts).where(and(
+            eq(outreachDrafts.targetId, input.targetId),
+            eq(outreachDrafts.purpose, input.purpose)
+          )).orderBy(desc(outreachDrafts.version)).limit(1).for("update");
+          if (
+            latest !== undefined
+            && latest.text === input.text
+            && isDeepStrictEqual(latest.evidenceIdsJson, input.evidenceIds)
+          ) {
+            return decodeOutreachDraft(latest);
+          }
+          const now = nowIso();
+          const [row] = await transaction.insert(outreachDrafts).values({
+            id: randomUUID(),
+            targetId: input.targetId,
+            purpose: input.purpose,
+            text: input.text,
+            version: (latest?.version ?? 0) + 1,
+            evidenceIdsJson: input.evidenceIds,
+            createdAt: now,
+            updatedAt: now
+          }).returning();
+          return decodeOutreachDraft(requiredRow(row, "outreach draft"));
+        }, "outreach_target_purpose_version_unique");
+      },
       async getVersion(
         targetId: string,
         purpose: string,
