@@ -255,3 +255,165 @@ CREATE INDEX "founder_research_run_people_run_item_owner_idx" ON "career_mcp"."f
 CREATE INDEX "founder_research_run_people_person_id_idx" ON "career_mcp"."founder_research_run_people" USING btree ("person_id");--> statement-breakpoint
 CREATE INDEX "founder_research_run_people_owner_subject_idx" ON "career_mcp"."founder_research_run_people" USING btree ("owner_subject");--> statement-breakpoint
 CREATE INDEX "founder_research_runs_owner_subject_idx" ON "career_mcp"."founder_research_runs" USING btree ("owner_subject");
+--> statement-breakpoint
+CREATE FUNCTION "career_mcp"."reject_founder_profile_confirmation_event_mutation"()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = ''
+AS $$
+BEGIN
+	RAISE EXCEPTION USING
+		ERRCODE = '23514',
+		CONSTRAINT = 'founder_profile_confirmation_event_immutable',
+		MESSAGE = 'Founder profile confirmation events are append-only';
+END;
+$$;
+--> statement-breakpoint
+CREATE FUNCTION "career_mcp"."keep_founder_research_run_item_membership_immutable"()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = ''
+AS $$
+BEGIN
+	IF TG_OP = 'DELETE' THEN
+		RAISE EXCEPTION USING
+			ERRCODE = '23514',
+			CONSTRAINT = 'founder_research_run_item_membership_immutable',
+			MESSAGE = 'Selected founder research company membership is immutable';
+	END IF;
+
+	IF NEW."run_id" IS DISTINCT FROM OLD."run_id"
+		OR NEW."company_id" IS DISTINCT FROM OLD."company_id"
+		OR NEW."owner_subject" IS DISTINCT FROM OLD."owner_subject" THEN
+		RAISE EXCEPTION USING
+			ERRCODE = '23514',
+			CONSTRAINT = 'founder_research_run_item_membership_immutable',
+			MESSAGE = 'Selected founder research company membership is immutable';
+	END IF;
+	RETURN NEW;
+END;
+$$;
+--> statement-breakpoint
+CREATE FUNCTION "career_mcp"."enforce_founder_export_capability_parent_expiry"()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = ''
+AS $$
+DECLARE
+	parent_expires_at timestamp with time zone;
+BEGIN
+	SELECT export."expires_at"
+	INTO parent_expires_at
+	FROM "career_mcp"."founder_research_exports" AS export
+	WHERE export."id" = NEW."export_id"
+		AND export."owner_subject" = NEW."owner_subject"
+	FOR UPDATE;
+
+	IF parent_expires_at IS NOT NULL
+		AND NEW."expires_at" > parent_expires_at THEN
+		RAISE EXCEPTION USING
+			ERRCODE = '23514',
+			CONSTRAINT = 'founder_export_capability_parent_expiry',
+			MESSAGE = 'Download capability cannot outlive its parent export';
+	END IF;
+	RETURN NEW;
+END;
+$$;
+--> statement-breakpoint
+CREATE FUNCTION "career_mcp"."enforce_founder_export_parent_expiry"()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = ''
+AS $$
+BEGIN
+	IF EXISTS (
+		SELECT 1
+		FROM "career_mcp"."founder_export_download_capabilities" AS capability
+		WHERE capability."export_id" = OLD."id"
+			AND capability."owner_subject" = OLD."owner_subject"
+			AND capability."expires_at" > NEW."expires_at"
+	) THEN
+		RAISE EXCEPTION USING
+			ERRCODE = '23514',
+			CONSTRAINT = 'founder_export_capability_parent_expiry',
+			MESSAGE = 'Export cannot expire before an existing download capability';
+	END IF;
+	RETURN NEW;
+END;
+$$;
+--> statement-breakpoint
+REVOKE ALL ON FUNCTION "career_mcp"."reject_founder_profile_confirmation_event_mutation"() FROM PUBLIC;
+--> statement-breakpoint
+REVOKE ALL ON FUNCTION "career_mcp"."keep_founder_research_run_item_membership_immutable"() FROM PUBLIC;
+--> statement-breakpoint
+REVOKE ALL ON FUNCTION "career_mcp"."enforce_founder_export_capability_parent_expiry"() FROM PUBLIC;
+--> statement-breakpoint
+REVOKE ALL ON FUNCTION "career_mcp"."enforce_founder_export_parent_expiry"() FROM PUBLIC;
+--> statement-breakpoint
+REVOKE ALL ON TABLE "career_mcp"."founder_research_exports" FROM PUBLIC;
+--> statement-breakpoint
+REVOKE ALL ON TABLE "career_mcp"."founder_export_download_capabilities" FROM PUBLIC;
+--> statement-breakpoint
+REVOKE ALL ON TABLE "career_mcp"."founder_profile_confirmation_events" FROM PUBLIC;
+--> statement-breakpoint
+DO $founder_research_privileges$
+DECLARE
+	supabase_role text;
+BEGIN
+	FOR supabase_role IN
+		SELECT role_row.rolname
+		FROM pg_catalog.pg_roles AS role_row
+		WHERE role_row.rolname IN ('anon', 'authenticated', 'service_role')
+	LOOP
+		EXECUTE pg_catalog.format(
+			'revoke all privileges on table "career_mcp"."founder_research_exports" from %I',
+			supabase_role
+		);
+		EXECUTE pg_catalog.format(
+			'revoke all privileges on table "career_mcp"."founder_export_download_capabilities" from %I',
+			supabase_role
+		);
+	END LOOP;
+
+	IF EXISTS (
+		SELECT 1
+		FROM pg_catalog.pg_roles
+		WHERE rolname = 'career_mcp_runtime'
+	) THEN
+		EXECUTE 'revoke update, delete, truncate on table "career_mcp"."founder_profile_confirmation_events" from career_mcp_runtime';
+		EXECUTE 'grant select, insert on table "career_mcp"."founder_profile_confirmation_events" to career_mcp_runtime';
+		EXECUTE 'grant execute on function "career_mcp"."reject_founder_profile_confirmation_event_mutation"() to career_mcp_runtime';
+		EXECUTE 'grant execute on function "career_mcp"."keep_founder_research_run_item_membership_immutable"() to career_mcp_runtime';
+		EXECUTE 'grant execute on function "career_mcp"."enforce_founder_export_capability_parent_expiry"() to career_mcp_runtime';
+		EXECUTE 'grant execute on function "career_mcp"."enforce_founder_export_parent_expiry"() to career_mcp_runtime';
+	END IF;
+END;
+$founder_research_privileges$;
+--> statement-breakpoint
+CREATE TRIGGER "founder_profile_confirmation_events_append_only"
+BEFORE UPDATE OR DELETE
+ON "career_mcp"."founder_profile_confirmation_events"
+FOR EACH ROW
+EXECUTE FUNCTION "career_mcp"."reject_founder_profile_confirmation_event_mutation"();
+--> statement-breakpoint
+CREATE TRIGGER "founder_research_run_items_membership_immutable"
+BEFORE UPDATE OR DELETE
+ON "career_mcp"."founder_research_run_items"
+FOR EACH ROW
+EXECUTE FUNCTION "career_mcp"."keep_founder_research_run_item_membership_immutable"();
+--> statement-breakpoint
+CREATE TRIGGER "founder_export_capability_parent_expiry"
+BEFORE INSERT OR UPDATE OF "export_id", "owner_subject", "expires_at"
+ON "career_mcp"."founder_export_download_capabilities"
+FOR EACH ROW
+EXECUTE FUNCTION "career_mcp"."enforce_founder_export_capability_parent_expiry"();
+--> statement-breakpoint
+CREATE TRIGGER "founder_export_parent_expiry"
+BEFORE UPDATE OF "expires_at"
+ON "career_mcp"."founder_research_exports"
+FOR EACH ROW
+EXECUTE FUNCTION "career_mcp"."enforce_founder_export_parent_expiry"();

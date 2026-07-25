@@ -157,6 +157,34 @@ begin
   end if;
 
   if pg_catalog.to_regprocedure(
+    'career_mcp.reject_founder_profile_confirmation_event_mutation()'
+  ) is not null then
+    execute 'revoke all on function career_mcp.reject_founder_profile_confirmation_event_mutation() from public';
+    execute 'grant execute on function career_mcp.reject_founder_profile_confirmation_event_mutation() to career_mcp_runtime';
+  end if;
+
+  if pg_catalog.to_regprocedure(
+    'career_mcp.keep_founder_research_run_item_membership_immutable()'
+  ) is not null then
+    execute 'revoke all on function career_mcp.keep_founder_research_run_item_membership_immutable() from public';
+    execute 'grant execute on function career_mcp.keep_founder_research_run_item_membership_immutable() to career_mcp_runtime';
+  end if;
+
+  if pg_catalog.to_regprocedure(
+    'career_mcp.enforce_founder_export_capability_parent_expiry()'
+  ) is not null then
+    execute 'revoke all on function career_mcp.enforce_founder_export_capability_parent_expiry() from public';
+    execute 'grant execute on function career_mcp.enforce_founder_export_capability_parent_expiry() to career_mcp_runtime';
+  end if;
+
+  if pg_catalog.to_regprocedure(
+    'career_mcp.enforce_founder_export_parent_expiry()'
+  ) is not null then
+    execute 'revoke all on function career_mcp.enforce_founder_export_parent_expiry() from public';
+    execute 'grant execute on function career_mcp.enforce_founder_export_parent_expiry() to career_mcp_runtime';
+  end if;
+
+  if pg_catalog.to_regprocedure(
     'career_mcp.claim_post_draft_owner()'
   ) is not null then
     execute 'revoke all on function career_mcp.claim_post_draft_owner() from public';

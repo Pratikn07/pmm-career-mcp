@@ -277,6 +277,12 @@ describe("Supabase runtime-role operator template", () => {
     expect(sql).not.toMatch(
       /grant[\s\S]{0,160}(?:founder_research_exports|founder_export_download_capabilities)[\s\S]{0,160}\b(?:public|anon|authenticated|service_role)\b/i
     );
+    expect(sql).toMatch(
+      /revoke\s+all\s+privileges\s+on\s+table\s+career_mcp\.%I\s+from\s+public/i
+    );
+    expect(sql).toMatch(
+      /rolname\s+in\s*\(\s*'anon',\s*'authenticated',\s*'service_role'\s*\)/i
+    );
   });
 
   it("keeps founder profile confirmation events append-only for the runtime role", async () => {
@@ -295,6 +301,29 @@ describe("Supabase runtime-role operator template", () => {
     expect(eventMutationRevoke).toBeGreaterThan(broadDefaultGrant);
     expect(sql).toMatch(
       /grant\s+select,\s*insert\s+on\s+table\s+career_mcp\.founder_profile_confirmation_events\s+to\s+career_mcp_runtime/i
+    );
+  });
+
+  it("corrects founder privileges in the migration when runtime provisioning ran first", async () => {
+    const sql = await founderResearchExportMigrationSql();
+
+    expect(sql).toMatch(
+      /revoke\s+all\s+on\s+table\s+"career_mcp"\."founder_research_exports"\s+from\s+public/i
+    );
+    expect(sql).toMatch(
+      /revoke\s+all\s+on\s+table\s+"career_mcp"\."founder_export_download_capabilities"\s+from\s+public/i
+    );
+    expect(sql).toMatch(
+      /where\s+rolname\s*=\s*'career_mcp_runtime'[\s\S]*revoke\s+update,\s*delete,\s*truncate[\s\S]*founder_profile_confirmation_events[\s\S]*grant\s+select,\s*insert/i
+    );
+    expect(sql).toMatch(
+      /reject_founder_profile_confirmation_event_mutation[\s\S]*before\s+update\s+or\s+delete[\s\S]*founder_profile_confirmation_events/i
+    );
+    expect(sql).toMatch(
+      /keep_founder_research_run_item_membership_immutable[\s\S]*before\s+update[\s\S]*or\s+delete[\s\S]*founder_research_run_items/i
+    );
+    expect(sql).toMatch(
+      /enforce_founder_export_capability_parent_expiry[\s\S]*before\s+insert\s+or\s+update[\s\S]*founder_export_download_capabilities/i
     );
   });
 
@@ -319,7 +348,7 @@ describe("Supabase runtime-role operator template", () => {
     }
 
     expect(sql).not.toMatch(/"(?:public|storage)"\./i);
-    expect(sql).not.toMatch(/\bservice_role\b/i);
+    expect(sql).not.toMatch(/\bgrant\b[\s\S]{0,120}\bservice_role\b/i);
     expect(sql).not.toMatch(/disable\s+row\s+level\s+security/i);
     expect(sql).not.toMatch(/(?:^|\n)\s*(?:drop|truncate|delete|update)\b/im);
     expect(sql).not.toMatch(/\b(?:password|secret|credential)\b/i);

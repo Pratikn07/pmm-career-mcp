@@ -115,6 +115,91 @@ async function expectCheckViolation(statement: string): Promise<void> {
   await expect(queryTestDatabase(db, statement)).rejects.toMatchObject({ code: "23514" });
 }
 
+async function seedFounderResearchConstraintGraph(options: {
+  exportExpiresAt?: string;
+} = {}) {
+  const ownerSubject = randomUUID();
+  const runId = randomUUID();
+  const runItemId = randomUUID();
+  const runPersonId = randomUUID();
+  const candidateId = randomUUID();
+  const exportId = randomUUID();
+  const createdAt = "2026-07-24T00:00:00.000Z";
+  const exportExpiresAt = options.exportExpiresAt ?? "2026-07-25T00:00:00.000Z";
+  const company = await db.companies.upsert({
+    ycId: `founder-constraint-${randomUUID()}`,
+    name: "Founder Constraint Co"
+  });
+  const person = await db.people.upsert({
+    companyId: company.id,
+    name: "Founder Constraint Person",
+    role: "Founder"
+  });
+
+  for (const statement of [
+    `insert into career_mcp.founder_research_runs (
+      id, owner_subject, state, query_json, requested_limit,
+      selected_count, processed_count, complete_count, partial_count,
+      ambiguous_count, not_found_count, failed_count,
+      created_at, started_at, updated_at
+    ) values (
+      '${runId}', '${ownerSubject}', 'RUNNING', '{}'::jsonb, 1,
+      1, 0, 0, 0, 0, 0, 0,
+      '${createdAt}', '${createdAt}', '${createdAt}'
+    )`,
+    `insert into career_mcp.founder_research_run_items (
+      id, run_id, owner_subject, company_id, state, attempt_count,
+      created_at, updated_at
+    ) values (
+      '${runItemId}', '${runId}', '${ownerSubject}', '${company.id}',
+      'PENDING', 0, '${createdAt}', '${createdAt}'
+    )`,
+    `insert into career_mcp.founder_research_run_people (
+      id, run_item_id, owner_subject, person_id, identity_status,
+      founder_role_match, confidence, created_at, updated_at
+    ) values (
+      '${runPersonId}', '${runItemId}', '${ownerSubject}', '${person.id}',
+      'VERIFIED', 'founder', 1, '${createdAt}', '${createdAt}'
+    )`,
+    `insert into career_mcp.founder_profile_candidates (
+      id, run_person_id, owner_subject, profile_url, status, source_kind,
+      evidence_url, evidence_metadata_json, checked_at, confidence,
+      created_at, updated_at
+    ) values (
+      '${candidateId}', '${runPersonId}', '${ownerSubject}',
+      'https://www.linkedin.com/in/founder-constraint', 'VERIFIED',
+      'OFFICIAL_COMPANY', 'https://example.com/team', '{}'::jsonb,
+      '${createdAt}', 1, '${createdAt}', '${createdAt}'
+    )`,
+    `insert into career_mcp.founder_research_exports (
+      id, run_id, owner_subject, state, file_name, mime_type, byte_size,
+      checksum_sha256, workbook_bytes, row_count, sheet_count,
+      created_at, expires_at
+    ) values (
+      '${exportId}', '${runId}', '${ownerSubject}', 'READY',
+      'founder-constraint.xlsx',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      1, '${"a".repeat(64)}', decode('00', 'hex'), 0, 4,
+      '${createdAt}', '${exportExpiresAt}'
+    )`
+  ]) {
+    await queryTestDatabase(db, statement);
+  }
+
+  return {
+    ownerSubject,
+    runId,
+    runItemId,
+    runPersonId,
+    candidateId,
+    exportId,
+    company,
+    person,
+    createdAt,
+    exportExpiresAt
+  };
+}
+
 async function createPreClaimDatabase(): Promise<PGlite> {
   const client = new PGlite();
   for (const migration of [
@@ -787,6 +872,199 @@ describe("database domain constraints", () => {
         'PENDING', 0, now(), now()
       )
     `)).rejects.toMatchObject({ code: "23503" });
+  });
+
+  it("rejects founder run, attempt, and confidence values outside their ranges", async () => {
+    const graph = await seedFounderResearchConstraintGraph();
+
+    for (const statement of [
+      `update career_mcp.founder_research_runs
+       set requested_limit = 0 where id = '${graph.runId}'`,
+      `update career_mcp.founder_research_runs
+       set selected_count = 2 where id = '${graph.runId}'`,
+      `update career_mcp.founder_research_run_items
+       set attempt_count = -1 where id = '${graph.runItemId}'`,
+      `update career_mcp.founder_research_run_people
+       set confidence = 1.01 where id = '${graph.runPersonId}'`,
+      `update career_mcp.founder_profile_candidates
+       set confidence = -0.01 where id = '${graph.candidateId}'`
+    ]) {
+      await expectCheckViolation(statement);
+    }
+
+  });
+
+  it("rejects invalid founder timestamp relationships", async () => {
+    const graph = await seedFounderResearchConstraintGraph();
+
+    for (const statement of [
+      `update career_mcp.founder_research_runs
+       set started_at = '2026-07-23T23:59:59.000Z'
+       where id = '${graph.runId}'`,
+      `update career_mcp.founder_research_run_items
+       set checked_at = '2026-07-23T23:59:59.000Z'
+       where id = '${graph.runItemId}'`,
+      `update career_mcp.founder_research_exports
+       set expires_at = '2026-08-01T00:00:01.000Z'
+       where id = '${graph.exportId}'`
+    ]) {
+      await expectCheckViolation(statement);
+    }
+
+  });
+
+  it("rejects invalid profile URLs, search evidence, export hashes, MIME, and sizes", async () => {
+    const graph = await seedFounderResearchConstraintGraph();
+
+    for (const statement of [
+      `update career_mcp.founder_profile_candidates
+       set profile_url = 'http://linkedin.com/in/not-https'
+       where id = '${graph.candidateId}'`,
+      `update career_mcp.founder_profile_candidates
+       set source_kind = 'PUBLIC_SEARCH', search_query = null
+       where id = '${graph.candidateId}'`,
+      `update career_mcp.founder_research_exports
+       set checksum_sha256 = '${"A".repeat(64)}'
+       where id = '${graph.exportId}'`,
+      `update career_mcp.founder_research_exports
+       set mime_type = 'application/octet-stream'
+       where id = '${graph.exportId}'`,
+      `update career_mcp.founder_research_exports
+       set byte_size = 0
+       where id = '${graph.exportId}'`,
+      `update career_mcp.founder_research_exports
+       set byte_size = 2
+       where id = '${graph.exportId}'`
+    ]) {
+      await expectCheckViolation(statement);
+    }
+
+    await expectCheckViolation(`
+      insert into career_mcp.founder_export_download_capabilities (
+        id, export_id, owner_subject, token_hash_sha256, expires_at, created_at
+      ) values (
+        '${randomUUID()}', '${graph.exportId}', '${graph.ownerSubject}',
+        '${"D".repeat(64)}', '2026-07-24T00:10:00.000Z', '${graph.createdAt}'
+      )
+    `);
+  });
+
+  it("keeps selected run-item company membership immutable while allowing progress updates", async () => {
+    const graph = await seedFounderResearchConstraintGraph();
+    const otherCompany = await db.companies.upsert({
+      ycId: `founder-membership-${randomUUID()}`,
+      name: "Other Founder Membership Co"
+    });
+
+    await expect(queryTestDatabase(db, `
+      update career_mcp.founder_research_run_items
+      set state = 'LEASED',
+          attempt_count = 1,
+          lease_expires_at = '2026-07-24T00:15:00.000Z',
+          error_code = null,
+          error_summary = null,
+          error_detail_json = null,
+          updated_at = '2026-07-24T00:01:00.000Z'
+      where id = '${graph.runItemId}'
+    `)).resolves.toHaveLength(0);
+
+    for (const statement of [
+      `update career_mcp.founder_research_run_items
+       set company_id = '${otherCompany.id}' where id = '${graph.runItemId}'`,
+      `update career_mcp.founder_research_run_items
+       set owner_subject = '${randomUUID()}' where id = '${graph.runItemId}'`,
+      `update career_mcp.founder_research_run_items
+       set run_id = '${randomUUID()}' where id = '${graph.runItemId}'`,
+      `delete from career_mcp.founder_research_run_items
+       where id = '${graph.runItemId}'`
+    ]) {
+      await expect(queryTestDatabase(db, statement)).rejects.toMatchObject({
+        code: "23514",
+        constraint: "founder_research_run_item_membership_immutable"
+      });
+    }
+  });
+
+  it("keeps founder confirmation events append-only at the database layer", async () => {
+    const graph = await seedFounderResearchConstraintGraph();
+    const eventId = randomUUID();
+    await queryTestDatabase(db, `
+      insert into career_mcp.founder_profile_confirmation_events (
+        id, candidate_id, owner_subject, event, note, created_at
+      ) values (
+        '${eventId}', '${graph.candidateId}', '${graph.ownerSubject}',
+        'CONFIRMED', 'Confirmed', '${graph.createdAt}'
+      )
+    `);
+
+    for (const statement of [
+      `update career_mcp.founder_profile_confirmation_events
+       set note = 'Changed' where id = '${eventId}'`,
+      `delete from career_mcp.founder_profile_confirmation_events
+       where id = '${eventId}'`
+    ]) {
+      await expect(queryTestDatabase(db, statement)).rejects.toMatchObject({
+        code: "23514",
+        constraint: "founder_profile_confirmation_event_immutable"
+      });
+    }
+  });
+
+  it("prevents capability inserts and updates from outliving the parent export", async () => {
+    const graph = await seedFounderResearchConstraintGraph({
+      exportExpiresAt: "2026-07-24T00:05:00.000Z"
+    });
+    const capabilityId = randomUUID();
+
+    await expect(queryTestDatabase(db, `
+      insert into career_mcp.founder_export_download_capabilities (
+        id, export_id, owner_subject, token_hash_sha256, expires_at, created_at
+      ) values (
+        '${capabilityId}', '${graph.exportId}', '${graph.ownerSubject}',
+        '${"b".repeat(64)}', '2026-07-24T00:10:00.000Z', '${graph.createdAt}'
+      )
+    `)).rejects.toMatchObject({
+      code: "23514",
+      constraint: "founder_export_capability_parent_expiry"
+    });
+
+    await queryTestDatabase(db, `
+      insert into career_mcp.founder_export_download_capabilities (
+        id, export_id, owner_subject, token_hash_sha256, expires_at, created_at
+      ) values (
+        '${capabilityId}', '${graph.exportId}', '${graph.ownerSubject}',
+        '${"b".repeat(64)}', '2026-07-24T00:04:00.000Z', '${graph.createdAt}'
+      )
+    `);
+    await expect(queryTestDatabase(db, `
+      update career_mcp.founder_export_download_capabilities
+      set expires_at = '2026-07-24T00:06:00.000Z'
+      where id = '${capabilityId}'
+    `)).rejects.toMatchObject({
+      code: "23514",
+      constraint: "founder_export_capability_parent_expiry"
+    });
+  });
+
+  it("prevents an export expiry update from stranding a live capability", async () => {
+    const graph = await seedFounderResearchConstraintGraph();
+    await queryTestDatabase(db, `
+      insert into career_mcp.founder_export_download_capabilities (
+        id, export_id, owner_subject, token_hash_sha256, expires_at, created_at
+      ) values (
+        '${randomUUID()}', '${graph.exportId}', '${graph.ownerSubject}',
+        '${"c".repeat(64)}', '2026-07-24T00:15:00.000Z', '${graph.createdAt}'
+      )
+    `);
+
+    await expect(queryTestDatabase(db, `
+      update career_mcp.founder_research_exports
+      set expires_at = '2026-07-24T00:10:00.000Z'
+      where id = '${graph.exportId}'
+    `)).rejects.toMatchObject({
+      code: "23514",
+      constraint: "founder_export_capability_parent_expiry"
+    });
   });
 
   it.each([-0.01, 1.01])("rejects evidence confidence %s outside 0..1", async (confidence) => {
