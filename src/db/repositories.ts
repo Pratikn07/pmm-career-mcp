@@ -229,6 +229,21 @@ export type UsableFounderExportCapability = Readonly<{
   export: FounderResearchExport;
 }>;
 
+export type FounderResearchExportSnapshot = Readonly<{
+  run: FounderResearchRun;
+  items: readonly Readonly<{
+    item: FounderResearchRunItem;
+    company: Company;
+    people: readonly Readonly<{
+      runPerson: FounderResearchRunPerson;
+      person: Person;
+      candidates: readonly FounderProfileCandidate[];
+      target?: Target;
+      drafts: readonly OutreachDraft[];
+    }>[];
+  }>[];
+}>;
+
 export type BrandProfileDefaultInput = {
   id: string;
   ownerSubject: string;
@@ -1644,6 +1659,124 @@ export function createRepositories(database: Database) {
         )).limit(1);
         return row === undefined ? undefined : normalizeRowTimestamps(row);
       },
+      async getExportSnapshot(
+        runId: string,
+        ownerSubject: string
+      ): Promise<FounderResearchExportSnapshot | undefined> {
+        if (!isUuid(runId) || !isUuid(ownerSubject)) {
+          return undefined;
+        }
+        const normalizedOwner = ownerSubject.toLowerCase();
+        return serializableTransaction(database, async (transaction) => {
+          const [runRow] = await transaction.select().from(founderResearchRuns).where(and(
+            eq(founderResearchRuns.id, runId),
+            eq(founderResearchRuns.ownerSubject, normalizedOwner)
+          )).limit(1).for("update");
+          if (runRow === undefined) {
+            return undefined;
+          }
+          const itemRows = await transaction.select({
+            item: founderResearchRunItems,
+            company: companies
+          }).from(founderResearchRunItems).innerJoin(
+            companies,
+            eq(founderResearchRunItems.companyId, companies.id)
+          ).where(and(
+            eq(founderResearchRunItems.runId, runId),
+            eq(founderResearchRunItems.ownerSubject, normalizedOwner)
+          )).orderBy(
+            asc(companies.name),
+            asc(companies.id),
+            asc(founderResearchRunItems.id)
+          );
+          const itemIds = itemRows.map(({ item }) => item.id);
+          if (itemIds.length === 0) {
+            return { run: normalizeRowTimestamps(runRow), items: [] };
+          }
+          const peopleRows = await transaction.select({
+            runPerson: founderResearchRunPeople,
+            person: people
+          }).from(founderResearchRunPeople).innerJoin(
+            people,
+            eq(founderResearchRunPeople.personId, people.id)
+          ).where(and(
+            eq(founderResearchRunPeople.ownerSubject, normalizedOwner),
+            inArray(founderResearchRunPeople.runItemId, itemIds)
+          )).orderBy(
+            asc(founderResearchRunPeople.runItemId),
+            asc(people.name),
+            asc(people.role),
+            asc(founderResearchRunPeople.id)
+          );
+          const runPersonIds = peopleRows.map(({ runPerson }) => runPerson.id);
+          const personIds = peopleRows.map(({ person }) => person.id);
+          const candidateRows = runPersonIds.length === 0 ? [] : await transaction
+            .select().from(founderProfileCandidates).where(and(
+              eq(founderProfileCandidates.ownerSubject, normalizedOwner),
+              inArray(founderProfileCandidates.runPersonId, runPersonIds)
+            )).orderBy(
+              asc(founderProfileCandidates.runPersonId),
+              desc(founderProfileCandidates.checkedAt),
+              asc(founderProfileCandidates.id)
+            );
+          const targetRows = personIds.length === 0 ? [] : await transaction
+            .select().from(targets).where(inArray(targets.personId, personIds));
+          const targetIds = targetRows.map(({ id }) => id);
+          const draftRows = targetIds.length === 0 ? [] : await transaction
+            .select().from(outreachDrafts).where(inArray(outreachDrafts.targetId, targetIds))
+            .orderBy(
+              asc(outreachDrafts.targetId),
+              asc(outreachDrafts.purpose),
+              desc(outreachDrafts.version),
+              asc(outreachDrafts.id)
+            );
+          const candidatesByRunPerson = new Map<string, FounderProfileCandidate[]>();
+          for (const candidate of normalizeRows(candidateRows)) {
+            const entries = candidatesByRunPerson.get(candidate.runPersonId) ?? [];
+            entries.push(candidate);
+            candidatesByRunPerson.set(candidate.runPersonId, entries);
+          }
+          const targetsByPerson = new Map(normalizeRows(targetRows).map((target) => [
+            target.personId,
+            target
+          ] as const));
+          const draftsByTarget = new Map<string, OutreachDraft[]>();
+          for (const draft of draftRows.map(decodeOutreachDraft)) {
+            const entries = draftsByTarget.get(draft.targetId) ?? [];
+            entries.push(draft);
+            draftsByTarget.set(draft.targetId, entries);
+          }
+          const peopleByItem = new Map<
+            string,
+            FounderResearchExportSnapshot["items"][number]["people"][number][]
+          >();
+          for (const { runPerson: rawRunPerson, person: rawPerson } of peopleRows) {
+            const runPerson = normalizeRowTimestamps(rawRunPerson);
+            const person = normalizeRowTimestamps(rawPerson);
+            const target = targetsByPerson.get(person.id);
+            const entry = Object.freeze({
+              runPerson,
+              person,
+              candidates: Object.freeze([...(candidatesByRunPerson.get(runPerson.id) ?? [])]),
+              ...(target === undefined ? {} : { target }),
+              drafts: Object.freeze([...(target === undefined
+                ? []
+                : (draftsByTarget.get(target.id) ?? []))])
+            });
+            const entries = peopleByItem.get(runPerson.runItemId) ?? [];
+            entries.push(entry);
+            peopleByItem.set(runPerson.runItemId, entries);
+          }
+          return Object.freeze({
+            run: normalizeRowTimestamps(runRow),
+            items: Object.freeze(itemRows.map(({ item, company }) => Object.freeze({
+              item: normalizeRowTimestamps(item),
+              company: normalizeRowTimestamps(company),
+              people: Object.freeze([...(peopleByItem.get(item.id) ?? [])])
+            })))
+          });
+        });
+      },
       async listOutstandingItems(
         runId: string,
         ownerSubject: string
@@ -2342,6 +2475,25 @@ export function createRepositories(database: Database) {
           eq(founderResearchExports.id, exportId),
           eq(founderResearchExports.ownerSubject, ownerSubject.toLowerCase())
         )).limit(1);
+        return row === undefined ? undefined : normalizeRowTimestamps(row);
+      },
+      async getReusable(input: {
+        runId: string;
+        ownerSubject: string;
+        checksumSha256: string;
+        now: string;
+      }): Promise<FounderResearchExport | undefined> {
+        if (!isUuid(input.runId) || !isUuid(input.ownerSubject)) {
+          return undefined;
+        }
+        const now = assertIsoTimestamp("founderResearchExport.now", input.now);
+        const [row] = await database.select().from(founderResearchExports).where(and(
+          eq(founderResearchExports.runId, input.runId),
+          eq(founderResearchExports.ownerSubject, input.ownerSubject.toLowerCase()),
+          eq(founderResearchExports.state, "READY"),
+          eq(founderResearchExports.checksumSha256, input.checksumSha256),
+          sql`${founderResearchExports.expiresAt} > ${now}`
+        )).orderBy(asc(founderResearchExports.createdAt), asc(founderResearchExports.id)).limit(1);
         return row === undefined ? undefined : normalizeRowTimestamps(row);
       },
       async deleteExpired(ownerSubject: string, nowInput: string): Promise<number> {
