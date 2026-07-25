@@ -379,11 +379,11 @@ describe("database lifecycle", () => {
       )`,
       `insert into career_mcp.founder_research_exports (
         id, run_id, owner_subject, state, file_name, mime_type, byte_size,
-        checksum_sha256, workbook_bytes, row_count, sheet_count, created_at, expires_at
+        checksum_sha256, idempotency_key_hash, workbook_bytes, row_count, sheet_count, created_at, expires_at
       ) values (
         '${exportId}', '${runId}', '${ownerSubject}', 'READY', 'reset.xlsx',
         'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-        1, '${"a".repeat(64)}', decode('00', 'hex'), 0, 1, now(), now() + interval '1 day'
+        1, '${"a".repeat(64)}', '${"b".repeat(64)}', decode('00', 'hex'), 0, 1, now(), now() + interval '1 day'
       )`,
       `insert into career_mcp.founder_export_download_capabilities (
         id, export_id, owner_subject, token_hash_sha256, expires_at, created_at
@@ -1099,6 +1099,7 @@ describe("founder research repositories", () => {
       fileName: "yc-founder-research.xlsx",
       mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
       checksumSha256,
+      idempotencyKeyHash: "a".repeat(64),
       workbookBytes,
       rowCount: 1,
       sheetCount: 4,
@@ -1115,6 +1116,40 @@ describe("founder research repositories", () => {
     )).toEqual(workbookBytes);
   });
 
+  it("atomically creates or reuses one owner/run/key/snapshot export", async () => {
+    const created = await addFounderRun(["Idempotent Export"]);
+    const workbookBytes = Buffer.from("PK\u0003\u0004idempotent workbook", "utf8");
+    const input = {
+      runId: created.run.id,
+      ownerSubject: OWNER,
+      fileName: "idempotent.xlsx",
+      mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      checksumSha256: createHash("sha256").update(workbookBytes).digest("hex"),
+      idempotencyKeyHash: "d".repeat(64),
+      workbookBytes,
+      rowCount: 1,
+      sheetCount: 4,
+      createdAt: STARTED_AT,
+      expiresAt: "2099-07-31T16:00:00.000Z"
+    };
+    const [first, second] = await Promise.all([
+      db.founderResearchExports.createOrReuse(input),
+      db.founderResearchExports.createOrReuse(input)
+    ]);
+    expect(second.id).toBe(first.id);
+    const exports = await queryTestDatabase<{ count: number }>(db, `
+      select count(*)::integer as count
+      from career_mcp.founder_research_exports
+      where run_id = '${created.run.id}' and owner_subject = '${OWNER}'
+    `);
+    expect(exports).toEqual([{ count: 1 }]);
+    await expect(db.founderResearchExports.createOrReuse({
+      ...input,
+      idempotencyKeyHash: "e".repeat(64),
+      checksumSha256: "0".repeat(64)
+    })).rejects.toThrow("checksum must match workbook bytes");
+  });
+
   it("stores only capability hashes and supports repeat downloads during its lifetime", async () => {
     const created = await addFounderRun(["Capability"]);
     const workbookBytes = Buffer.from("PK\u0003\u0004capability workbook", "utf8");
@@ -1125,6 +1160,7 @@ describe("founder research repositories", () => {
       fileName: "capability.xlsx",
       mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
       checksumSha256,
+      idempotencyKeyHash: "b".repeat(64),
       workbookBytes,
       rowCount: 1,
       sheetCount: 4,
@@ -1202,6 +1238,7 @@ describe("founder research repositories", () => {
       fileName: "delete.xlsx",
       mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
       checksumSha256: createHash("sha256").update(workbookBytes).digest("hex"),
+      idempotencyKeyHash: "c".repeat(64),
       workbookBytes,
       rowCount: 1,
       sheetCount: 4,

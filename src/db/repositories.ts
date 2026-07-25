@@ -209,6 +209,7 @@ export type FounderResearchExportCreateInput = Readonly<{
   fileName: string;
   mimeType: string;
   checksumSha256: string;
+  idempotencyKeyHash: string;
   workbookBytes: Buffer | Uint8Array;
   rowCount: number;
   sheetCount: number;
@@ -559,6 +560,18 @@ async function serializableTransaction<T>(
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+function exactFounderExportWorkbookBytes(
+  checksumSha256: string,
+  workbookBytes: Buffer | Uint8Array
+): Uint8Array {
+  const bytes = Uint8Array.from(workbookBytes);
+  const actualChecksum = createHash("sha256").update(bytes).digest("hex");
+  if (!/^[0-9a-f]{64}$/u.test(checksumSha256) || checksumSha256 !== actualChecksum) {
+    throw new Error("Founder research export checksum must match workbook bytes");
+  }
+  return bytes;
 }
 
 function founderOutreachRequestIdentity(
@@ -2446,7 +2459,10 @@ export function createRepositories(database: Database) {
         const ownerSubject = normalizeOwnerSubject(input.ownerSubject);
         const createdAt = assertIsoTimestamp("founderResearchExport.createdAt", input.createdAt);
         const expiresAt = assertIsoTimestamp("founderResearchExport.expiresAt", input.expiresAt);
-        const workbookBytes = Uint8Array.from(input.workbookBytes);
+        const workbookBytes = exactFounderExportWorkbookBytes(
+          input.checksumSha256,
+          input.workbookBytes
+        );
         const [row] = await database.insert(founderResearchExports).values({
           id: randomUUID(),
           runId: input.runId,
@@ -2456,6 +2472,7 @@ export function createRepositories(database: Database) {
           mimeType: input.mimeType,
           byteSize: workbookBytes.byteLength,
           checksumSha256: input.checksumSha256,
+          idempotencyKeyHash: input.idempotencyKeyHash,
           workbookBytes,
           rowCount: input.rowCount,
           sheetCount: input.sheetCount,
@@ -2463,6 +2480,79 @@ export function createRepositories(database: Database) {
           expiresAt
         }).returning();
         return requiredRow(row, "founder research export");
+      },
+      async createOrReuse(
+        input: FounderResearchExportCreateInput
+      ): Promise<FounderResearchExport> {
+        const ownerSubject = normalizeOwnerSubject(input.ownerSubject);
+        const createdAt = assertIsoTimestamp("founderResearchExport.createdAt", input.createdAt);
+        const expiresAt = assertIsoTimestamp("founderResearchExport.expiresAt", input.expiresAt);
+        const workbookBytes = exactFounderExportWorkbookBytes(
+          input.checksumSha256,
+          input.workbookBytes
+        );
+        if (!/^[0-9a-f]{64}$/u.test(input.idempotencyKeyHash)) {
+          throw new Error("founderResearchExport.idempotencyKeyHash must be a SHA-256 hash");
+        }
+        return serializableTransaction(database, async (transaction) => {
+          const [run] = await transaction.select({ id: founderResearchRuns.id }).from(
+            founderResearchRuns
+          ).where(and(
+            eq(founderResearchRuns.id, input.runId),
+            eq(founderResearchRuns.ownerSubject, ownerSubject)
+          )).limit(1).for("update");
+          if (run === undefined) {
+            throw new Error("Founder research export run must be owned by the request subject");
+          }
+          const expired = await transaction.select({ id: founderResearchExports.id }).from(
+            founderResearchExports
+          ).where(and(
+            eq(founderResearchExports.runId, input.runId),
+            eq(founderResearchExports.ownerSubject, ownerSubject),
+            eq(founderResearchExports.idempotencyKeyHash, input.idempotencyKeyHash),
+            eq(founderResearchExports.checksumSha256, input.checksumSha256),
+            sql`${founderResearchExports.expiresAt} <= ${createdAt}`
+          )).for("update");
+          if (expired.length > 0) {
+            const expiredIds = expired.map(({ id }) => id);
+            await transaction.delete(founderExportDownloadCapabilities).where(and(
+              eq(founderExportDownloadCapabilities.ownerSubject, ownerSubject),
+              inArray(founderExportDownloadCapabilities.exportId, expiredIds)
+            ));
+            await transaction.delete(founderResearchExports).where(and(
+              eq(founderResearchExports.ownerSubject, ownerSubject),
+              inArray(founderResearchExports.id, expiredIds)
+            ));
+          }
+          const [reusable] = await transaction.select().from(founderResearchExports).where(and(
+            eq(founderResearchExports.runId, input.runId),
+            eq(founderResearchExports.ownerSubject, ownerSubject),
+            eq(founderResearchExports.idempotencyKeyHash, input.idempotencyKeyHash),
+            eq(founderResearchExports.checksumSha256, input.checksumSha256),
+            eq(founderResearchExports.state, "READY"),
+            sql`${founderResearchExports.expiresAt} > ${createdAt}`
+          )).limit(1).for("update");
+          if (reusable !== undefined) {
+            return normalizeRowTimestamps(reusable);
+          }
+          const [row] = await transaction.insert(founderResearchExports).values({
+            id: randomUUID(),
+            runId: input.runId,
+            ownerSubject,
+            state: "READY",
+            fileName: input.fileName,
+            mimeType: input.mimeType,
+            byteSize: workbookBytes.byteLength,
+            checksumSha256: input.checksumSha256,
+            idempotencyKeyHash: input.idempotencyKeyHash,
+            workbookBytes,
+            rowCount: input.rowCount,
+            sheetCount: input.sheetCount,
+            createdAt,
+            expiresAt
+          }).returning();
+          return requiredRow(row, "founder research export");
+        }, "founder_research_exports_owner_run_key_snapshot_unique");
       },
       async getOwned(
         exportId: string,
@@ -2475,25 +2565,6 @@ export function createRepositories(database: Database) {
           eq(founderResearchExports.id, exportId),
           eq(founderResearchExports.ownerSubject, ownerSubject.toLowerCase())
         )).limit(1);
-        return row === undefined ? undefined : normalizeRowTimestamps(row);
-      },
-      async getReusable(input: {
-        runId: string;
-        ownerSubject: string;
-        checksumSha256: string;
-        now: string;
-      }): Promise<FounderResearchExport | undefined> {
-        if (!isUuid(input.runId) || !isUuid(input.ownerSubject)) {
-          return undefined;
-        }
-        const now = assertIsoTimestamp("founderResearchExport.now", input.now);
-        const [row] = await database.select().from(founderResearchExports).where(and(
-          eq(founderResearchExports.runId, input.runId),
-          eq(founderResearchExports.ownerSubject, input.ownerSubject.toLowerCase()),
-          eq(founderResearchExports.state, "READY"),
-          eq(founderResearchExports.checksumSha256, input.checksumSha256),
-          sql`${founderResearchExports.expiresAt} > ${now}`
-        )).orderBy(asc(founderResearchExports.createdAt), asc(founderResearchExports.id)).limit(1);
         return row === undefined ? undefined : normalizeRowTimestamps(row);
       },
       async deleteExpired(ownerSubject: string, nowInput: string): Promise<number> {

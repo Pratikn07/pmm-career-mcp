@@ -68,6 +68,19 @@ function safeFilters(value: Record<string, unknown>): Record<string, boolean | n
   return output;
 }
 
+function scopedIdempotencyKeyHash(
+  ownerSubject: string,
+  runId: string,
+  idempotencyKey: string
+): string {
+  return createHash("sha256").update(JSON.stringify({
+    contract: "founder-research-export.idempotency.v1",
+    ownerSubject,
+    runId,
+    idempotencyKey
+  }), "utf8").digest("hex");
+}
+
 function selectedCandidate(
   candidates: FounderResearchExportSnapshot["items"][number]["people"][number]["candidates"]
 ) {
@@ -273,15 +286,10 @@ export function createFounderResearchExportService(
       if (snapshot === undefined) throw notFound();
       const bytes = await buildFounderResearchWorkbook(workbookInput(snapshot));
       const checksumSha256 = createHash("sha256").update(bytes).digest("hex");
-      const reusable = await database.founderResearchExports.getReusable({
+      const exportRow = await database.founderResearchExports.createOrReuse({
         runId: snapshot.run.id,
         ownerSubject: subject,
-        checksumSha256,
-        now: createdAt.toISOString()
-      });
-      const exportRow = reusable ?? await database.founderResearchExports.create({
-        runId: snapshot.run.id,
-        ownerSubject: subject,
+        idempotencyKeyHash: scopedIdempotencyKeyHash(subject, snapshot.run.id, input.idempotencyKey),
         fileName: `founder-research-${snapshot.run.id}.xlsx`,
         mimeType: XLSX_MIME,
         checksumSha256,

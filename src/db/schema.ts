@@ -857,6 +857,7 @@ export const founderResearchExports = careerMcp.table("founder_research_exports"
   mimeType: text("mime_type").notNull(),
   byteSize: bigint("byte_size", { mode: "number" }).notNull(),
   checksumSha256: text("checksum_sha256").notNull(),
+  idempotencyKeyHash: text("idempotency_key_hash").notNull(),
   workbookBytes: privateBytea("workbook_bytes").notNull(),
   rowCount: integer("row_count").notNull(),
   sheetCount: integer("sheet_count").notNull(),
@@ -864,6 +865,12 @@ export const founderResearchExports = careerMcp.table("founder_research_exports"
   expiresAt: timestamptz("expires_at").notNull()
 }, (table) => [
   unique("founder_research_exports_id_owner_unique").on(table.id, table.ownerSubject),
+  unique("founder_research_exports_owner_run_key_snapshot_unique").on(
+    table.ownerSubject,
+    table.runId,
+    table.idempotencyKeyHash,
+    table.checksumSha256
+  ),
   foreignKey({
     name: "founder_research_exports_run_owner_fk",
     columns: [table.runId, table.ownerSubject],
@@ -897,6 +904,10 @@ export const founderResearchExports = careerMcp.table("founder_research_exports"
   check(
     "founder_research_exports_checksum_check",
     sql`${table.checksumSha256} ~ '^[0-9a-f]{64}$'`
+  ),
+  check(
+    "founder_research_exports_idempotency_key_hash_check",
+    sql`${table.idempotencyKeyHash} ~ '^[0-9a-f]{64}$'`
   ),
   check(
     "founder_research_exports_counts_check",

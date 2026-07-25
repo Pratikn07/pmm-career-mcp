@@ -124,6 +124,15 @@ describe("founder research export service", () => {
     expect(stored.rowCount).toBe(1);
     expect(stored.sheetCount).toBe(4);
 
+    const storedExport = await queryTestDatabase<{ idempotency_key_hash: string }>(database, `
+      select idempotency_key_hash
+      from career_mcp.founder_research_exports
+      where id = '${result.exportMetadata.id}'
+    `);
+    expect(storedExport).toHaveLength(1);
+    expect(storedExport[0]!.idempotency_key_hash).toMatch(/^[0-9a-f]{64}$/u);
+    expect(JSON.stringify(storedExport).includes("export-2026-07-25")).toBe(false);
+
     const capabilities = await queryTestDatabase<{ token_hash_sha256: string }>(database, `
       select token_hash_sha256
       from career_mcp.founder_export_download_capabilities
@@ -140,11 +149,14 @@ describe("founder research export service", () => {
     )).rejects.toMatchObject({ code: "NOT_FOUND" });
   });
 
-  it("reuses an unexpired export for the same key and creates a new export when the saved snapshot changes", async () => {
+  it("durably reuses a matching owner/run/key snapshot across service instances", async () => {
     const { runId, targetId } = await seedReadyRun();
     const first = await createPrivateExport(runId, "retry-key", () => new Date(START));
     const retry = await createPrivateExport(runId, "retry-key", () => new Date(START));
     expect(retry.exportMetadata.id).toBe(first.exportMetadata.id);
+
+    const distinctKey = await createPrivateExport(runId, "different-retry-key", () => new Date(START));
+    expect(distinctKey.exportMetadata.id).not.toBe(first.exportMetadata.id);
 
     await database.outreachDrafts.createVersion({
       targetId,
@@ -155,6 +167,36 @@ describe("founder research export service", () => {
     const changed = await createPrivateExport(runId, "retry-key", () => new Date(START));
     expect(changed.exportMetadata.id).not.toBe(first.exportMetadata.id);
     expect(changed.exportMetadata.checksumSha256).not.toBe(first.exportMetadata.checksumSha256);
+  });
+
+  it("removes an expired matching tuple before recreating it", async () => {
+    const { runId } = await seedReadyRun();
+    let now = new Date(START);
+    const first = await createPrivateExport(runId, "expired-retry-key", () => now);
+    now = new Date("2026-08-01T18:00:00.000Z");
+    const recreated = await createPrivateExport(runId, "expired-retry-key", () => now);
+    expect(recreated.exportMetadata.id).not.toBe(first.exportMetadata.id);
+    const rows = await queryTestDatabase<{ count: number }>(database, `
+      select count(*)::integer as count
+      from career_mcp.founder_research_exports
+      where run_id = '${runId}' and owner_subject = '${OWNER}'
+    `);
+    expect(rows).toEqual([{ count: 1 }]);
+  });
+
+  it("creates exactly one artifact for concurrent matching owner/run/key snapshot requests", async () => {
+    const { runId } = await seedReadyRun();
+    const [first, second] = await Promise.all([
+      createPrivateExport(runId, "concurrent-retry-key", () => new Date(START)),
+      createPrivateExport(runId, "concurrent-retry-key", () => new Date(START))
+    ]);
+    expect(second.exportMetadata.id).toBe(first.exportMetadata.id);
+    const rows = await queryTestDatabase<{ count: number }>(database, `
+      select count(*)::integer as count
+      from career_mcp.founder_research_exports
+      where run_id = '${runId}' and owner_subject = '${OWNER}'
+    `);
+    expect(rows).toEqual([{ count: 1 }]);
   });
 
   it("cleans up expired owned artifacts", async () => {

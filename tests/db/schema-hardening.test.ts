@@ -173,13 +173,13 @@ async function seedFounderResearchConstraintGraph(options: {
     )`,
     `insert into career_mcp.founder_research_exports (
       id, run_id, owner_subject, state, file_name, mime_type, byte_size,
-      checksum_sha256, workbook_bytes, row_count, sheet_count,
+      checksum_sha256, idempotency_key_hash, workbook_bytes, row_count, sheet_count,
       created_at, expires_at
     ) values (
       '${exportId}', '${runId}', '${ownerSubject}', 'READY',
       'founder-constraint.xlsx',
       'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      1, '${"a".repeat(64)}', decode('00', 'hex'), 0, 4,
+      1, '${"a".repeat(64)}', '${"b".repeat(64)}', decode('00', 'hex'), 0, 4,
       '${createdAt}', '${exportExpiresAt}'
     )`
   ]) {
@@ -699,6 +699,8 @@ describe("database domain constraints", () => {
       "founder_profile_confirmation_events_event_check",
       "founder_profile_confirmation_events_note_check",
       "founder_research_exports_checksum_check",
+      "founder_research_exports_idempotency_key_hash_check",
+      "founder_research_exports_owner_run_key_snapshot_unique",
       "founder_research_exports_counts_check",
       "founder_research_exports_file_name_check",
       "founder_research_exports_mime_type_check",
@@ -723,6 +725,10 @@ describe("database domain constraints", () => {
       .toMatch(/PUBLIC_SEARCH.*search_query IS NOT NULL.*char_length/i);
     expect(byName.get("founder_research_exports_size_check"))
       .toMatch(/byte_size.*>= 1.*byte_size.*<= 5242880.*octet_length.*workbook_bytes/i);
+    expect(byName.get("founder_research_exports_idempotency_key_hash_check"))
+      .toMatch(/idempotency_key_hash.*\^\[0-9a-f\]\{64\}\$/i);
+    expect(byName.get("founder_research_exports_owner_run_key_snapshot_unique"))
+      .toMatch(/UNIQUE.*owner_subject.*run_id.*idempotency_key_hash.*checksum_sha256/i);
     expect(byName.get("founder_research_exports_mime_type_check"))
       .toContain("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
     expect(byName.get("founder_export_download_capabilities_token_hash_check"))
