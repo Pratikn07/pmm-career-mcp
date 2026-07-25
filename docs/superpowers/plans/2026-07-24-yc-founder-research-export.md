@@ -17,13 +17,14 @@ coordinator leases at most five companies per tool call and processes at most
 two concurrently. Unresolved people are returned as public-search tasks for
 ChatGPT; candidate LinkedIn URLs are stored without fetching them and require
 manual confirmation unless an official company person card explicitly linked
-the URL. Existing targets and outreach drafts store versioned notes. ExcelJS
-creates a deterministic four-sheet workbook whose exact bytes live in private
-Postgres for seven days. A separate 15-minute, single-purpose capability opens
-the download route through an MCP export card.
+the URL. Existing targets and outreach drafts store versioned notes. A minimal
+OOXML writer uses JSZip to create a deterministic four-sheet workbook whose
+exact bytes live in private Postgres for seven days. A separate 15-minute,
+single-purpose capability opens the download route through an MCP export card.
 
 **Tech stack:** Node.js 22, TypeScript, Zod, Drizzle ORM/PostgreSQL, Supabase
-Postgres/Auth, MCP SDK 1.29, ExcelJS, Express, Vitest/PGlite, Docker, Railway.
+Postgres/Auth, MCP SDK 1.29, JSZip 3.10.1, Express, Vitest/PGlite, Docker,
+Railway.
 
 ## Global constraints
 
@@ -124,7 +125,7 @@ Postgres/Auth, MCP SDK 1.29, ExcelJS, Express, Vitest/PGlite, Docker, Railway.
 
 ---
 
-### Task 1: Add ExcelJS as a pinned production dependency
+### Task 1: Add JSZip as a pinned production dependency
 
 **Files:**
 
@@ -134,7 +135,7 @@ Postgres/Auth, MCP SDK 1.29, ExcelJS, Express, Vitest/PGlite, Docker, Railway.
 
 - [ ] **Step 1: Write the failing production-dependency test**
 
-Assert that `exceljs` is present in `dependencies`, absent from
+Assert that `jszip` is present in `dependencies`, absent from
 `devDependencies`, and pinned to an exact version rather than a range.
 
 - [ ] **Step 2: Run the focused test**
@@ -145,20 +146,22 @@ Run:
 npx vitest run tests/build/production-dependencies.test.ts
 ```
 
-Expected: FAIL because ExcelJS is not installed.
+Expected: FAIL because JSZip is not installed.
 
-- [ ] **Step 3: Resolve and install the current audited ExcelJS release**
+- [ ] **Step 3: Install the audited JSZip release**
 
-The current stable registry version checked on 2026-07-24 is `4.4.0`. Review
+The current stable registry version checked on 2026-07-24 is `3.10.1`. Review
 its direct and transitive production dependencies, then install it exactly:
 
 ```bash
-npm install --save-exact exceljs@4.4.0
+npm install --save-exact jszip@3.10.1
 npm audit --omit=dev
 ```
 
-Do not use a floating range. Record any unavoidable audit exception in the
-deployment document before continuing.
+Do not use a floating range and do not accept a production audit exception.
+ExcelJS 4.4.0 was explicitly rejected during pre-flight because its current
+production dependency graph reported high-severity vulnerabilities through
+`archiver`, `glob`, `minimatch`, and related packages.
 
 - [ ] **Step 4: Re-run the focused test and typecheck**
 
@@ -615,8 +618,9 @@ ambiguous, not-found, and failed rows. Assert:
 - no formula cells, hyperlinks, hidden rows/columns/sheets, defined names,
   macros, drawings, external links, or remote images;
 - deterministic content ordering;
-- successful write with `workbook.xlsx.writeBuffer()`;
-- reopening the exact bytes with ExcelJS preserves the contract;
+- successful in-memory ZIP generation as a Node `Buffer`;
+- reopening the exact bytes with JSZip and CRC32 validation preserves the
+  expected OOXML entries and content;
 - byte size stays below 5 MiB at the 50-company maximum.
 
 - [ ] **Step 2: Run the focused test**
@@ -627,9 +631,15 @@ npx vitest run tests/founder-research/workbook.test.ts
 
 - [ ] **Step 3: Implement the workbook builder**
 
-Treat all dynamic values as plain strings/numbers/dates. Prefix dangerous
-spreadsheet text with a single quote before assigning the cell. Do not use
-ExcelJS formula or hyperlink objects. Keep styling local and deterministic.
+Generate the minimum standards-compliant OOXML package: content types, root
+relationships, workbook, workbook relationships, one styles part, document
+properties, and four worksheet parts using inline strings. Treat all dynamic
+values as plain text/numbers/dates. Prefix dangerous spreadsheet text with a
+single quote before XML escaping. Do not emit formula, hyperlink, drawing,
+external-link, macro, shared-string, or hidden-content elements. Give every ZIP
+entry the same fixed timestamp and deterministic order, then generate a Node
+buffer with DEFLATE compression. Reopen with JSZip using `checkCRC32: true` and
+validate exact entry names before accepting the bytes.
 
 - [ ] **Step 4: Re-run tests**
 
