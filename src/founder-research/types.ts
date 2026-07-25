@@ -10,25 +10,26 @@ export type { NonFetchingLinkedInProfileUrl };
 
 export type FounderEvidenceSource = "OFFICIAL_YC" | "SAVED_PUBLIC_EVIDENCE";
 
-interface SamePersonFounderEvidenceCommon {
-  companyId: string;
+/**
+ * A service-loaded evidence record. The pure role validator checks that this
+ * record binds to independently supplied current context; the service remains
+ * responsible for loading the evidence by ID from trusted persistence.
+ */
+export interface SavedFounderEvidence {
+  assertedPersonFullName: string;
+  boundCompanyId: string;
+  boundPersonId: string;
   evidenceId: string;
   explicitFounder: boolean;
   source: FounderEvidenceSource;
 }
 
-export type SamePersonFounderEvidence = SamePersonFounderEvidenceCommon & (
-  | {
-      assertedPersonIdentity: string;
-      bindingKind: "NORMALIZED_IDENTITY";
-      expectedPersonIdentity: string;
-    }
-  | {
-      assertedRunPersonId: string;
-      bindingKind: "RUN_PERSON_ID";
-      expectedRunPersonId: string;
-    }
-);
+export interface FounderRoleValidationContext {
+  currentCompanyId: string;
+  currentPersonId: string;
+  currentPersonName: string;
+  savedEvidence: SavedFounderEvidence;
+}
 
 export type FounderRoleValidationReason =
   | "INVALID_ROLE_TYPE"
