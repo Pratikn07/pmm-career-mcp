@@ -448,6 +448,7 @@ describe("founder research repositories", () => {
   const OTHER_OWNER = "123e4567-e89b-42d3-a456-426614174102";
   const STARTED_AT = "2099-07-24T16:00:00.000Z";
   const LEASE_EXPIRES_AT = "2099-07-24T16:05:00.000Z";
+  const ACTIVE_LEASE_EXPIRES_AT = "2099-07-24T16:15:00.000Z";
   const CHECKED_AT = "2099-07-24T16:10:00.000Z";
 
   async function addFounderCompanies(names: readonly string[]) {
@@ -486,7 +487,7 @@ describe("founder research repositories", () => {
       ownerSubject,
       maxItems: 1,
       leasedAt: STARTED_AT,
-      leaseExpiresAt: LEASE_EXPIRES_AT
+      leaseExpiresAt: ACTIVE_LEASE_EXPIRES_AT
     });
     const item = leased[0]!;
     const person = await db.people.upsert({
@@ -607,36 +608,41 @@ describe("founder research repositories", () => {
       ownerSubject: OWNER,
       maxItems: 5,
       leasedAt: STARTED_AT,
-      leaseExpiresAt: LEASE_EXPIRES_AT
+      leaseExpiresAt: ACTIVE_LEASE_EXPIRES_AT
     });
 
     await db.founderResearchRuns.completeItem({
       itemId: leased[0]!.id,
       ownerSubject: OWNER,
+      leaseAttempt: leased[0]!.attemptCount,
       state: "COMPLETE",
       checkedAt: CHECKED_AT
     });
     await db.founderResearchRuns.completeItem({
       itemId: leased[1]!.id,
       ownerSubject: OWNER,
+      leaseAttempt: leased[1]!.attemptCount,
       state: "PARTIAL",
       checkedAt: CHECKED_AT
     });
     await db.founderResearchRuns.completeItem({
       itemId: leased[2]!.id,
       ownerSubject: OWNER,
+      leaseAttempt: leased[2]!.attemptCount,
       state: "NOT_FOUND",
       checkedAt: CHECKED_AT
     });
     await db.founderResearchRuns.completeItem({
       itemId: leased[3]!.id,
       ownerSubject: OWNER,
+      leaseAttempt: leased[3]!.attemptCount,
       state: "AMBIGUOUS",
       checkedAt: CHECKED_AT
     });
     await db.founderResearchRuns.failItem({
       itemId: leased[4]!.id,
       ownerSubject: OWNER,
+      leaseAttempt: leased[4]!.attemptCount,
       checkedAt: CHECKED_AT,
       errorCode: "OFFICIAL_SOURCE_UNAVAILABLE",
       errorSummary: "Official site did not respond",
@@ -665,6 +671,121 @@ describe("founder research repositories", () => {
       error_code: "OFFICIAL_SOURCE_UNAVAILABLE"
     }]);
     expect(rows).toHaveLength(5);
+  });
+
+  it("rejects pending, expired, stale-generation, and terminal item completion", async () => {
+    const created = await addFounderRun(["Guarded"]);
+    const pending = created.items[0]!;
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date(STARTED_AT));
+      expect(await db.founderResearchRuns.completeItem({
+        itemId: pending.id,
+        ownerSubject: OWNER,
+        leaseAttempt: 0,
+        state: "COMPLETE",
+        checkedAt: STARTED_AT
+      })).toBeUndefined();
+
+      const [firstLease] = await db.founderResearchRuns.leaseNextItems({
+        runId: created.run.id,
+        ownerSubject: OWNER,
+        maxItems: 1,
+        leasedAt: STARTED_AT,
+        leaseExpiresAt: LEASE_EXPIRES_AT
+      });
+      vi.setSystemTime(new Date(LEASE_EXPIRES_AT));
+      expect(await db.founderResearchRuns.completeItem({
+        itemId: firstLease!.id,
+        ownerSubject: OWNER,
+        leaseAttempt: firstLease!.attemptCount,
+        state: "COMPLETE",
+        checkedAt: "2099-07-24T16:04:00.000Z"
+      })).toBeUndefined();
+
+      vi.setSystemTime(new Date("2099-07-24T16:06:00.000Z"));
+      const [secondLease] = await db.founderResearchRuns.leaseNextItems({
+        runId: created.run.id,
+        ownerSubject: OWNER,
+        maxItems: 1,
+        leasedAt: "2099-07-24T16:06:00.000Z",
+        leaseExpiresAt: ACTIVE_LEASE_EXPIRES_AT
+      });
+      expect(secondLease!.attemptCount).toBe(firstLease!.attemptCount + 1);
+      vi.setSystemTime(new Date(CHECKED_AT));
+      expect(await db.founderResearchRuns.failItem({
+        itemId: firstLease!.id,
+        ownerSubject: OWNER,
+        leaseAttempt: firstLease!.attemptCount,
+        checkedAt: CHECKED_AT,
+        errorCode: "STALE_WORKER",
+        errorSummary: "The old worker must not win"
+      })).toBeUndefined();
+
+      const completed = await db.founderResearchRuns.completeItem({
+        itemId: secondLease!.id,
+        ownerSubject: OWNER,
+        leaseAttempt: secondLease!.attemptCount,
+        state: "COMPLETE",
+        checkedAt: CHECKED_AT
+      });
+      expect(completed?.state).toBe("COMPLETE");
+      expect(await db.founderResearchRuns.failItem({
+        itemId: secondLease!.id,
+        ownerSubject: OWNER,
+        leaseAttempt: secondLease!.attemptCount,
+        checkedAt: "2099-07-24T16:11:00.000Z",
+        errorCode: "LATE_FAILURE",
+        errorSummary: "Terminal state must be immutable"
+      })).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+
+    const stored = await queryTestDatabase<{
+      state: string;
+      attempt_count: number;
+      error_code: string | null;
+    }>(db, `
+      select state, attempt_count, error_code
+      from career_mcp.founder_research_run_items
+      where id = '${pending.id}'
+    `);
+    expect(stored).toEqual([{
+      state: "COMPLETE",
+      attempt_count: 2,
+      error_code: null
+    }]);
+  });
+
+  it("preserves completedAt when recomputing an unchanged terminal run", async () => {
+    const created = await addFounderRun(["Stable Completion"]);
+    const [leased] = await db.founderResearchRuns.leaseNextItems({
+      runId: created.run.id,
+      ownerSubject: OWNER,
+      maxItems: 1,
+      leasedAt: STARTED_AT,
+      leaseExpiresAt: ACTIVE_LEASE_EXPIRES_AT
+    });
+    await db.founderResearchRuns.completeItem({
+      itemId: leased!.id,
+      ownerSubject: OWNER,
+      leaseAttempt: leased!.attemptCount,
+      state: "COMPLETE",
+      checkedAt: CHECKED_AT
+    });
+
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2099-07-24T16:20:00.000Z"));
+      const first = await db.founderResearchRuns.recomputeCounters(created.run.id, OWNER);
+      vi.setSystemTime(new Date("2099-07-24T16:30:00.000Z"));
+      const second = await db.founderResearchRuns.recomputeCounters(created.run.id, OWNER);
+      expect(first?.completedAt).toBe("2099-07-24T16:20:00.000Z");
+      expect(second?.completedAt).toBe(first?.completedAt);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("saves official people idempotently and lists only the owned run", async () => {
@@ -899,8 +1020,14 @@ describe("founder research repositories", () => {
       ownerSubject: OWNER,
       downloadedAt: "2099-07-24T16:06:00.000Z"
     });
+    const outOfOrder = await db.founderExportCapabilities.recordDownload({
+      capabilityId: capability.id,
+      ownerSubject: OWNER,
+      downloadedAt: "2099-07-24T16:05:30.000Z"
+    });
     expect(first?.lastDownloadedAt).toBe("2099-07-24T16:05:00.000Z");
     expect(second?.lastDownloadedAt).toBe("2099-07-24T16:06:00.000Z");
+    expect(outOfOrder?.lastDownloadedAt).toBe("2099-07-24T16:06:00.000Z");
     expect((await db.founderExportCapabilities.getUsable({
       exportId: savedExport.id,
       ownerSubject: OWNER,

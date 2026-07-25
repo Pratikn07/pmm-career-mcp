@@ -90,6 +90,7 @@ export type FounderResearchLeaseInput = Readonly<{
 export type FounderResearchCompleteItemInput = Readonly<{
   itemId: string;
   ownerSubject: string;
+  leaseAttempt: number;
   state: "COMPLETE" | "PARTIAL" | "NOT_FOUND" | "AMBIGUOUS" | "NEEDS_PUBLIC_SEARCH";
   checkedAt: string;
 }>;
@@ -97,6 +98,7 @@ export type FounderResearchCompleteItemInput = Readonly<{
 export type FounderResearchFailItemInput = Readonly<{
   itemId: string;
   ownerSubject: string;
+  leaseAttempt: number;
   checkedAt: string;
   errorCode: string;
   errorSummary: string;
@@ -668,7 +670,7 @@ async function recomputeFounderResearchRun(
       : completeCount === selectedCount
         ? "COMPLETE"
         : "PARTIAL";
-    completedAt = effectiveRecomputedAt;
+    completedAt = normalizeRowTimestamps(runRow).completedAt ?? effectiveRecomputedAt;
   } else if (needsPublicSearch > 0 && pending === 0 && leased === 0) {
     state = "NEEDS_PUBLIC_SEARCH";
   } else if (leased > 0 || processedCount > 0 || needsPublicSearch > 0) {
@@ -1676,13 +1678,19 @@ export function createRepositories(database: Database) {
       async completeItem(
         input: FounderResearchCompleteItemInput
       ): Promise<FounderResearchRunItem | undefined> {
-        if (!isUuid(input.itemId) || !isUuid(input.ownerSubject)) {
+        if (
+          !isUuid(input.itemId)
+          || !isUuid(input.ownerSubject)
+          || !Number.isInteger(input.leaseAttempt)
+          || input.leaseAttempt < 1
+        ) {
           return undefined;
         }
         const checkedAt = assertIsoTimestamp(
           "founderResearchItem.checkedAt",
           input.checkedAt
         );
+        const operationAt = nowIso();
         const [updated] = await database.update(founderResearchRunItems).set({
           state: input.state,
           leaseExpiresAt: null,
@@ -1693,20 +1701,29 @@ export function createRepositories(database: Database) {
           updatedAt: checkedAt
         }).where(and(
           eq(founderResearchRunItems.id, input.itemId),
-          eq(founderResearchRunItems.ownerSubject, input.ownerSubject.toLowerCase())
+          eq(founderResearchRunItems.ownerSubject, input.ownerSubject.toLowerCase()),
+          eq(founderResearchRunItems.state, "LEASED"),
+          eq(founderResearchRunItems.attemptCount, input.leaseAttempt),
+          sql`${founderResearchRunItems.leaseExpiresAt} > ${operationAt}`
         )).returning();
         return updated === undefined ? undefined : normalizeRowTimestamps(updated);
       },
       async failItem(
         input: FounderResearchFailItemInput
       ): Promise<FounderResearchRunItem | undefined> {
-        if (!isUuid(input.itemId) || !isUuid(input.ownerSubject)) {
+        if (
+          !isUuid(input.itemId)
+          || !isUuid(input.ownerSubject)
+          || !Number.isInteger(input.leaseAttempt)
+          || input.leaseAttempt < 1
+        ) {
           return undefined;
         }
         const checkedAt = assertIsoTimestamp(
           "founderResearchItem.checkedAt",
           input.checkedAt
         );
+        const operationAt = nowIso();
         const [updated] = await database.update(founderResearchRunItems).set({
           state: "FAILED",
           leaseExpiresAt: null,
@@ -1717,7 +1734,10 @@ export function createRepositories(database: Database) {
           updatedAt: checkedAt
         }).where(and(
           eq(founderResearchRunItems.id, input.itemId),
-          eq(founderResearchRunItems.ownerSubject, input.ownerSubject.toLowerCase())
+          eq(founderResearchRunItems.ownerSubject, input.ownerSubject.toLowerCase()),
+          eq(founderResearchRunItems.state, "LEASED"),
+          eq(founderResearchRunItems.attemptCount, input.leaseAttempt),
+          sql`${founderResearchRunItems.leaseExpiresAt} > ${operationAt}`
         )).returning();
         return updated === undefined ? undefined : normalizeRowTimestamps(updated);
       }
@@ -2011,10 +2031,15 @@ export function createRepositories(database: Database) {
           ) {
             return undefined;
           }
+          const capability = normalizeRowTimestamps(usable.capability);
+          const effectiveDownloadedAt = (
+            capability.lastDownloadedAt !== null
+            && capability.lastDownloadedAt > downloadedAt
+          ) ? capability.lastDownloadedAt : downloadedAt;
           const [updated] = await transaction.update(
             founderExportDownloadCapabilities
           ).set({
-            lastDownloadedAt: downloadedAt
+            lastDownloadedAt: effectiveDownloadedAt
           }).where(and(
             eq(founderExportDownloadCapabilities.id, input.capabilityId),
             eq(founderExportDownloadCapabilities.ownerSubject, ownerSubject)
