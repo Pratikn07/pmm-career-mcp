@@ -60,6 +60,25 @@ export type DiscoveryResult = {
   warnings: SourceWarning[];
 };
 
+export type OfficialEvidenceProjection = Omit<Evidence, "id" | "url"> & {
+  sourceKind: "OFFICIAL_COMPANY";
+};
+
+export type OfficialPersonProjection = Omit<
+  PersonWithEvidence,
+  "id" | "evidence"
+> & {
+  evidence: OfficialEvidenceProjection[];
+};
+
+export type OfficialPeopleProjection = {
+  people: OfficialPersonProjection[];
+  evidence: OfficialEvidenceProjection[];
+  checkedAt: string;
+  coverage: DiscoveryCoverage;
+  warnings: SourceWarning[];
+};
+
 export type Opportunity = {
   id: string;
   companyId: string;

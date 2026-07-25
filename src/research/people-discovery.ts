@@ -17,6 +17,7 @@ import type {
   DiscoveryResult,
   DiscoveryBudgets,
   Evidence,
+  OfficialPeopleProjection,
   PersonWithEvidence,
   SourceWarning
 } from "./types.js";
@@ -35,6 +36,7 @@ export type PeopleDiscoveryDependencies = {
 };
 
 export interface PeopleDiscoveryService {
+  projectOfficialPeople(companyId: string): Promise<OfficialPeopleProjection>;
   discoverPublicPeople(companyId: string): Promise<DiscoveryResult>;
 }
 
@@ -54,6 +56,7 @@ type DiscoveredPerson = {
   checkedAt: string;
   confidence: number;
   fact: string;
+  sourceKind: "OFFICIAL_COMPANY" | "SEARCH_EXTENDED";
   publicProfileUrl?: NonFetchingLinkedInProfileUrl;
 };
 
@@ -138,6 +141,7 @@ function parsePeople(
   companyId: string,
   confidence: number,
   allowLinkedInProfile: boolean,
+  sourceKind: DiscoveredPerson["sourceKind"],
   now: Date
 ): ParsedPeoplePage {
   const freshness = validateSourceTimestamp(page.checkedAt, now, "Public people source");
@@ -213,6 +217,7 @@ function parsePeople(
       checkedAt,
       confidence,
       fact,
+      sourceKind,
       ...(publicProfileUrl === undefined ? {} : { publicProfileUrl })
     });
   }
@@ -300,7 +305,10 @@ export function createPeopleDiscovery(
     }
   }
 
-  const discoverPublicPeople = async (companyId: string): Promise<DiscoveryResult> => {
+  const runDiscovery = async (
+    companyId: string,
+    persist: boolean
+  ): Promise<DiscoveryResult | OfficialPeopleProjection> => {
     const company = await dependencies.repositories.companies.get(companyId);
     if (company === undefined) {
       throw new Error(`Company ${companyId} was not found`);
@@ -389,7 +397,14 @@ export function createPeopleDiscovery(
       }
       homePage = await runWithinDeadline(async (options) => await fetchPage(websiteUrl, options));
       fetchedUrls.add(homePage.url);
-      const parsedHome = parsePeople(homePage, companyId, 0.95, true, now());
+      const parsedHome = parsePeople(
+        homePage,
+        companyId,
+        0.95,
+        true,
+        "OFFICIAL_COMPANY",
+        now()
+      );
       authoritativeRecognized ||= parsedHome.recognized;
       if (parsedHome.warnings.some(({ code }) => code === "invalid-data")) {
         refreshCoverageComplete = false;
@@ -444,7 +459,14 @@ export function createPeopleDiscovery(
       try {
         const page = await runWithinDeadline(async (options) => await fetchPage(url, options));
         fetchedUrls.add(page.url);
-        const parsedPage = parsePeople(page, companyId, 0.95, true, now());
+        const parsedPage = parsePeople(
+          page,
+          companyId,
+          0.95,
+          true,
+          "OFFICIAL_COMPANY",
+          now()
+        );
         authoritativeRecognized ||= parsedPage.recognized;
         if (parsedPage.warnings.some(({ code }) => code === "invalid-data")) {
           refreshCoverageComplete = false;
@@ -552,7 +574,14 @@ export function createPeopleDiscovery(
           try {
             const page = await runWithinDeadline(async (options) => await fetchPage(url, options));
             fetchedUrls.add(page.url);
-            const parsedPage = parsePeople(page, companyId, 0.75, false, now());
+            const parsedPage = parsePeople(
+              page,
+              companyId,
+              0.75,
+              false,
+              "SEARCH_EXTENDED",
+              now()
+            );
             checkedTimes.push(page.checkedAt);
             discovered.push(...parsedPage.people);
             warnings.push(...parsedPage.warnings);
@@ -601,6 +630,39 @@ export function createPeopleDiscovery(
     const sortedPeople = Array.from(uniquePeople.values()).sort((left, right) => {
       return left.name.localeCompare(right.name, "en") || left.role.localeCompare(right.role, "en");
     });
+    const checkedAt = checkedTimes.sort().at(-1) ?? now().toISOString();
+    const sortedWarnings = warnings.sort(
+      (left, right) => left.sourceUrl.localeCompare(right.sourceUrl, "en")
+    );
+    if (!persist) {
+      const projectedPeople = sortedPeople
+        .filter(({ sourceKind }) => sourceKind === "OFFICIAL_COMPANY")
+        .map((person) => ({
+          companyId: person.companyId,
+          name: person.name,
+          role: person.role,
+          ...(person.publicProfileUrl === undefined
+            ? {}
+            : { publicProfileUrl: person.publicProfileUrl }),
+          checkedAt: person.checkedAt,
+          confidence: person.confidence,
+          evidence: [{
+            sourceKind: "OFFICIAL_COMPANY" as const,
+            sourceUrl: person.sourceUrl,
+            title: person.sourceTitle,
+            fact: person.fact,
+            checkedAt: person.checkedAt,
+            confidence: person.confidence
+          }]
+        }));
+      return {
+        people: projectedPeople,
+        evidence: projectedPeople.flatMap(({ evidence }) => evidence),
+        checkedAt,
+        coverage: searchProvider.coverage,
+        warnings: sortedWarnings
+      };
+    }
     const refreshedRows = await dependencies.repositories.people.refreshDiscovery({
       companyId,
       replaceMissingDiscovery: refreshCoverageComplete && authoritativeRecognized,
@@ -636,15 +698,21 @@ export function createPeopleDiscovery(
       });
     }
 
-    const checkedAt = checkedTimes.sort().at(-1) ?? now().toISOString();
     return {
       people,
       evidence: allEvidence,
       checkedAt,
       coverage: searchProvider.coverage,
-      warnings: warnings.sort((left, right) => left.sourceUrl.localeCompare(right.sourceUrl, "en"))
+      warnings: sortedWarnings
     };
   };
 
-  return { discoverPublicPeople };
+  return {
+    async projectOfficialPeople(companyId) {
+      return await runDiscovery(companyId, false) as OfficialPeopleProjection;
+    },
+    async discoverPublicPeople(companyId) {
+      return await runDiscovery(companyId, true) as DiscoveryResult;
+    }
+  };
 }

@@ -6,7 +6,10 @@ import { createCareerMcpServer, type CareerMcpDependencies } from "../../src/mcp
 function dependencies(): CareerMcpDependencies {
   return {
     ycProvider: { searchYcCompanies: async () => [] },
-    peopleDiscovery: { discoverPublicPeople: async () => ({ people: [], evidence: [], checkedAt: "2026-07-17T00:00:00.000Z", coverage: "authoritative-pages-only", warnings: [] }) },
+    peopleDiscovery: {
+      projectOfficialPeople: async () => ({ people: [], evidence: [], checkedAt: "2026-07-17T00:00:00.000Z", coverage: "authoritative-pages-only", warnings: [] }),
+      discoverPublicPeople: async () => ({ people: [], evidence: [], checkedAt: "2026-07-17T00:00:00.000Z", coverage: "authoritative-pages-only", warnings: [] })
+    },
     jobDiscovery: { findPmmOpportunities: async () => ({ opportunities: [], checkedAt: "2026-07-17T00:00:00.000Z", warnings: [] }) },
     pipeline: { saveTarget: async () => { throw new Error("not called"); }, updateStatus: async () => { throw new Error("not called"); }, recordNote: async () => { throw new Error("not called"); }, listPipeline: async () => [], createShortlist: async () => { throw new Error("not called"); } },
     drafts: { createOutreach: async () => { throw new Error("not called"); }, createPost: async () => { throw new Error("not called"); }, revisePost: async () => { throw new Error("not called"); }, getPostHistory: async () => [] },

@@ -39,6 +39,13 @@ import { checksumLinkedInPost } from "../posts/post-checksum.js";
 
 type Database = PgDatabase<PgQueryResultHKT, typeof schema>;
 
+class FounderDiscoveryLeaseStaleError extends Error {
+  constructor() {
+    super("Founder discovery lease is stale");
+    this.name = "FounderDiscoveryLeaseStaleError";
+  }
+}
+
 export type Setting = typeof settings.$inferSelect;
 export type Company = typeof companies.$inferSelect;
 export type Person = typeof people.$inferSelect;
@@ -105,6 +112,40 @@ export type FounderResearchFailItemInput = Readonly<{
   errorDetailJson?: Record<string, unknown>;
 }>;
 
+export type FounderResearchDiscoveryFounderInput = Readonly<{
+  name: string;
+  role: string;
+  checkedAt: string;
+  confidence: number;
+  officialEvidence: Readonly<{
+    sourceUrl: string;
+    title?: string;
+    fact: string;
+    checkedAt: string;
+    confidence: number;
+  }>;
+  officialProfileUrl?: string;
+}>;
+
+export type FounderResearchDiscoveryOutcomeInput = Readonly<{
+  itemId: string;
+  ownerSubject: string;
+  leaseAttempt: number;
+  state: "COMPLETE" | "PARTIAL" | "AMBIGUOUS" | "NEEDS_PUBLIC_SEARCH";
+  checkedAt: string;
+  founders: readonly FounderResearchDiscoveryFounderInput[];
+}>;
+
+export type FounderResearchDiscoveryOutcome = Readonly<{
+  item: FounderResearchRunItem;
+  run: FounderResearchRun;
+  founders: readonly Readonly<{
+    person: Person;
+    runPerson: FounderResearchRunPerson;
+    officialCandidate?: FounderProfileCandidate;
+  }>[];
+}>;
+
 export type FounderResearchPersonSaveInput = Readonly<{
   runItemId: string;
   ownerSubject: string;
@@ -127,6 +168,28 @@ type FounderProfileCandidateEvidenceInput = Readonly<{
 
 export type FounderProfileCandidateSaveInput = FounderProfileCandidateEvidenceInput & Readonly<{
   searchQuery: string;
+}>;
+
+export type FounderProfileCandidateIdentityInput = Readonly<{
+  runId: string;
+  runItemId: string;
+  ownerSubject: string;
+  founderName: string;
+  founderRole: string;
+  profileUrl: string;
+  searchQuery: string;
+  evidenceUrl: string;
+  evidenceTitle?: string;
+  evidenceSnippet?: string;
+  evidenceMetadataJson: Record<string, unknown>;
+  checkedAt: string;
+  confidence: number;
+}>;
+
+export type FounderProfileCandidateIdentityResult = Readonly<{
+  person: Person;
+  runPerson: FounderResearchRunPerson;
+  candidate: FounderProfileCandidate;
 }>;
 
 export type FounderProfileOfficialInput = FounderProfileCandidateEvidenceInput & Readonly<{
@@ -1546,6 +1609,31 @@ export function createRepositories(database: Database) {
         )).limit(1);
         return row === undefined ? undefined : normalizeRowTimestamps(row);
       },
+      async listOutstandingItems(
+        runId: string,
+        ownerSubject: string
+      ): Promise<FounderResearchRunItem[]> {
+        if (!isUuid(runId) || !isUuid(ownerSubject)) {
+          return [];
+        }
+        const rows = await database.select().from(
+          founderResearchRunItems
+        ).where(and(
+          eq(founderResearchRunItems.runId, runId),
+          eq(
+            founderResearchRunItems.ownerSubject,
+            ownerSubject.toLowerCase()
+          ),
+          inArray(founderResearchRunItems.state, [
+            "NEEDS_PUBLIC_SEARCH",
+            "AMBIGUOUS"
+          ])
+        )).orderBy(
+          asc(founderResearchRunItems.companyId),
+          asc(founderResearchRunItems.id)
+        );
+        return normalizeRows(rows);
+      },
       async recomputeCounters(
         runId: string,
         ownerSubject: string
@@ -1708,6 +1796,207 @@ export function createRepositories(database: Database) {
         )).returning();
         return updated === undefined ? undefined : normalizeRowTimestamps(updated);
       },
+      async commitDiscoveryOutcome(
+        input: FounderResearchDiscoveryOutcomeInput
+      ): Promise<FounderResearchDiscoveryOutcome | undefined> {
+        if (
+          !isUuid(input.itemId)
+          || !isUuid(input.ownerSubject)
+          || !Number.isInteger(input.leaseAttempt)
+          || input.leaseAttempt < 1
+        ) {
+          return undefined;
+        }
+        const ownerSubject = input.ownerSubject.toLowerCase();
+        try {
+          return await serializableTransaction(database, async (transaction) => {
+          const [itemRow] = await transaction.select().from(
+            founderResearchRunItems
+          ).where(and(
+            eq(founderResearchRunItems.id, input.itemId),
+            eq(founderResearchRunItems.ownerSubject, ownerSubject)
+          )).limit(1).for("update");
+          const item = itemRow === undefined
+            ? undefined
+            : normalizeRowTimestamps(itemRow);
+          const operationAt = nowIso();
+          if (
+            item === undefined
+            || item.state !== "LEASED"
+            || item.attemptCount !== input.leaseAttempt
+            || item.leaseExpiresAt === null
+            || item.leaseExpiresAt <= operationAt
+          ) {
+            return undefined;
+          }
+          const checkedAt = assertIsoTimestamp(
+            "founderResearchItem.checkedAt",
+            input.checkedAt
+          );
+          const committedFounders: FounderResearchDiscoveryOutcome["founders"][number][] = [];
+          for (const founder of input.founders) {
+            const founderCheckedAt = assertIsoTimestamp(
+              "founderResearchFounder.checkedAt",
+              founder.checkedAt
+            );
+            const evidenceCheckedAt = assertIsoTimestamp(
+              "founderResearchFounder.evidence.checkedAt",
+              founder.officialEvidence.checkedAt
+            );
+            await transaction.insert(people).values({
+              id: randomUUID(),
+              companyId: item.companyId,
+              name: founder.name,
+              role: founder.role,
+              ...(founder.officialProfileUrl === undefined
+                ? {}
+                : { publicProfileUrl: founder.officialProfileUrl }),
+              checkedAt: founderCheckedAt,
+              createdAt: operationAt,
+              updatedAt: operationAt
+            }).onConflictDoUpdate({
+              target: [people.companyId, people.name, people.role],
+              set: {
+                ...(founder.officialProfileUrl === undefined
+                  ? {}
+                  : { publicProfileUrl: founder.officialProfileUrl }),
+                checkedAt: founderCheckedAt,
+                updatedAt: operationAt
+              }
+            });
+            const [personRow] = await transaction.select().from(people).where(and(
+              eq(people.companyId, item.companyId),
+              eq(people.name, founder.name),
+              eq(people.role, founder.role)
+            )).limit(1).for("update");
+            const person = requiredRow(personRow, "founder discovery person");
+
+            const [existingEvidence] = await transaction.select().from(evidence).where(and(
+              eq(evidence.personId, person.id),
+              eq(evidence.sourceUrl, founder.officialEvidence.sourceUrl),
+              eq(evidence.factType, "official_public_role")
+            )).limit(1).for("update");
+            if (existingEvidence === undefined) {
+              await transaction.insert(evidence).values({
+                id: randomUUID(),
+                personId: person.id,
+                sourceUrl: founder.officialEvidence.sourceUrl,
+                title: founder.officialEvidence.title ?? null,
+                factType: "official_public_role",
+                fact: founder.officialEvidence.fact,
+                checkedAt: evidenceCheckedAt,
+                confidence: founder.officialEvidence.confidence,
+                createdAt: operationAt
+              });
+            } else {
+              await transaction.update(evidence).set({
+                title: founder.officialEvidence.title ?? null,
+                fact: founder.officialEvidence.fact,
+                checkedAt: evidenceCheckedAt,
+                confidence: founder.officialEvidence.confidence
+              }).where(eq(evidence.id, existingEvidence.id));
+            }
+
+            const [existingRunPerson] = await transaction.select().from(
+              founderResearchRunPeople
+            ).where(and(
+              eq(founderResearchRunPeople.runItemId, item.id),
+              eq(founderResearchRunPeople.personId, person.id),
+              eq(founderResearchRunPeople.ownerSubject, ownerSubject)
+            )).limit(1).for("update");
+            const runPerson = existingRunPerson === undefined
+              ? requiredRow((await transaction.insert(
+                  founderResearchRunPeople
+                ).values({
+                  id: randomUUID(),
+                  runItemId: item.id,
+                  ownerSubject,
+                  personId: person.id,
+                  identityStatus: "VERIFIED",
+                  founderRoleMatch: founder.role,
+                  confidence: founder.confidence,
+                  createdAt: operationAt,
+                  updatedAt: operationAt
+                }).returning())[0], "founder research person")
+              : requiredRow((await transaction.update(
+                  founderResearchRunPeople
+                ).set({
+                  identityStatus: existingRunPerson.identityStatus === "CONFIRMED"
+                    ? "CONFIRMED"
+                    : "VERIFIED",
+                  founderRoleMatch: founder.role,
+                  confidence: founder.confidence,
+                  updatedAt: operationAt
+                }).where(eq(
+                  founderResearchRunPeople.id,
+                  existingRunPerson.id
+                )).returning())[0], "founder research person");
+            const officialCandidate = founder.officialProfileUrl === undefined
+              ? undefined
+              : await upsertFounderProfileCandidate(transaction, {
+                  runPersonId: runPerson.id,
+                  ownerSubject,
+                  profileUrl: founder.officialProfileUrl,
+                  sourceKind: "OFFICIAL_COMPANY",
+                  status: "VERIFIED",
+                  evidenceUrl: founder.officialEvidence.sourceUrl,
+                  evidenceTitle: founder.officialEvidence.title
+                    ?? "Official company page",
+                  evidenceSnippet: founder.officialEvidence.fact,
+                  evidenceMetadataJson: {
+                    source: "official_people_projection",
+                    linkedInFetched: false
+                  },
+                  checkedAt: evidenceCheckedAt,
+                  confidence: founder.confidence
+                });
+            committedFounders.push({
+              person: normalizeRowTimestamps(person),
+              runPerson: normalizeRowTimestamps(runPerson),
+              ...(officialCandidate === undefined ? {} : { officialCandidate })
+            });
+          }
+
+          const commitAt = nowIso();
+          const [updatedItem] = await transaction.update(
+            founderResearchRunItems
+          ).set({
+            state: input.state,
+            leaseExpiresAt: null,
+            errorCode: null,
+            errorSummary: null,
+            errorDetailJson: null,
+            checkedAt,
+            updatedAt: checkedAt
+          }).where(and(
+            eq(founderResearchRunItems.id, item.id),
+            eq(founderResearchRunItems.ownerSubject, ownerSubject),
+            eq(founderResearchRunItems.state, "LEASED"),
+            eq(founderResearchRunItems.attemptCount, input.leaseAttempt),
+            sql`${founderResearchRunItems.leaseExpiresAt} > ${commitAt}`
+          )).returning();
+          if (updatedItem === undefined) {
+            throw new FounderDiscoveryLeaseStaleError();
+          }
+          const run = await recomputeFounderResearchRun(
+            transaction,
+            item.runId,
+            ownerSubject,
+            checkedAt
+          );
+          return {
+            item: normalizeRowTimestamps(updatedItem),
+            run: requiredRow(run, "founder research run"),
+            founders: committedFounders
+          };
+          });
+        } catch (error) {
+          if (error instanceof FounderDiscoveryLeaseStaleError) {
+            return undefined;
+          }
+          throw error;
+        }
+      },
       async failItem(
         input: FounderResearchFailItemInput
       ): Promise<FounderResearchRunItem | undefined> {
@@ -1812,6 +2101,133 @@ export function createRepositories(database: Database) {
       }
     },
     founderProfileCandidates: {
+      async establishCandidateIdentity(
+        input: FounderProfileCandidateIdentityInput
+      ): Promise<FounderProfileCandidateIdentityResult | undefined> {
+        if (
+          !isUuid(input.runId)
+          || !isUuid(input.runItemId)
+          || !isUuid(input.ownerSubject)
+        ) {
+          return undefined;
+        }
+        const ownerSubject = input.ownerSubject.toLowerCase();
+        return serializableTransaction(database, async (transaction) => {
+          const [item] = await transaction.select().from(
+            founderResearchRunItems
+          ).where(and(
+            eq(founderResearchRunItems.id, input.runItemId),
+            eq(founderResearchRunItems.runId, input.runId),
+            eq(founderResearchRunItems.ownerSubject, ownerSubject),
+            inArray(founderResearchRunItems.state, [
+              "NEEDS_PUBLIC_SEARCH",
+              "AMBIGUOUS"
+            ])
+          )).limit(1).for("update");
+          if (item === undefined) {
+            return undefined;
+          }
+          const operationAt = nowIso();
+          await transaction.insert(people).values({
+            id: randomUUID(),
+            companyId: item.companyId,
+            name: input.founderName,
+            role: input.founderRole,
+            checkedAt: input.checkedAt,
+            createdAt: operationAt,
+            updatedAt: operationAt
+          }).onConflictDoUpdate({
+            target: [people.companyId, people.name, people.role],
+            set: {
+              checkedAt: input.checkedAt,
+              updatedAt: operationAt
+            }
+          });
+          const [personRow] = await transaction.select().from(people).where(and(
+            eq(people.companyId, item.companyId),
+            eq(people.name, input.founderName),
+            eq(people.role, input.founderRole)
+          )).limit(1).for("update");
+          const person = requiredRow(personRow, "candidate founder person");
+
+          const [existingEvidence] = await transaction.select().from(
+            evidence
+          ).where(and(
+            eq(evidence.personId, person.id),
+            eq(evidence.sourceUrl, input.evidenceUrl),
+            eq(evidence.factType, "candidate_public_role")
+          )).limit(1).for("update");
+          const fact = input.evidenceSnippet
+            ?? input.evidenceTitle
+            ?? `${input.founderName} — ${input.founderRole}`;
+          if (existingEvidence === undefined) {
+            await transaction.insert(evidence).values({
+              id: randomUUID(),
+              personId: person.id,
+              sourceUrl: input.evidenceUrl,
+              title: input.evidenceTitle ?? null,
+              factType: "candidate_public_role",
+              fact,
+              checkedAt: input.checkedAt,
+              confidence: input.confidence,
+              createdAt: operationAt
+            });
+          } else {
+            await transaction.update(evidence).set({
+              title: input.evidenceTitle ?? null,
+              fact,
+              checkedAt: input.checkedAt,
+              confidence: input.confidence
+            }).where(eq(evidence.id, existingEvidence.id));
+          }
+
+          const [existingRunPerson] = await transaction.select().from(
+            founderResearchRunPeople
+          ).where(and(
+            eq(founderResearchRunPeople.runItemId, item.id),
+            eq(founderResearchRunPeople.personId, person.id),
+            eq(founderResearchRunPeople.ownerSubject, ownerSubject)
+          )).limit(1).for("update");
+          const runPerson = existingRunPerson === undefined
+            ? requiredRow((await transaction.insert(
+                founderResearchRunPeople
+              ).values({
+                id: randomUUID(),
+                runItemId: item.id,
+                ownerSubject,
+                personId: person.id,
+                identityStatus: "CANDIDATE",
+                founderRoleMatch: input.founderRole,
+                confidence: input.confidence,
+                createdAt: operationAt,
+                updatedAt: operationAt
+              }).returning())[0], "candidate founder run person")
+            : normalizeRowTimestamps(existingRunPerson);
+          const candidate = await upsertFounderProfileCandidate(transaction, {
+            runPersonId: runPerson.id,
+            ownerSubject,
+            profileUrl: input.profileUrl,
+            sourceKind: "PUBLIC_SEARCH",
+            status: "CANDIDATE",
+            searchQuery: input.searchQuery,
+            evidenceUrl: input.evidenceUrl,
+            ...(input.evidenceTitle === undefined
+              ? {}
+              : { evidenceTitle: input.evidenceTitle }),
+            ...(input.evidenceSnippet === undefined
+              ? {}
+              : { evidenceSnippet: input.evidenceSnippet }),
+            evidenceMetadataJson: input.evidenceMetadataJson,
+            checkedAt: input.checkedAt,
+            confidence: input.confidence
+          });
+          return {
+            person: normalizeRowTimestamps(person),
+            runPerson: normalizeRowTimestamps(runPerson),
+            candidate
+          };
+        }, "founder_profile_candidates_owner_person_url_unique");
+      },
       async saveCandidate(
         input: FounderProfileCandidateSaveInput
       ): Promise<FounderProfileCandidate> {

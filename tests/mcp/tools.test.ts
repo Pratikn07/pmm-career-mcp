@@ -200,9 +200,14 @@ function createServerWithClock(
 function dependencies(): CareerMcpDependencies {
   return {
     ycProvider: { searchYcCompanies: async () => [] },
-    peopleDiscovery: { discoverPublicPeople: async () => ({
-      people: [], evidence: [], checkedAt: "2026-07-17T00:00:00.000Z", coverage: "authoritative-pages-only", warnings: []
-    }) },
+    peopleDiscovery: {
+      projectOfficialPeople: async () => ({
+        people: [], evidence: [], checkedAt: "2026-07-17T00:00:00.000Z", coverage: "authoritative-pages-only", warnings: []
+      }),
+      discoverPublicPeople: async () => ({
+        people: [], evidence: [], checkedAt: "2026-07-17T00:00:00.000Z", coverage: "authoritative-pages-only", warnings: []
+      })
+    },
     jobDiscovery: { findPmmOpportunities: async () => ({
       opportunities: [], checkedAt: "2026-07-17T00:00:00.000Z", warnings: []
     }) },
@@ -337,6 +342,13 @@ function successfulDependencies(): CareerMcpDependencies {
       }]
     },
     peopleDiscovery: {
+      projectOfficialPeople: async () => ({
+        people: [],
+        evidence: [],
+        checkedAt: timestamp,
+        coverage: "authoritative-pages-only",
+        warnings: []
+      }),
       discoverPublicPeople: async () => ({
         people: [scoringTarget().person],
         evidence: scoringTarget().person.evidence,

@@ -112,6 +112,39 @@ describe("public people discovery", () => {
     }
   });
 
+  it("projects hardened official people without persisting discovery rows", async () => {
+    const company = await database.companies.upsert({
+      ycId: "project-official-people",
+      name: "Project Official People",
+      websiteUrl: TEAM_URL,
+      checkedAt: "2026-07-15T00:00:00.000Z"
+    });
+    const service = createPeopleDiscovery({
+      repositories: database,
+      fetchPage: async (url) => fetchedPage(url, `
+        <article class="team-member">
+          <h2>Ada Projection</h2><p>Co-founder & CEO</p>
+          <a href="https://www.linkedin.com/in/ada-projection">LinkedIn</a>
+        </article>
+      `, "Team")
+    });
+
+    const result = await service.projectOfficialPeople(company.id);
+
+    expect(result.people).toEqual([expect.objectContaining({
+      companyId: company.id,
+      name: "Ada Projection",
+      role: "Co-founder & CEO",
+      publicProfileUrl: "https://www.linkedin.com/in/ada-projection",
+      evidence: [expect.objectContaining({
+        sourceKind: "OFFICIAL_COMPANY",
+        sourceUrl: TEAM_URL,
+        checkedAt: CHECKED_AT
+      })]
+    })]);
+    expect(await database.people.listByCompany(company.id)).toEqual([]);
+  });
+
   it("returns successful official-page findings with a partial warning when another source fails", async () => {
     const company = (await database.companies.upsert({
       ycId: "partial-people",
@@ -293,6 +326,17 @@ describe("public people discovery", () => {
         `, "Acme leadership interview");
       }
     });
+
+    const projection = await service.projectOfficialPeople(company.id);
+
+    expect(projection.people).toEqual([]);
+    expect(await database.people.listByCompany(company.id)).toEqual([]);
+    expect(events).toEqual([
+      `fetch:${HOME_URL}`,
+      "search",
+      "fetch:https://press.example/acme-team"
+    ]);
+    events.length = 0;
 
     const result = await service.discoverPublicPeople(company.id);
 

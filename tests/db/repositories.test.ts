@@ -758,6 +758,117 @@ describe("founder research repositories", () => {
     }]);
   });
 
+  it("atomically rejects an expired discovery outcome before any founder data is written", async () => {
+    const created = await addFounderRun(["Atomic Stale"]);
+    const [leased] = await db.founderResearchRuns.leaseNextItems({
+      runId: created.run.id,
+      ownerSubject: OWNER,
+      maxItems: 1,
+      leasedAt: STARTED_AT,
+      leaseExpiresAt: LEASE_EXPIRES_AT
+    });
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date(LEASE_EXPIRES_AT));
+      const committed = await db.founderResearchRuns.commitDiscoveryOutcome({
+        itemId: leased!.id,
+        ownerSubject: OWNER,
+        leaseAttempt: leased!.attemptCount,
+        state: "COMPLETE",
+        checkedAt: "2099-07-24T16:04:59.000Z",
+        founders: [{
+          name: "Stale Founder",
+          role: "Founder",
+          checkedAt: "2099-07-24T16:04:59.000Z",
+          confidence: 0.95,
+          officialEvidence: {
+            sourceUrl: "https://atomicstale.example/team",
+            title: "Leadership",
+            fact: "Stale Founder — Founder",
+            checkedAt: "2099-07-24T16:04:59.000Z",
+            confidence: 0.95
+          },
+          officialProfileUrl: "https://www.linkedin.com/in/stale-founder"
+        }]
+      });
+
+      expect(committed).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(await db.people.listByCompany(created.companies[0]!.id)).toEqual([]);
+    expect(await db.founderResearchPeople.listForRun(created.run.id, OWNER)).toEqual([]);
+    expect(await queryTestDatabase<{ count: number }>(db, `
+      select count(*)::int as count
+      from career_mcp.founder_profile_candidates
+    `)).toEqual([{ count: 0 }]);
+  });
+
+  it("atomically commits official founders, evidence, profiles, and the leased item", async () => {
+    const created = await addFounderRun(["Atomic Commit"]);
+    const [leased] = await db.founderResearchRuns.leaseNextItems({
+      runId: created.run.id,
+      ownerSubject: OWNER,
+      maxItems: 1,
+      leasedAt: STARTED_AT,
+      leaseExpiresAt: ACTIVE_LEASE_EXPIRES_AT
+    });
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date(CHECKED_AT));
+      const committed = await db.founderResearchRuns.commitDiscoveryOutcome({
+        itemId: leased!.id,
+        ownerSubject: OWNER,
+        leaseAttempt: leased!.attemptCount,
+        state: "COMPLETE",
+        checkedAt: CHECKED_AT,
+        founders: [{
+          name: "Atomic Founder",
+          role: "Co-founder & CEO",
+          checkedAt: CHECKED_AT,
+          confidence: 0.97,
+          officialEvidence: {
+            sourceUrl: "https://atomiccommit.example/team",
+            title: "Leadership",
+            fact: "Atomic Founder — Co-founder & CEO",
+            checkedAt: CHECKED_AT,
+            confidence: 0.97
+          },
+          officialProfileUrl: "https://www.linkedin.com/in/atomic-founder"
+        }]
+      });
+
+      expect(committed).toMatchObject({
+        item: { state: "COMPLETE", checkedAt: CHECKED_AT },
+        run: { state: "COMPLETE", completeCount: 1, processedCount: 1 },
+        founders: [{
+          person: {
+            name: "Atomic Founder",
+            publicProfileUrl: "https://www.linkedin.com/in/atomic-founder"
+          },
+          runPerson: {
+            identityStatus: "VERIFIED",
+            founderRoleMatch: "Co-founder & CEO"
+          },
+          officialCandidate: {
+            status: "VERIFIED",
+            sourceKind: "OFFICIAL_COMPANY",
+            profileUrl: "https://www.linkedin.com/in/atomic-founder"
+          }
+        }]
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+    const [savedPerson] = await db.people.listByCompany(created.companies[0]!.id);
+    expect((await db.people.getWithEvidence(savedPerson!.id))?.evidence).toEqual([
+      expect.objectContaining({
+        factType: "official_public_role",
+        sourceUrl: "https://atomiccommit.example/team"
+      })
+    ]);
+  });
+
   it("preserves completedAt when recomputing an unchanged terminal run", async () => {
     const created = await addFounderRun(["Stable Completion"]);
     const [leased] = await db.founderResearchRuns.leaseNextItems({

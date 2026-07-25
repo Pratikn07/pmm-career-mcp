@@ -18,6 +18,8 @@ import type { FounderRoleValidationContext } from "./types.js";
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 const UNSAFE_CONTROL = /[\p{Cc}\p{Cf}]/u;
+const PROMPT_INJECTION_PATTERN =
+  /\b(?:ignore|disregard|override)\b.{0,40}\b(?:instructions?|rules?|prompt)\b|\b(?:system|developer)\s+prompt\b|\btool\s+call\b/iu;
 const NAME_TOKEN = /[\p{L}\p{N}][\p{L}\p{N}\p{M}'’\p{Pd}-]*/gu;
 const WHITESPACE = /\s+/gu;
 const EVIDENCE_CLAUSE_BOUNDARY =
@@ -70,6 +72,11 @@ export type SaveFounderProfileCandidateInput = Readonly<{
   linkedInNotFetched: true;
 }>;
 
+export type SaveFounderProfileCandidateForItemInput = Omit<
+  SaveFounderProfileCandidateInput,
+  "runPersonId"
+>;
+
 export type FounderProfileCandidateDecisionInput = Readonly<{
   candidateId: string;
   decision: "CONFIRM" | "REJECT";
@@ -83,6 +90,9 @@ export type FounderCandidateResult = Readonly<{
 }>;
 
 export type FounderCandidateService = Readonly<{
+  saveCandidateForRunItem(
+    input: SaveFounderProfileCandidateForItemInput
+  ): Promise<FounderCandidateResult>;
   saveCandidate(
     input: SaveFounderProfileCandidateInput
   ): Promise<FounderCandidateResult>;
@@ -141,7 +151,7 @@ function validateBoundedString(
   field: string,
   value: unknown,
   limits: StringLimits,
-  options: { optional?: boolean } = {}
+  options: { optional?: boolean; rejectPromptInjection?: boolean } = {}
 ): string | undefined {
   if (value === undefined && options.optional === true) {
     return undefined;
@@ -155,6 +165,12 @@ function validateBoundedString(
   }
   if (UNSAFE_CONTROL.test(value)) {
     throw validationError(field, "unsafe_characters", limits);
+  }
+  if (
+    options.rejectPromptInjection === true
+    && PROMPT_INJECTION_PATTERN.test(value)
+  ) {
+    throw validationError(field, "unsafe_prompt_text", limits);
   }
   if (countCodePoints(value) > limits.characters) {
     throw validationError(field, "character_count", limits);
@@ -599,6 +615,144 @@ export function createFounderCandidateService(
   }
 
   return Object.freeze({
+    async saveCandidateForRunItem(
+      input: SaveFounderProfileCandidateForItemInput
+    ): Promise<FounderCandidateResult> {
+      if (typeof input !== "object" || input === null) {
+        throw validationError("input", "must_be_object");
+      }
+      const requestNow = trustedNow(now());
+      const runId = validateUuid("runId", input.runId);
+      const runItemId = validateUuid("runItemId", input.runItemId);
+      const founderName = validateBoundedString(
+        "founderName",
+        input.founderName,
+        CANDIDATE_FIELD_LIMITS.founderName,
+        { rejectPromptInjection: true }
+      )!;
+      const founderSignature = normalizedNameSignature(founderName);
+      if (founderSignature === undefined) {
+        throw validationError("founderName", "full_name_required");
+      }
+      if (
+        typeof input.founderRole !== "string"
+        || PROMPT_INJECTION_PATTERN.test(input.founderRole)
+      ) {
+        throw validationError(
+          "founderRole",
+          "unsafe_or_invalid_role",
+          CANDIDATE_FIELD_LIMITS.founderRole
+        );
+      }
+      const submittedRole = validateFounderRole(input.founderRole);
+      if (!submittedRole.ok || submittedRole.basis !== "EXPLICIT_FOUNDER_ROLE") {
+        throw evidenceMismatch("founderRole", "explicit_founder_role_required");
+      }
+      const searchQuery = validateBoundedString(
+        "searchQuery",
+        input.searchQuery,
+        CANDIDATE_FIELD_LIMITS.searchQuery,
+        { rejectPromptInjection: true }
+      )!;
+      const resultTitle = validateBoundedString(
+        "resultTitle",
+        input.resultTitle,
+        CANDIDATE_FIELD_LIMITS.resultTitle,
+        { optional: true, rejectPromptInjection: true }
+      );
+      const resultSnippet = validateBoundedString(
+        "resultSnippet",
+        input.resultSnippet,
+        CANDIDATE_FIELD_LIMITS.resultSnippet,
+        { optional: true, rejectPromptInjection: true }
+      );
+      if (resultTitle === undefined && resultSnippet === undefined) {
+        throw validationError("resultEvidence", "title_or_snippet_required");
+      }
+      validateNotFetched(input.linkedInNotFetched);
+      const checkedAt = validateCheckedAt(input.checkedAt, requestNow);
+      const confidence = validateConfidence(input.confidence);
+      const { normalizedProfileUrl, exactResultUrl } = validateCandidateUrls(
+        input.candidateProfileUrl,
+        input.resultUrl
+      );
+
+      const context = await withPersistenceMapping("read", async () => {
+        const run = await database.founderResearchRuns.getOwned(runId, subject);
+        if (run === undefined) {
+          throw notFound();
+        }
+        const item = (
+          await database.founderResearchRuns.listOutstandingItems(runId, subject)
+        ).find(({ id }) => id === runItemId);
+        if (item === undefined) {
+          throw notFound();
+        }
+        const company = await database.companies.get(item.companyId);
+        if (company === undefined) {
+          throw notFound();
+        }
+        return { company, item };
+      });
+      const founderEvidenceTokens = comparableTokens(founderName);
+      const companyEvidenceTokens = companyIdentityTokens(context.company.name);
+      const fieldMatches = [
+        matchResultField(
+          resultTitle,
+          founderEvidenceTokens,
+          companyEvidenceTokens
+        ),
+        matchResultField(
+          resultSnippet,
+          founderEvidenceTokens,
+          companyEvidenceTokens
+        )
+      ];
+      if (!fieldMatches.some(({ founder }) => founder)) {
+        throw evidenceMismatch("resultEvidence", "founder_identity_mismatch");
+      }
+      if (!fieldMatches.some(({ company }) => company)) {
+        throw evidenceMismatch("resultEvidence", "company_context_mismatch");
+      }
+      if (!fieldMatches.some(({ bound }) => bound)) {
+        throw evidenceMismatch("resultEvidence", "entity_binding_mismatch");
+      }
+
+      const established = await withPersistenceMapping("write", async () => (
+        await database.founderProfileCandidates.establishCandidateIdentity({
+          runId,
+          runItemId,
+          ownerSubject: subject,
+          founderName: normalizeWhitespace(founderName),
+          founderRole: submittedRole.normalizedRole,
+          profileUrl: normalizedProfileUrl,
+          searchQuery,
+          evidenceUrl: exactResultUrl,
+          ...(resultTitle === undefined ? {} : { evidenceTitle: resultTitle }),
+          ...(resultSnippet === undefined ? {} : { evidenceSnippet: resultSnippet }),
+          evidenceMetadataJson: {
+            linkedInNotFetched: true,
+            submittedFounderName: founderName,
+            submittedFounderRole: input.founderRole,
+            founderRoleBasis: submittedRole.basis,
+            companyId: context.company.id,
+            runId,
+            runItemId
+          },
+          checkedAt,
+          confidence
+        })
+      ));
+      if (established === undefined) {
+        throw notFound();
+      }
+      const state = await loadCandidateState(established.runPerson.id);
+      return Object.freeze({
+        candidate: established.candidate,
+        ...state
+      });
+    },
+
     async saveCandidate(
       input: SaveFounderProfileCandidateInput
     ): Promise<FounderCandidateResult> {
@@ -610,12 +764,14 @@ export function createFounderCandidateService(
       const founderName = validateBoundedString(
         "founderName",
         input.founderName,
-        CANDIDATE_FIELD_LIMITS.founderName
+        CANDIDATE_FIELD_LIMITS.founderName,
+        { rejectPromptInjection: true }
       )!;
       const searchQuery = validateBoundedString(
         "searchQuery",
         input.searchQuery,
-        CANDIDATE_FIELD_LIMITS.searchQuery
+        CANDIDATE_FIELD_LIMITS.searchQuery,
+        { rejectPromptInjection: true }
       )!;
       const resultTitle = validateBoundedString(
         "resultTitle",
@@ -650,10 +806,13 @@ export function createFounderCandidateService(
       ) {
         throw evidenceMismatch("founderName", "persisted_identity_mismatch");
       }
-      if (typeof input.founderRole !== "string") {
+      if (
+        typeof input.founderRole !== "string"
+        || PROMPT_INJECTION_PATTERN.test(input.founderRole)
+      ) {
         throw validationError(
           "founderRole",
-          "invalid_role_type",
+          "unsafe_or_invalid_role",
           CANDIDATE_FIELD_LIMITS.founderRole
         );
       }

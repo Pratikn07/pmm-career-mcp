@@ -2,8 +2,7 @@ import type { CareerDatabase } from "../db/client.js";
 import type {
   Company,
   FounderResearchRun,
-  FounderResearchRunItem,
-  PersonWithEvidence as StoredPersonWithEvidence
+  FounderResearchRunItem
 } from "../db/repositories.js";
 import { DomainError } from "../domain/errors.js";
 import {
@@ -13,8 +12,8 @@ import type { PeopleDiscoveryService } from "../research/people-discovery.js";
 import type {
   CompanyResult,
   CompanySearchQuery,
-  Evidence,
-  PersonWithEvidence
+  OfficialEvidenceProjection,
+  OfficialPersonProjection
 } from "../research/types.js";
 import { validateFounderRole } from "./founder-role.js";
 import { validateNonFetchingLinkedInProfileUrl } from "./profile-url.js";
@@ -22,7 +21,6 @@ import { validateNonFetchingLinkedInProfileUrl } from "./profile-url.js";
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 const UNSAFE_CONTROL = /[\p{Cc}\p{Cf}]/u;
-const UNSAFE_CONTROL_GLOBAL = /[\p{Cc}\p{Cf}]/gu;
 const WHITESPACE = /\s+/gu;
 const PROMPT_INJECTION_PATTERN =
   /\b(?:ignore|disregard|override)\b.{0,40}\b(?:instructions?|rules?|prompt)\b|\b(?:system|developer)\s+prompt\b|\btool\s+call\b/iu;
@@ -108,18 +106,23 @@ type PersistedYcProvider = Readonly<{
 export type FounderResearchRunDependencies = Readonly<{
   subject: string;
   ycProvider: PersistedYcProvider;
-  peopleDiscovery: PeopleDiscoveryService;
+  peopleDiscovery: Pick<PeopleDiscoveryService, "projectOfficialPeople">;
   now?: () => Date;
   concurrencyProbe?: (active: number) => void;
 }>;
 
-type OfficialFounder = Readonly<{
-  person: PersonWithEvidence | StoredPersonWithEvidence;
+type PreparedOfficialFounder = Readonly<{
+  person: OfficialPersonProjection;
+  name: string;
   normalizedRole: string;
-  storedPersonId: string;
+  officialEvidence: OfficialEvidenceProjection;
+  officialProfileUrl?: string;
+}>;
+
+type PublicTaskFounder = Readonly<{
   runPersonId: string;
-  officialEvidence?: Evidence | StoredPersonWithEvidence["evidence"][number];
-  verifiedProfile: boolean;
+  name: string;
+  normalizedRole: string;
 }>;
 
 function validationError(field: string, reason: string): DomainError {
@@ -272,15 +275,19 @@ function selectCompanies(
   return selected;
 }
 
-function safeTaskText(value: string, maximum: number): string {
-  return value
-    .normalize("NFC")
-    .replace(UNSAFE_CONTROL_GLOBAL, "")
-    .replace(/["`\\<>[\]{}]/gu, " ")
-    .replace(/\b(?:ignore|disregard|override)\s+(?:all\s+)?(?:prior|previous)?\s*(?:rules|instructions?)\b/giu, " ")
-    .replace(WHITESPACE, " ")
-    .trim()
-    .slice(0, maximum);
+function safeTaskText(value: string, maximum: number): string | undefined {
+  if (UNSAFE_CONTROL.test(value) || PROMPT_INJECTION_PATTERN.test(value)) {
+    return undefined;
+  }
+  const normalized = value.normalize("NFC").replace(WHITESPACE, " ").trim();
+  if (
+    normalized === ""
+    || Array.from(normalized).length > maximum
+    || Buffer.byteLength(normalized, "utf8") > maximum * 4
+  ) {
+    return undefined;
+  }
+  return normalized;
 }
 
 function safeWebsiteUrl(value: string | null): string | undefined {
@@ -330,7 +337,7 @@ function isFreshTimestamp(value: string | null, now: Date): boolean {
     && current - checked <= FRESH_EVIDENCE_MS;
 }
 
-function founderRole(person: Pick<PersonWithEvidence, "role">): string | undefined {
+function founderRole(person: Pick<OfficialPersonProjection, "role">): string | undefined {
   const validation = validateFounderRole(person.role);
   return validation.ok ? validation.normalizedRole : undefined;
 }
@@ -339,10 +346,8 @@ function normalizedPersonName(value: string): string {
   return value.normalize("NFC").replace(WHITESPACE, " ").trim().toLocaleLowerCase("en-US");
 }
 
-function confidenceFor(
-  person: PersonWithEvidence | StoredPersonWithEvidence
-): number {
-  const direct = "confidence" in person && typeof person.confidence === "number"
+function confidenceFor(person: OfficialPersonProjection): number {
+  const direct = typeof person.confidence === "number"
     ? person.confidence
     : undefined;
   const evidenceConfidence = person.evidence[0]?.confidence;
@@ -350,43 +355,6 @@ function confidenceFor(
   return Number.isFinite(value)
     ? Math.min(1, Math.max(0, value))
     : 0.9;
-}
-
-async function currentFreshOfficialFounders(
-  database: CareerDatabase,
-  company: Company,
-  now: Date
-): Promise<StoredPersonWithEvidence[] | undefined> {
-  const current = await database.people.listByCompany(company.id);
-  const founders: StoredPersonWithEvidence[] = [];
-  let sawStaleFounder = false;
-  for (const person of current) {
-    if (founderRole(person) === undefined) {
-      continue;
-    }
-    const full = await database.people.getWithEvidence(person.id);
-    if (full === undefined) {
-      sawStaleFounder = true;
-      continue;
-    }
-    const officialEvidence = full.evidence.find((item) => (
-      item.factType === "public_role"
-      && sameOfficialOrigin(item.sourceUrl, company.websiteUrl)
-      && isFreshTimestamp(item.checkedAt, now)
-    ));
-    if (
-      officialEvidence === undefined
-      || !isFreshTimestamp(full.checkedAt, now)
-    ) {
-      sawStaleFounder = true;
-      continue;
-    }
-    founders.push(full);
-  }
-  if (sawStaleFounder || founders.length === 0) {
-    return undefined;
-  }
-  return founders;
 }
 
 function publicSearchQueries(input: {
@@ -400,6 +368,12 @@ function publicSearchQueries(input: {
   const founderName = input.founderName === undefined
     ? undefined
     : safeTaskText(input.founderName, PUBLIC_TASK_LIMITS.personName);
+  if (
+    companyName === undefined
+    || (input.founderName !== undefined && founderName === undefined)
+  ) {
+    return [];
+  }
   const queries = founderName === undefined
     ? [
         `site:linkedin.com/in ${companyName} founder`,
@@ -416,8 +390,8 @@ function createPublicTask(input: {
   item: FounderResearchRunItem;
   company: Company;
   reason: FounderPublicSearchTask["reason"];
-  founder?: OfficialFounder;
-}): FounderPublicSearchTask {
+  founder?: PublicTaskFounder;
+}): FounderPublicSearchTask | undefined {
   const companyName = safeTaskText(
     input.company.name,
     PUBLIC_TASK_LIMITS.companyName
@@ -425,7 +399,7 @@ function createPublicTask(input: {
   const knownFounderName = input.founder === undefined
     ? undefined
     : safeTaskText(
-        input.founder.person.name,
+        input.founder.name,
         PUBLIC_TASK_LIMITS.personName
       );
   const knownFounderRole = input.founder === undefined
@@ -435,6 +409,21 @@ function createPublicTask(input: {
         PUBLIC_TASK_LIMITS.role
       );
   const officialWebsiteUrl = safeWebsiteUrl(input.company.websiteUrl);
+  if (
+    companyName === undefined
+    || (input.founder !== undefined && (
+      knownFounderName === undefined || knownFounderRole === undefined
+    ))
+  ) {
+    return undefined;
+  }
+  const suggestedQueries = publicSearchQueries({
+    companyName,
+    ...(knownFounderName === undefined ? {} : { founderName: knownFounderName })
+  });
+  if (suggestedQueries.length === 0) {
+    return undefined;
+  }
   return Object.freeze({
     runItemId: input.item.id,
     companyId: input.company.id,
@@ -444,13 +433,10 @@ function createPublicTask(input: {
       ? {}
       : {
           knownPersonId: input.founder.runPersonId,
-          knownFounderName: knownFounderName!,
-          knownFounderRole: knownFounderRole!
+          knownFounderName: knownFounderName as string,
+          knownFounderRole: knownFounderRole as string
         }),
-    suggestedQueries: publicSearchQueries({
-      companyName,
-      ...(knownFounderName === undefined ? {} : { founderName: knownFounderName })
-    }),
+    suggestedQueries,
     reason: input.reason
   });
 }
@@ -509,69 +495,45 @@ export function createFounderResearchRunService(
     }
   }
 
-  async function saveOfficialFounders(
-    item: FounderResearchRunItem,
+  function prepareOfficialFounders(
     company: Company,
-    people: readonly (PersonWithEvidence | StoredPersonWithEvidence)[],
+    people: readonly OfficialPersonProjection[],
     checkedAt: Date
-  ): Promise<OfficialFounder[]> {
-    const founders: OfficialFounder[] = [];
+  ): PreparedOfficialFounder[] {
+    const founders: PreparedOfficialFounder[] = [];
     for (const person of people) {
       const normalizedRole = founderRole(person);
       if (normalizedRole === undefined) {
         continue;
       }
-      const profileValidation = person.publicProfileUrl === null
-        || person.publicProfileUrl === undefined
-        ? undefined
-        : validateNonFetchingLinkedInProfileUrl(person.publicProfileUrl);
-      const validProfile = profileValidation?.ok === true
-        ? profileValidation.value
-        : undefined;
-      const storedPerson = await database.people.upsert({
-        companyId: company.id,
-        name: safeTaskText(person.name, PUBLIC_TASK_LIMITS.personName),
-        role: normalizedRole,
-        checkedAt: person.checkedAt ?? person.evidence[0]?.checkedAt ?? trustedNow(now).toISOString(),
-        ...(validProfile === undefined ? {} : { publicProfileUrl: validProfile })
-      });
-      const runPerson = await database.founderResearchPeople.saveOfficial({
-        runItemId: item.id,
-        ownerSubject: subject,
-        personId: storedPerson.id,
-        founderRoleMatch: normalizedRole,
-        confidence: confidenceFor(person)
-      });
       const officialEvidence = person.evidence.find((entry) => (
-        sameOfficialOrigin(entry.sourceUrl, company.websiteUrl)
+        entry.sourceKind === "OFFICIAL_COMPANY"
+        && sameOfficialOrigin(entry.sourceUrl, company.websiteUrl)
         && isFreshTimestamp(entry.checkedAt, checkedAt)
       ));
-      let verifiedProfile = false;
-      if (validProfile !== undefined && officialEvidence !== undefined) {
-        await database.founderProfileCandidates.recordOfficial({
-          runPersonId: runPerson.id,
-          ownerSubject: subject,
-          profileUrl: validProfile,
-          sourceKind: "OFFICIAL_COMPANY",
-          evidenceUrl: officialEvidence.sourceUrl,
-          evidenceTitle: officialEvidence.title || "Official company page",
-          evidenceSnippet: `${safeTaskText(person.name, 200)} — ${normalizedRole}`,
-          evidenceMetadataJson: {
-            source: "official_people_discovery",
-            linkedInFetched: false
-          },
-          checkedAt: officialEvidence.checkedAt,
-          confidence: confidenceFor(person)
-        });
-        verifiedProfile = true;
+      if (
+        officialEvidence === undefined
+        || !isFreshTimestamp(person.checkedAt, checkedAt)
+      ) {
+        continue;
       }
+      const name = safeTaskText(person.name, PUBLIC_TASK_LIMITS.personName);
+      const safeRole = safeTaskText(normalizedRole, PUBLIC_TASK_LIMITS.role);
+      if (name === undefined || safeRole === undefined) {
+        continue;
+      }
+      const profileValidation = person.publicProfileUrl === undefined
+        ? undefined
+        : validateNonFetchingLinkedInProfileUrl(person.publicProfileUrl);
+      const officialProfileUrl = profileValidation?.ok === true
+        ? profileValidation.value
+        : undefined;
       founders.push({
         person,
-        normalizedRole,
-        storedPersonId: storedPerson.id,
-        runPersonId: runPerson.id,
-        ...(officialEvidence === undefined ? {} : { officialEvidence }),
-        verifiedProfile
+        name,
+        normalizedRole: safeRole,
+        officialEvidence,
+        ...(officialProfileUrl === undefined ? {} : { officialProfileUrl })
       });
     }
     return founders;
@@ -592,43 +554,19 @@ export function createFounderResearchRunService(
           { entity: "company" }
         );
       }
-      const requestNow = trustedNow(now);
-      const reusable = await currentFreshOfficialFounders(
-        database,
-        company,
-        requestNow
+      const result = await dependencies.peopleDiscovery.projectOfficialPeople(
+        company.id
       );
-      const result = reusable === undefined
-        ? await dependencies.peopleDiscovery.discoverPublicPeople(company.id)
-        : undefined;
-      const people = reusable ?? result!.people;
       const afterDiscovery = trustedNow(now);
-      if (
-        item.leaseExpiresAt === null
-        || new Date(item.leaseExpiresAt).getTime() <= afterDiscovery.getTime()
-      ) {
-        return {
-          item: {
-            runItemId: item.id,
-            companyId: company.id,
-            leaseAttempt: item.attemptCount,
-            state: "STALE_ATTEMPT",
-            founderCount: 0,
-            verifiedProfileCount: 0
-          },
-          publicSearchTasks: []
-        };
-      }
-      const founders = await saveOfficialFounders(
-        item,
+      const founders = prepareOfficialFounders(
         company,
-        people,
+        result.people,
         afterDiscovery
       );
       const duplicateNames = new Set<string>();
       const seenNames = new Set<string>();
       for (const founder of founders) {
-        const name = normalizedPersonName(founder.person.name);
+        const name = normalizedPersonName(founder.name);
         if (seenNames.has(name)) {
           duplicateNames.add(name);
         }
@@ -643,24 +581,21 @@ export function createFounderResearchRunService(
           item,
           company,
           reason: "AMBIGUOUS"
-        })];
+        })].filter((task): task is FounderPublicSearchTask => task !== undefined);
       } else if (founders.length === 0) {
         state = "NEEDS_PUBLIC_SEARCH";
         tasks = [createPublicTask({
           item,
           company,
           reason: "FOUNDER_NOT_FOUND"
-        })];
+        })].filter((task): task is FounderPublicSearchTask => task !== undefined);
       } else {
-        const missingProfiles = founders.filter(({ verifiedProfile }) => !verifiedProfile);
+        const missingProfiles = founders.filter(
+          ({ officialProfileUrl }) => officialProfileUrl === undefined
+        );
         if (missingProfiles.length > 0) {
           state = "NEEDS_PUBLIC_SEARCH";
-          tasks = missingProfiles.map((founder) => createPublicTask({
-            item,
-            company,
-            founder,
-            reason: "PROFILE_URL_MISSING"
-          }));
+          tasks = [];
         } else if ((result?.warnings.length ?? 0) > 0) {
           state = "PARTIAL";
           tasks = [];
@@ -670,14 +605,30 @@ export function createFounderResearchRunService(
         }
       }
 
-      const completed = await database.founderResearchRuns.completeItem({
+      const committed = await database.founderResearchRuns.commitDiscoveryOutcome({
         itemId: item.id,
         ownerSubject: subject,
         leaseAttempt: item.attemptCount,
         state,
-        checkedAt: afterDiscovery.toISOString()
+        checkedAt: afterDiscovery.toISOString(),
+        founders: founders.map((founder) => ({
+          name: founder.name,
+          role: founder.normalizedRole,
+          checkedAt: founder.person.checkedAt,
+          confidence: confidenceFor(founder.person),
+          officialEvidence: {
+            sourceUrl: founder.officialEvidence.sourceUrl,
+            title: founder.officialEvidence.title,
+            fact: founder.officialEvidence.fact,
+            checkedAt: founder.officialEvidence.checkedAt,
+            confidence: founder.officialEvidence.confidence
+          },
+          ...(founder.officialProfileUrl === undefined
+            ? {}
+            : { officialProfileUrl: founder.officialProfileUrl })
+        }))
       });
-      if (completed === undefined) {
+      if (committed === undefined) {
         return {
           item: {
             runItemId: item.id,
@@ -690,6 +641,25 @@ export function createFounderResearchRunService(
           publicSearchTasks: []
         };
       }
+      if (state === "NEEDS_PUBLIC_SEARCH") {
+        tasks = committed.founders
+          .map((founder, index) => ({
+            founder,
+            prepared: founders[index]!
+          }))
+          .filter(({ founder }) => founder.officialCandidate === undefined)
+          .map(({ founder, prepared }) => createPublicTask({
+            item: committed.item,
+            company,
+            founder: {
+              runPersonId: founder.runPerson.id,
+              name: prepared.name,
+              normalizedRole: prepared.normalizedRole
+            },
+            reason: "PROFILE_URL_MISSING"
+          }))
+          .filter((task): task is FounderPublicSearchTask => task !== undefined);
+      }
       return {
         item: {
           runItemId: item.id,
@@ -697,7 +667,9 @@ export function createFounderResearchRunService(
           leaseAttempt: item.attemptCount,
           state,
           founderCount: founders.length,
-          verifiedProfileCount: founders.filter(({ verifiedProfile }) => verifiedProfile).length
+          verifiedProfileCount: committed.founders.filter(
+            ({ officialCandidate }) => officialCandidate !== undefined
+          ).length
         },
         publicSearchTasks: tasks
       };
@@ -771,6 +743,85 @@ export function createFounderResearchRunService(
     };
   }
 
+  async function listOutstandingPublicSearchTasks(
+    runId: string
+  ): Promise<FounderPublicSearchTask[]> {
+    const [items, runPeople] = await Promise.all([
+      database.founderResearchRuns.listOutstandingItems(runId, subject),
+      database.founderResearchPeople.listForRun(runId, subject)
+    ]);
+    const tasks: FounderPublicSearchTask[] = [];
+    for (const item of items) {
+      const company = await database.companies.get(item.companyId);
+      if (company === undefined) {
+        continue;
+      }
+      const peopleForItem = runPeople.filter(
+        ({ runItemId }) => runItemId === item.id
+      );
+      if (item.state === "AMBIGUOUS") {
+        const task = createPublicTask({
+          item,
+          company,
+          reason: "AMBIGUOUS"
+        });
+        if (task !== undefined) {
+          tasks.push(task);
+        }
+        continue;
+      }
+      if (peopleForItem.length === 0) {
+        const task = createPublicTask({
+          item,
+          company,
+          reason: "FOUNDER_NOT_FOUND"
+        });
+        if (task !== undefined) {
+          tasks.push(task);
+        }
+        continue;
+      }
+      for (const runPerson of peopleForItem) {
+        const [person, canonical] = await Promise.all([
+          database.people.getWithEvidence(runPerson.personId),
+          database.founderProfileCandidates.getCanonicalForPerson(
+            runPerson.id,
+            subject
+          )
+        ]);
+        if (person === undefined || canonical !== undefined) {
+          continue;
+        }
+        const task = createPublicTask({
+          item,
+          company,
+          founder: {
+            runPersonId: runPerson.id,
+            name: person.name,
+            normalizedRole: runPerson.founderRoleMatch
+          },
+          reason: "PROFILE_URL_MISSING"
+        });
+        if (task !== undefined) {
+          tasks.push(task);
+        }
+      }
+    }
+    return tasks.sort((left, right) => (
+      left.companyName.localeCompare(
+        right.companyName,
+        "en",
+        { sensitivity: "base" }
+      )
+      || (left.knownFounderName ?? "").localeCompare(
+        right.knownFounderName ?? "",
+        "en",
+        { sensitivity: "base" }
+      )
+      || left.runItemId.localeCompare(right.runItemId, "en")
+    ));
+  }
+
   return Object.freeze({
     async startRun(
       queryInput: CompanySearchQuery,
@@ -796,6 +847,13 @@ export function createFounderResearchRunService(
         );
       }
       const selected = selectCompanies(results, limit);
+      if (selected.length === 0) {
+        throw new DomainError(
+          "NOT_FOUND",
+          "No YC companies matched the founder research query",
+          { entity: "yc_company_selection" }
+        );
+      }
       try {
         const created = await database.founderResearchRuns.create({
           ownerSubject: subject,
@@ -853,11 +911,12 @@ export function createFounderResearchRunService(
         if (run === undefined) {
           throw notFound();
         }
+        const publicSearchTasks = await listOutstandingPublicSearchTasks(run.id);
         return {
           run,
           leasedCount: leased.length,
           items: processed.items,
-          publicSearchTasks: processed.publicSearchTasks,
+          publicSearchTasks,
           shouldContinue: run.selectedCount > (
             run.processedCount
             + (run.state === "NEEDS_PUBLIC_SEARCH"

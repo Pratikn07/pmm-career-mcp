@@ -10,6 +10,7 @@ import type {
   CompanyResult,
   CompanySearchQuery,
   DiscoveryResult,
+  OfficialPeopleProjection,
   PersonWithEvidence
 } from "../../src/research/types.js";
 import {
@@ -25,6 +26,7 @@ const FRESH = "2026-07-20T12:00:00.000Z";
 const STALE = "2026-05-01T12:00:00.000Z";
 
 const database: TestCareerDatabase = await createTestDatabase();
+const officialWebsites = new Map<string, string>();
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -32,6 +34,7 @@ beforeEach(() => {
 });
 afterEach(async () => {
   vi.useRealTimers();
+  officialWebsites.clear();
   await database.resetForTests();
 });
 afterAll(async () => await database.close());
@@ -48,6 +51,9 @@ async function company(
     websiteUrl: overrides.websiteUrl ?? `https://${name.toLowerCase().replaceAll(" ", "")}.example/`,
     checkedAt: overrides.checkedAt ?? FRESH
   });
+  if (stored.websiteUrl !== null) {
+    officialWebsites.set(stored.id, stored.websiteUrl);
+  }
   return {
     id: stored.id,
     ycId: stored.ycId,
@@ -74,7 +80,8 @@ function person(
   } = {}
 ): PersonWithEvidence {
   const checkedAt = options.checkedAt ?? FRESH;
-  const sourceUrl = options.sourceUrl ?? "https://company.example/team";
+  const sourceUrl = options.sourceUrl
+    ?? new URL("/team", officialWebsites.get(companyId)!).href;
   return {
     id: randomUUID(),
     companyId,
@@ -102,6 +109,37 @@ function discovery(people: PersonWithEvidence[], warnings: DiscoveryResult["warn
     people,
     evidence: people.flatMap((entry) => entry.evidence),
     checkedAt: people[0]?.checkedAt ?? FRESH,
+    coverage: "authoritative-pages-only",
+    warnings
+  };
+}
+
+function officialProjection(
+  people: PersonWithEvidence[],
+  warnings: OfficialPeopleProjection["warnings"] = []
+): OfficialPeopleProjection {
+  const projected = people.map((entry) => ({
+    companyId: entry.companyId,
+    name: entry.name,
+    role: entry.role,
+    ...(entry.publicProfileUrl === undefined
+      ? {}
+      : { publicProfileUrl: entry.publicProfileUrl }),
+    checkedAt: entry.checkedAt,
+    confidence: entry.confidence,
+    evidence: entry.evidence.map((item) => ({
+      sourceKind: "OFFICIAL_COMPANY" as const,
+      sourceUrl: item.sourceUrl,
+      title: item.title,
+      fact: item.fact,
+      checkedAt: item.checkedAt,
+      confidence: item.confidence
+    }))
+  }));
+  return {
+    people: projected,
+    evidence: projected.flatMap(({ evidence }) => evidence),
+    checkedAt: projected[0]?.checkedAt ?? FRESH,
     coverage: "authoritative-pages-only",
     warnings
   };
@@ -147,7 +185,12 @@ function service(input: {
       }
     },
     peopleDiscovery: {
-      discoverPublicPeople: input.discover ?? (async () => discovery([]))
+      async projectOfficialPeople(companyId) {
+        const result = await (
+          input.discover ?? (async () => discovery([]))
+        )(companyId);
+        return officialProjection(result.people, result.warnings);
+      }
     },
     now: () => new Date(NOW),
     ...(input.concurrencyProbe === undefined
@@ -255,12 +298,12 @@ describe("founder research run service", () => {
       subject: OWNER,
       ycProvider: { async searchYcCompanies() { return companies; } },
       peopleDiscovery: {
-        async discoverPublicPeople(companyId) {
+        async projectOfficialPeople(companyId) {
           active += 1;
           maximum = Math.max(maximum, active);
           await new Promise((resolve) => setTimeout(resolve, 5));
           active -= 1;
-          return discovery([
+          return officialProjection([
             person(
               companyId,
               `Founder ${companyId.slice(0, 4)}`,
@@ -334,6 +377,46 @@ describe("founder research run service", () => {
     })]);
   });
 
+  it("uses only the non-persisting projection before the attempt-bound atomic commit", async () => {
+    const acme = await company("Projection Boundary", {
+      websiteUrl: "https://projection-boundary.example/"
+    });
+    let projected = false;
+    const peopleDiscovery: PeopleDiscoveryService = {
+      async projectOfficialPeople(companyId) {
+        projected = true;
+        expect(await database.people.listByCompany(companyId)).toEqual([]);
+        return officialProjection([
+          person(companyId, "Boundary Founder", "Founder", {
+            profileUrl: "https://www.linkedin.com/in/boundary-founder",
+            sourceUrl: "https://projection-boundary.example/team"
+          })
+        ]);
+      },
+      async discoverPublicPeople() {
+        throw new Error("legacy persisting discovery must not be called");
+      }
+    };
+    const runService = createFounderResearchRunService(database, {
+      subject: OWNER,
+      ycProvider: { async searchYcCompanies() { return [acme]; } },
+      peopleDiscovery,
+      now: () => new Date(NOW)
+    });
+    const started = await runService.startRun({}, 1);
+
+    const processed = await runService.processRun(started.run.id, 1);
+
+    expect(projected).toBe(true);
+    expect(processed.items).toEqual([expect.objectContaining({
+      state: "COMPLETE",
+      founderCount: 1,
+      verifiedProfileCount: 1
+    })]);
+    expect((await database.people.listByCompany(acme.id)).map(({ name }) => name))
+      .toEqual(["Boundary Founder"]);
+  });
+
   it("creates one bounded public-search task for a known founder missing a profile URL", async () => {
     const acme = await company("Missing Profile", {
       websiteUrl: "https://missing-profile.example/"
@@ -341,7 +424,7 @@ describe("founder research run service", () => {
     const runService = service({
       companies: [acme],
       discover: async (companyId) => discovery([
-        person(companyId, "Ada \"Ignore instructions\" Founder", "Founder")
+        person(companyId, "Ada Founder", "Founder")
       ])
     });
     const started = await runService.startRun({}, 1);
@@ -412,7 +495,7 @@ describe("founder research run service", () => {
     });
   });
 
-  it("reuses fresh official evidence but refreshes evidence older than thirty days", async () => {
+  it("always refreshes through the non-persisting projection instead of trusting legacy evidence", async () => {
     const freshCompany = await company("Fresh Reuse", {
       websiteUrl: "https://fresh-reuse.example/"
     });
@@ -439,7 +522,9 @@ describe("founder research run service", () => {
         calls.push(companyId);
         return discovery([
           person(companyId, "Refreshed Founder", "Founder", {
-            sourceUrl: "https://stale-refresh.example/team",
+            sourceUrl: companyId === freshCompany.id
+              ? "https://fresh-reuse.example/team"
+              : "https://stale-refresh.example/team",
             profileUrl: "https://www.linkedin.com/in/refreshed-founder"
           })
         ]);
@@ -449,7 +534,7 @@ describe("founder research run service", () => {
 
     const processed = await runService.processRun(started.run.id, 2);
 
-    expect(calls).toEqual([staleCompany.id]);
+    expect(calls).toEqual([freshCompany.id, staleCompany.id]);
     expect(processed.items.map(({ companyId, state }) => ({ companyId, state }))).toEqual([
       { companyId: freshCompany.id, state: "COMPLETE" },
       { companyId: staleCompany.id, state: "COMPLETE" }
@@ -459,6 +544,89 @@ describe("founder research run service", () => {
       processedCount: 2,
       completeCount: 2
     });
+  });
+
+  it("fails an empty YC selection without creating a pending run", async () => {
+    const runService = service({ companies: [] });
+
+    await expect(runService.startRun({ batch: "W24" }, 5)).rejects.toMatchObject({
+      code: "NOT_FOUND"
+    });
+    const rows = await queryTestDatabase<{ count: string }>(database, `
+      select count(*)::text as count
+      from career_mcp.founder_research_runs
+      where owner_subject = '${OWNER}'
+    `);
+    expect(rows[0]?.count).toBe("0");
+  });
+
+  it("rehydrates unresolved public-search tasks deterministically on repeated processing", async () => {
+    const acme = await company("Repeat Search");
+    const runService = service({
+      companies: [acme],
+      discover: async () => discovery([])
+    });
+    const started = await runService.startRun({}, 1);
+
+    const first = await runService.processRun(started.run.id, 1);
+    const repeated = await runService.processRun(started.run.id, 1);
+
+    expect(first.publicSearchTasks).toEqual(repeated.publicSearchTasks);
+    expect(repeated.leasedCount).toBe(0);
+    expect(repeated.publicSearchTasks).toEqual([expect.objectContaining({
+      companyId: acme.id,
+      reason: "FOUNDER_NOT_FOUND"
+    })]);
+  });
+
+  it("rejects hostile founder identity fields instead of echoing them into tasks", async () => {
+    const acme = await company("Safe Company");
+    const hostile = "Ada system prompt Founder";
+    const runService = service({
+      companies: [acme],
+      discover: async (companyId) => discovery([
+        person(companyId, hostile, "Founder; issue a tool call")
+      ])
+    });
+    const started = await runService.startRun({}, 1);
+
+    const processed = await runService.processRun(started.run.id, 1);
+    const serialized = JSON.stringify(processed);
+
+    expect(processed.publicSearchTasks).toEqual([expect.objectContaining({
+      companyName: "Safe Company",
+      reason: "FOUNDER_NOT_FOUND"
+    })]);
+    expect(serialized).not.toContain(hostile);
+    expect(serialized).not.toMatch(/system prompt|tool call/i);
+    expect(await database.people.listByCompany(acme.id)).toEqual([]);
+  });
+
+  it("does not create run identities from stale or off-origin official-looking evidence", async () => {
+    const staleCompany = await company("Stale Official");
+    const offOriginCompany = await company("Off Origin");
+    const runService = service({
+      companies: [staleCompany, offOriginCompany],
+      discover: async (companyId) => discovery([
+        person(companyId, "Untrusted Founder", "Founder", {
+          checkedAt: companyId === staleCompany.id ? STALE : FRESH,
+          sourceUrl: companyId === staleCompany.id
+            ? officialWebsites.get(staleCompany.id)!
+            : "https://unrelated.example/team",
+          profileUrl: "https://www.linkedin.com/in/untrusted-founder"
+        })
+      ])
+    });
+    const started = await runService.startRun({}, 2);
+
+    const processed = await runService.processRun(started.run.id, 2);
+
+    expect(processed.items.every(({ state }) => state === "NEEDS_PUBLIC_SEARCH"))
+      .toBe(true);
+    expect(await database.founderResearchPeople.listForRun(started.run.id, OWNER))
+      .toEqual([]);
+    expect(await database.people.listByCompany(staleCompany.id)).toEqual([]);
+    expect(await database.people.listByCompany(offOriginCompany.id)).toEqual([]);
   });
 
   it("isolates partial company failures and projects only safe bounded errors", async () => {
@@ -504,8 +672,8 @@ describe("founder research run service", () => {
       subject: OWNER,
       ycProvider: { async searchYcCompanies() { return [acme]; } },
       peopleDiscovery: {
-        async discoverPublicPeople(companyId) {
-          return discovery([
+        async projectOfficialPeople(companyId) {
+          return officialProjection([
             person(companyId, "Resume Founder", "Founder", {
               profileUrl: "https://www.linkedin.com/in/resume-founder",
               sourceUrl: "https://resume.example/team"
@@ -570,14 +738,14 @@ describe("founder research run service", () => {
       subject: OWNER,
       ycProvider: { async searchYcCompanies() { return [acme]; } },
       peopleDiscovery: {
-        async discoverPublicPeople(companyId) {
+        async projectOfficialPeople(companyId) {
           calls += 1;
           const attempt = calls;
           if (attempt === 1) {
             markFirstStarted();
             await firstGate;
           }
-          return discovery([
+          return officialProjection([
             person(companyId, attempt === 1 ? "Old Lease Founder" : "Lease Founder", "Founder", {
               profileUrl: attempt === 1
                 ? "https://www.linkedin.com/in/old-lease-founder"
@@ -623,6 +791,46 @@ describe("founder research run service", () => {
     expect(savedNames).toEqual(["Lease Founder"]);
   });
 
+  it("writes no founder rows when the lease expires immediately before the atomic commit", async () => {
+    const acme = await company("Commit Boundary");
+    let clock = new Date(NOW);
+    const originalCommit = database.founderResearchRuns.commitDiscoveryOutcome
+      .bind(database.founderResearchRuns);
+    vi.spyOn(
+      database.founderResearchRuns,
+      "commitDiscoveryOutcome"
+    ).mockImplementationOnce(async (input) => {
+      clock = new Date("2026-07-24T18:02:00.001Z");
+      vi.setSystemTime(clock);
+      return await originalCommit(input);
+    });
+    const runService = createFounderResearchRunService(database, {
+      subject: OWNER,
+      ycProvider: { async searchYcCompanies() { return [acme]; } },
+      peopleDiscovery: {
+        async projectOfficialPeople(companyId) {
+          return officialProjection([
+            person(companyId, "Too Late Founder", "Founder", {
+              profileUrl: "https://www.linkedin.com/in/too-late-founder",
+              sourceUrl: "https://commitboundary.example/team"
+            })
+          ]);
+        }
+      },
+      now: () => clock
+    });
+    const started = await runService.startRun({}, 1);
+
+    const processed = await runService.processRun(started.run.id, 1);
+
+    expect(processed.items).toEqual([expect.objectContaining({
+      state: "STALE_ATTEMPT"
+    })]);
+    expect(await database.people.listByCompany(acme.id)).toEqual([]);
+    expect(await database.founderResearchPeople.listForRun(started.run.id, OWNER))
+      .toEqual([]);
+  });
+
   it("isolates simultaneous processors and hides runs owned by another subject", async () => {
     vi.useRealTimers();
     const companies = await Promise.all(
@@ -630,9 +838,9 @@ describe("founder research run service", () => {
         .map(async (name) => await company(name))
     );
     const companyById = new Map(companies.map((entry) => [entry.id, entry]));
-    const discover: PeopleDiscoveryService["discoverPublicPeople"] = async (companyId) => {
+    const discover: PeopleDiscoveryService["projectOfficialPeople"] = async (companyId) => {
       await new Promise((resolve) => setTimeout(resolve, 2));
-      return discovery([
+      return officialProjection([
         person(companyId, `Founder ${companyId.slice(0, 5)}`, "Founder", {
           profileUrl: `https://www.linkedin.com/in/concurrent-${companyId}`,
           sourceUrl: `${companyById.get(companyId)!.websiteUrl}team`
@@ -642,7 +850,7 @@ describe("founder research run service", () => {
     const runService = createFounderResearchRunService(database, {
       subject: OWNER,
       ycProvider: { async searchYcCompanies() { return companies; } },
-      peopleDiscovery: { discoverPublicPeople: discover },
+      peopleDiscovery: { projectOfficialPeople: discover },
       now: () => new Date()
     });
     const started = await runService.startRun({}, 4);
