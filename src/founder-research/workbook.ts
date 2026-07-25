@@ -1,11 +1,23 @@
 import { createHash } from "node:crypto";
 import JSZip from "jszip";
+import { containsUntrustedInstruction } from "../security/untrusted-text.js";
 
 const MAX_COMPANIES = 50;
 const MAX_WORKBOOK_BYTES = 5 * 1024 * 1024;
+// XML entity escaping can expand a single UTF-8 byte to six bytes. This bound,
+// plus the fixed < 250 KiB OOXML envelope, remains below the five MiB export cap.
+const MAX_SERIALIZED_INPUT_BYTES = 640 * 1024;
 const ZIP_TIMESTAMP = new Date(Date.UTC(1980, 0, 1, 0, 0, 0));
 const OOXML_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
 const XML_DECLARATION = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>";
+const RFC3339_TIMESTAMP = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?(Z|[+-](\d{2}):(\d{2}))$/u;
+const SAFE_ERROR_CODES = new Set([
+  "DISCOVERY_BUDGET_EXHAUSTED",
+  "FOUNDER_NOT_FOUND",
+  "OFFICIAL_SOURCE_UNAVAILABLE",
+  "STALE_WORKER"
+]);
+const UNSAFE_ERROR_SUMMARY = /(?:\b(?:https?|ftp):\/\/|\bwww\.|\b(?:authorization|proxy-authorization|www-authenticate|bearer|api[-_ ]?key|access[_ -]?token|password|passwd|secret|cookie|set-cookie)\b|\bHTTP\/\d(?:\.\d)?\b|\b(?:Error|TypeError|ReferenceError|SyntaxError):|\bat\s+\S+\s*\([^)]*:\d+:\d+\))/iu;
 
 const SHEET_NAMES = [
   "Ready to Review",
@@ -149,6 +161,7 @@ export type FounderResearchWorkbookInput = Readonly<{
 type CellValue = string | number | Date;
 type Cell = Readonly<{ value: CellValue; style?: 1 | 2 | 3 }>;
 type PreparedRow = FounderResearchWorkbookRow & Readonly<{ checkedDate: Date }>;
+type NormalizedTimestamp = Readonly<{ instant: Date; canonical: string }>;
 
 function invalidInput(reason: string): never {
   throw new Error(`Invalid founder research workbook input: ${reason}`);
@@ -162,10 +175,17 @@ function boundedText(field: string, value: unknown, required = false): string | 
   if (typeof value !== "string" || value.length === 0 || value.length > 8_192) {
     invalidInput(`${field} must be a non-empty bounded string`);
   }
+  if (!isValidXml10Text(value)) {
+    invalidInput(`${field} contains an XML 1.0-invalid scalar`);
+  }
   if (/[\p{Cc}\p{Cf}]/u.test(value)) {
     invalidInput(`${field} contains unsafe control characters`);
   }
-  return value.normalize("NFC");
+  const normalized = value.normalize("NFC");
+  if (!isValidXml10Text(normalized)) {
+    invalidInput(`${field} contains an XML 1.0-invalid scalar`);
+  }
+  return normalized;
 }
 
 function optionalText(field: string, value: unknown): string | undefined {
@@ -176,11 +196,72 @@ function requiredText(field: string, value: unknown): string {
   return boundedText(field, value, true)!;
 }
 
-function timestamp(field: string, value: unknown): Date {
+function isValidXml10Text(value: string): boolean {
+  for (let index = 0; index < value.length;) {
+    const scalar = value.codePointAt(index)!;
+    if (
+      scalar < 0x20
+      || (scalar > 0xD7FF && scalar < 0xE000)
+      || scalar > 0x10FFFF
+      || (scalar >= 0xFDD0 && scalar <= 0xFDEF)
+      || (scalar & 0xFFFE) === 0xFFFE
+    ) {
+      return false;
+    }
+    index += scalar > 0xFFFF ? 2 : 1;
+  }
+  return true;
+}
+
+function daysInMonth(year: number, month: number): number {
+  if (month === 2) {
+    return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0) ? 29 : 28;
+  }
+  return [4, 6, 9, 11].includes(month) ? 30 : 31;
+}
+
+function timestamp(field: string, value: unknown): NormalizedTimestamp {
   const text = requiredText(field, value);
+  const match = RFC3339_TIMESTAMP.exec(text);
+  if (match === null) invalidInput(`${field} must be a timezone-qualified RFC3339 timestamp`);
+  const year = Number(match[1]!);
+  const month = Number(match[2]!);
+  const day = Number(match[3]!);
+  const hour = Number(match[4]!);
+  const minute = Number(match[5]!);
+  const second = Number(match[6]!);
+  const offsetHour = match[8] === undefined ? 0 : Number(match[8]);
+  const offsetMinute = match[9] === undefined ? 0 : Number(match[9]);
+  if (
+    year === 0
+    || month < 1 || month > 12
+    || day < 1 || day > daysInMonth(year, month)
+    || hour > 23 || minute > 59 || second > 59
+    || offsetHour > 23 || offsetMinute > 59
+  ) {
+    invalidInput(`${field} must be a valid RFC3339 timestamp`);
+  }
   const result = new Date(text);
-  if (Number.isNaN(result.getTime())) invalidInput(`${field} must be an ISO timestamp`);
-  return result;
+  if (Number.isNaN(result.getTime())) invalidInput(`${field} must be a valid RFC3339 timestamp`);
+  return Object.freeze({ instant: result, canonical: result.toISOString() });
+}
+
+function safeErrorCode(field: string, value: unknown): string | undefined {
+  const code = optionalText(field, value);
+  if (code === undefined) return undefined;
+  if (!/^[A-Z][A-Z0-9_]{2,63}$/u.test(code) || !SAFE_ERROR_CODES.has(code)) {
+    invalidInput(`${field} is not an approved safe error code`);
+  }
+  return code;
+}
+
+function safeErrorSummary(field: string, value: unknown): string | undefined {
+  const summary = optionalText(field, value);
+  if (summary === undefined) return undefined;
+  if (summary.length > 512 || UNSAFE_ERROR_SUMMARY.test(summary) || containsUntrustedInstruction(summary)) {
+    invalidInput(`${field} is not safe for workbook export`);
+  }
+  return summary;
 }
 
 function validateUrl(field: string, value: string | undefined): string | undefined {
@@ -239,8 +320,8 @@ function validateInput(input: FounderResearchWorkbookInput): Readonly<{
   if (!Array.isArray(input.rows) || input.rows.length > run.requestedLimit) {
     invalidInput("rows must not exceed run.requestedLimit");
   }
-  if (input.includeCandidateUrls !== undefined && typeof input.includeCandidateUrls !== "boolean") {
-    invalidInput("includeCandidateUrls must be boolean when present");
+  if (input.includeCandidateUrls !== undefined && input.includeCandidateUrls !== true) {
+    invalidInput("includeCandidateUrls must be true when present");
   }
   const seenIds = new Set<string>();
   const rows = input.rows.map((row, index): PreparedRow => {
@@ -255,6 +336,7 @@ function validateInput(input: FounderResearchWorkbookInput): Readonly<{
     if (typeof row.confidence !== "number" || !Number.isFinite(row.confidence) || row.confidence < 0 || row.confidence > 1) {
       invalidInput(`rows[${index}].confidence must be between 0 and 1`);
     }
+    const checkedAt = timestamp(`rows[${index}].checkedAt`, row.checkedAt);
     const normalized: FounderResearchWorkbookRow = {
       ...row,
       id,
@@ -272,7 +354,7 @@ function validateInput(input: FounderResearchWorkbookInput): Readonly<{
       searchQuery: optionalText(`rows[${index}].searchQuery`, row.searchQuery),
       evidenceUrl: validateUrl(`rows[${index}].evidenceUrl`, optionalText(`rows[${index}].evidenceUrl`, row.evidenceUrl)),
       evidenceSnippet: optionalText(`rows[${index}].evidenceSnippet`, row.evidenceSnippet),
-      checkedAt: requiredText(`rows[${index}].checkedAt`, row.checkedAt),
+      checkedAt: checkedAt.canonical,
       confidence: row.confidence,
       personalizationRationale: optionalText(`rows[${index}].personalizationRationale`, row.personalizationRationale),
       draftConnectionNote: optionalText(`rows[${index}].draftConnectionNote`, row.draftConnectionNote),
@@ -282,8 +364,8 @@ function validateInput(input: FounderResearchWorkbookInput): Readonly<{
       personId: optionalText(`rows[${index}].personId`, row.personId),
       targetId: optionalText(`rows[${index}].targetId`, row.targetId),
       draftId: optionalText(`rows[${index}].draftId`, row.draftId),
-      errorCode: optionalText(`rows[${index}].errorCode`, row.errorCode),
-      errorSummary: optionalText(`rows[${index}].errorSummary`, row.errorSummary)
+      errorCode: safeErrorCode(`rows[${index}].errorCode`, row.errorCode),
+      errorSummary: safeErrorSummary(`rows[${index}].errorSummary`, row.errorSummary)
     };
     if (normalized.hiring !== undefined && typeof normalized.hiring !== "boolean") invalidInput(`rows[${index}].hiring must be boolean`);
     if ((normalized.state === "CONFIRMED" || normalized.state === "VERIFIED") && (
@@ -297,23 +379,33 @@ function validateInput(input: FounderResearchWorkbookInput): Readonly<{
     if ((normalized.state === "CANDIDATE" || normalized.state === "AMBIGUOUS") && normalized.requiredManualAction === undefined) {
       invalidInput(`${normalized.state} rows require a manual action`);
     }
-    if ((normalized.state === "NOT_FOUND" || normalized.state === "FAILED") && normalized.errorSummary === undefined) {
-      invalidInput(`${normalized.state} rows require an error summary`);
+    if ((normalized.state === "NOT_FOUND" || normalized.state === "FAILED") && (
+      normalized.errorCode === undefined || normalized.errorSummary === undefined
+    )) {
+      invalidInput(`${normalized.state} rows require a safe error code and summary`);
     }
-    return { ...normalized, checkedDate: timestamp(`rows[${index}].checkedAt`, normalized.checkedAt) };
+    return { ...normalized, checkedDate: checkedAt.instant };
   });
+  const createdAt = timestamp("run.createdAt", run.createdAt);
+  const startedAt = run.startedAt === undefined ? undefined : timestamp("run.startedAt", run.startedAt);
+  const completedAt = run.completedAt === undefined ? undefined : timestamp("run.completedAt", run.completedAt);
   const preparedRun: FounderResearchWorkbookRun = {
     id: requiredText("run.id", run.id),
     state: state as WorkbookRunState,
     filters: stableFilters(run.filters),
     requestedLimit: run.requestedLimit,
-    createdAt: requiredText("run.createdAt", run.createdAt),
-    ...(run.startedAt === undefined ? {} : { startedAt: requiredText("run.startedAt", run.startedAt) }),
-    ...(run.completedAt === undefined ? {} : { completedAt: requiredText("run.completedAt", run.completedAt) })
+    createdAt: createdAt.canonical,
+    ...(startedAt === undefined ? {} : { startedAt: startedAt.canonical }),
+    ...(completedAt === undefined ? {} : { completedAt: completedAt.canonical })
   };
-  timestamp("run.createdAt", preparedRun.createdAt);
-  if (preparedRun.startedAt !== undefined) timestamp("run.startedAt", preparedRun.startedAt);
-  if (preparedRun.completedAt !== undefined) timestamp("run.completedAt", preparedRun.completedAt);
+  const serializedInputBytes = Buffer.byteLength(JSON.stringify({
+    run: preparedRun,
+    rows: rows.map(({ checkedDate: _checkedDate, ...row }) => row),
+    includeCandidateUrls: true
+  }), "utf8");
+  if (serializedInputBytes > MAX_SERIALIZED_INPUT_BYTES) {
+    invalidInput(`serialized input exceeds ${MAX_SERIALIZED_INPUT_BYTES} UTF-8 bytes`);
+  }
   return Object.freeze({ run: preparedRun, rows, includeCandidateUrls: input.includeCandidateUrls ?? true });
 }
 
@@ -431,9 +523,9 @@ function summaryRows(run: FounderResearchWorkbookRun, rows: readonly PreparedRow
     [{ value: "Run ID" }, { value: run.id }],
     [{ value: "Run State" }, { value: run.state }],
     [{ value: "Filters" }, { value: JSON.stringify(run.filters) }],
-    [{ value: "Created At" }, { value: timestamp("run.createdAt", run.createdAt), style: 2 }],
-    [{ value: "Started At" }, run.startedAt === undefined ? undefined : { value: timestamp("run.startedAt", run.startedAt), style: 2 }],
-    [{ value: "Completed At" }, run.completedAt === undefined ? undefined : { value: timestamp("run.completedAt", run.completedAt), style: 2 }],
+    [{ value: "Created At" }, { value: timestamp("run.createdAt", run.createdAt).instant, style: 2 }],
+    [{ value: "Started At" }, run.startedAt === undefined ? undefined : { value: timestamp("run.startedAt", run.startedAt).instant, style: 2 }],
+    [{ value: "Completed At" }, run.completedAt === undefined ? undefined : { value: timestamp("run.completedAt", run.completedAt).instant, style: 2 }],
     [{ value: "Selected Companies" }, { value: rows.length }],
     [{ value: "Processed Companies" }, { value: processed }],
     [{ value: "Confirmed" }, { value: count("CONFIRMED") }],
@@ -486,7 +578,7 @@ async function validatePackage(bytes: Buffer): Promise<void> {
     throw new Error("Generated founder research workbook has unexpected package entries");
   }
   const xml = (await Promise.all(entries.filter((entry) => entry.endsWith(".xml")).map(async (entry) => zip.file(entry)!.async("string")))).join("\n");
-  if (/<f(?: |>)/u.test(xml) || /<hyperlinks?(?: |>)/u.test(xml) || /<definedNames?(?: |>)/u.test(xml) || /<(?:drawing|legacyDrawing|picture)(?: |>)/u.test(xml) || /externalLink|vbaProject|sharedStrings|state="hidden"|hidden="1"/u.test(xml)) {
+  if (/<f(?: |>)/u.test(xml) || /<hyperlinks?(?: |>)/u.test(xml) || /<definedNames?(?: |>)/u.test(xml) || /<(?:drawing|legacyDrawing|picture)(?: |>)/u.test(xml) || /externalLink|vbaProject|sharedStrings|state="hidden"|hidden="1"|TargetMode="External"/u.test(xml)) {
     throw new Error("Generated founder research workbook contains forbidden OOXML content");
   }
 }
