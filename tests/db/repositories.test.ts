@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -443,6 +443,517 @@ describe("database lifecycle", () => {
   });
 });
 
+describe("founder research repositories", () => {
+  const OWNER = "123e4567-e89b-42d3-a456-426614174101";
+  const OTHER_OWNER = "123e4567-e89b-42d3-a456-426614174102";
+  const STARTED_AT = "2099-07-24T16:00:00.000Z";
+  const LEASE_EXPIRES_AT = "2099-07-24T16:05:00.000Z";
+  const CHECKED_AT = "2099-07-24T16:10:00.000Z";
+
+  async function addFounderCompanies(names: readonly string[]) {
+    return await Promise.all(names.map(async (name) => await db.companies.upsert({
+      ycId: `founder-${name.toLowerCase().replaceAll(" ", "-")}-${randomUUID()}`,
+      name,
+      batch: "W24",
+      status: "Active",
+      websiteUrl: `https://${name.toLowerCase().replaceAll(" ", "")}.example`
+    })));
+  }
+
+  async function addFounderRun(
+    names: readonly string[] = ["Gamma", "Alpha", "Beta"],
+    ownerSubject = OWNER
+  ) {
+    const companies = await addFounderCompanies(names);
+    const created = await db.founderResearchRuns.create({
+      ownerSubject,
+      queryJson: { batch: "W24", hiring: true },
+      requestedLimit: Math.max(1, companies.length),
+      companyIds: companies.map(({ id }) => id)
+    });
+    return { ...created, companies };
+  }
+
+  async function addRunPerson(input: {
+    ownerSubject?: string;
+    companyName?: string;
+    personName?: string;
+  } = {}) {
+    const ownerSubject = input.ownerSubject ?? OWNER;
+    const created = await addFounderRun([input.companyName ?? "Canonical"], ownerSubject);
+    const leased = await db.founderResearchRuns.leaseNextItems({
+      runId: created.run.id,
+      ownerSubject,
+      maxItems: 1,
+      leasedAt: STARTED_AT,
+      leaseExpiresAt: LEASE_EXPIRES_AT
+    });
+    const item = leased[0]!;
+    const person = await db.people.upsert({
+      companyId: item.companyId,
+      name: input.personName ?? "Ada Founder",
+      role: "Co-founder"
+    });
+    const runPerson = await db.founderResearchPeople.saveOfficial({
+      runItemId: item.id,
+      ownerSubject,
+      personId: person.id,
+      founderRoleMatch: "co-founder",
+      confidence: 0.98
+    });
+    return { ...created, item, person, runPerson, ownerSubject };
+  }
+
+  it("creates immutable run membership and hides another owner's run", async () => {
+    const created = await addFounderRun();
+
+    expect(created.run.selectedCount).toBe(3);
+    expect(created.items).toHaveLength(3);
+    expect(await db.founderResearchRuns.getOwned(created.run.id, OTHER_OWNER)).toBeUndefined();
+
+    const replacement = (await addFounderCompanies(["Replacement"]))[0]!;
+    const mutation = await queryTestDatabase(db, `
+      update career_mcp.founder_research_run_items
+      set company_id = '${replacement.id}'
+      where id = '${created.items[0]!.id}'
+    `).then(() => undefined, (error: unknown) => error);
+    expect(mutation).toBeInstanceOf(Error);
+  });
+
+  it("leases deterministically, clamps the batch to five, and increments attempts", async () => {
+    const created = await addFounderRun([
+      "Zulu",
+      "Bravo",
+      "Echo",
+      "Alpha",
+      "Delta",
+      "Charlie",
+      "Foxtrot"
+    ]);
+
+    const leased = await db.founderResearchRuns.leaseNextItems({
+      runId: created.run.id,
+      ownerSubject: OWNER,
+      maxItems: 50,
+      leasedAt: STARTED_AT,
+      leaseExpiresAt: LEASE_EXPIRES_AT
+    });
+
+    const companyNames = new Map(created.companies.map((company) => [company.id, company.name]));
+    expect(leased.map(({ companyId }) => companyNames.get(companyId))).toEqual([
+      "Alpha",
+      "Bravo",
+      "Charlie",
+      "Delta",
+      "Echo"
+    ]);
+    expect(leased).toHaveLength(5);
+    expect(leased.every((item) => (
+      item.state === "LEASED"
+      && item.attemptCount === 1
+      && item.leaseExpiresAt === LEASE_EXPIRES_AT
+    ))).toBe(true);
+  });
+
+  it("recovers expired leases and never leases one item to two callers", async () => {
+    const created = await addFounderRun(["One", "Two", "Three", "Four"]);
+    const first = await db.founderResearchRuns.leaseNextItems({
+      runId: created.run.id,
+      ownerSubject: OWNER,
+      maxItems: 2,
+      leasedAt: STARTED_AT,
+      leaseExpiresAt: LEASE_EXPIRES_AT
+    });
+
+    expect(await db.founderResearchRuns.releaseExpiredLeases({
+      runId: created.run.id,
+      ownerSubject: OWNER,
+      now: "2099-07-24T16:04:59.999Z"
+    })).toBe(0);
+    expect(await db.founderResearchRuns.releaseExpiredLeases({
+      runId: created.run.id,
+      ownerSubject: OWNER,
+      now: LEASE_EXPIRES_AT
+    })).toBe(2);
+
+    const [left, right] = await Promise.all([
+      db.founderResearchRuns.leaseNextItems({
+        runId: created.run.id,
+        ownerSubject: OWNER,
+        maxItems: 3,
+        leasedAt: "2099-07-24T16:06:00.000Z",
+        leaseExpiresAt: "2099-07-24T16:11:00.000Z"
+      }),
+      db.founderResearchRuns.leaseNextItems({
+        runId: created.run.id,
+        ownerSubject: OWNER,
+        maxItems: 3,
+        leasedAt: "2099-07-24T16:06:00.000Z",
+        leaseExpiresAt: "2099-07-24T16:11:00.000Z"
+      })
+    ]);
+    const leasedIds = [...left, ...right].map(({ id }) => id);
+    expect(new Set(leasedIds).size).toBe(leasedIds.length);
+    expect(new Set(leasedIds)).toEqual(new Set(created.items.map(({ id }) => id)));
+    expect(first.every(({ attemptCount }) => attemptCount === 1)).toBe(true);
+    const recovered = [...left, ...right].filter(({ id }) => first.some((item) => item.id === id));
+    expect(recovered.every(({ attemptCount }) => attemptCount === 2)).toBe(true);
+  });
+
+  it("isolates item failures and derives all run counters from item state", async () => {
+    const created = await addFounderRun(["Complete", "Partial", "Missing", "Ambiguous", "Failed"]);
+    const leased = await db.founderResearchRuns.leaseNextItems({
+      runId: created.run.id,
+      ownerSubject: OWNER,
+      maxItems: 5,
+      leasedAt: STARTED_AT,
+      leaseExpiresAt: LEASE_EXPIRES_AT
+    });
+
+    await db.founderResearchRuns.completeItem({
+      itemId: leased[0]!.id,
+      ownerSubject: OWNER,
+      state: "COMPLETE",
+      checkedAt: CHECKED_AT
+    });
+    await db.founderResearchRuns.completeItem({
+      itemId: leased[1]!.id,
+      ownerSubject: OWNER,
+      state: "PARTIAL",
+      checkedAt: CHECKED_AT
+    });
+    await db.founderResearchRuns.completeItem({
+      itemId: leased[2]!.id,
+      ownerSubject: OWNER,
+      state: "NOT_FOUND",
+      checkedAt: CHECKED_AT
+    });
+    await db.founderResearchRuns.completeItem({
+      itemId: leased[3]!.id,
+      ownerSubject: OWNER,
+      state: "AMBIGUOUS",
+      checkedAt: CHECKED_AT
+    });
+    await db.founderResearchRuns.failItem({
+      itemId: leased[4]!.id,
+      ownerSubject: OWNER,
+      checkedAt: CHECKED_AT,
+      errorCode: "OFFICIAL_SOURCE_UNAVAILABLE",
+      errorSummary: "Official site did not respond",
+      errorDetailJson: { retryable: false }
+    });
+
+    const run = await db.founderResearchRuns.recomputeCounters(created.run.id, OWNER);
+    expect(run).toMatchObject({
+      state: "PARTIAL",
+      selectedCount: 5,
+      processedCount: 5,
+      completeCount: 1,
+      partialCount: 1,
+      ambiguousCount: 1,
+      notFoundCount: 1,
+      failedCount: 1
+    });
+    const rows = await queryTestDatabase<{ state: string; error_code: string | null }>(db, `
+      select state, error_code
+      from career_mcp.founder_research_run_items
+      where run_id = '${created.run.id}'
+      order by state
+    `);
+    expect(rows.filter(({ state }) => state === "FAILED")).toEqual([{
+      state: "FAILED",
+      error_code: "OFFICIAL_SOURCE_UNAVAILABLE"
+    }]);
+    expect(rows).toHaveLength(5);
+  });
+
+  it("saves official people idempotently and lists only the owned run", async () => {
+    const context = await addRunPerson();
+    const duplicate = await db.founderResearchPeople.saveOfficial({
+      runItemId: context.item.id,
+      ownerSubject: OWNER,
+      personId: context.person.id,
+      founderRoleMatch: "co-founder",
+      confidence: 0.99
+    });
+
+    expect(duplicate.id).toBe(context.runPerson.id);
+    expect(duplicate.confidence).toBe(0.99);
+    expect(await db.founderResearchPeople.listForRun(context.run.id, OTHER_OWNER)).toEqual([]);
+    expect(await db.founderResearchPeople.listForRun(context.run.id, OWNER)).toEqual([duplicate]);
+  });
+
+  it("deduplicates candidates and enforces CONFIRMED over VERIFIED over CANDIDATE", async () => {
+    const context = await addRunPerson();
+    const candidate = await db.founderProfileCandidates.saveCandidate({
+      runPersonId: context.runPerson.id,
+      ownerSubject: OWNER,
+      profileUrl: "https://www.linkedin.com/in/ada-candidate",
+      searchQuery: "Ada Founder Canonical LinkedIn",
+      evidenceUrl: "https://search.example/result/ada",
+      evidenceTitle: "Ada Founder - LinkedIn",
+      evidenceSnippet: "Ada Founder at Canonical",
+      evidenceMetadataJson: { provider: "public_search" },
+      checkedAt: CHECKED_AT,
+      confidence: 0.7
+    });
+    const duplicate = await db.founderProfileCandidates.saveCandidate({
+      runPersonId: context.runPerson.id,
+      ownerSubject: OWNER,
+      profileUrl: "https://www.linkedin.com/in/ada-candidate",
+      searchQuery: "Ada Founder Canonical LinkedIn",
+      evidenceUrl: "https://search.example/result/ada",
+      evidenceTitle: "Ada Founder - LinkedIn",
+      evidenceSnippet: "Ada Founder at Canonical",
+      evidenceMetadataJson: { provider: "public_search" },
+      checkedAt: CHECKED_AT,
+      confidence: 0.7
+    });
+    expect(duplicate.id).toBe(candidate.id);
+    expect(
+      await db.founderProfileCandidates.getCanonicalForPerson(context.runPerson.id, OWNER)
+    ).toBeUndefined();
+
+    const verified = await db.founderProfileCandidates.recordOfficial({
+      runPersonId: context.runPerson.id,
+      ownerSubject: OWNER,
+      profileUrl: "https://www.linkedin.com/in/ada-official",
+      sourceKind: "OFFICIAL_COMPANY",
+      evidenceUrl: "https://canonical.example/team",
+      evidenceTitle: "Team",
+      evidenceSnippet: "Ada Founder, Co-founder",
+      evidenceMetadataJson: { card: 1 },
+      checkedAt: CHECKED_AT,
+      confidence: 0.98
+    });
+    expect(
+      (await db.founderProfileCandidates.getCanonicalForPerson(
+        context.runPerson.id,
+        OWNER
+      ))?.id
+    ).toBe(verified.id);
+
+    const confirmed = await db.founderProfileCandidates.confirm({
+      candidateId: candidate.id,
+      ownerSubject: OWNER,
+      note: "Manually matched company and identity",
+      decidedAt: "2099-07-24T16:11:00.000Z"
+    });
+    expect(confirmed?.status).toBe("CONFIRMED");
+    expect(
+      (await db.founderProfileCandidates.getCanonicalForPerson(
+        context.runPerson.id,
+        OWNER
+      ))?.id
+    ).toBe(candidate.id);
+
+    const laterOfficial = await db.founderProfileCandidates.recordOfficial({
+      runPersonId: context.runPerson.id,
+      ownerSubject: OWNER,
+      profileUrl: "https://www.linkedin.com/in/ada-later-official",
+      sourceKind: "OFFICIAL_YC",
+      evidenceUrl: "https://www.ycombinator.com/companies/canonical",
+      evidenceMetadataJson: {},
+      checkedAt: "2099-07-24T16:12:00.000Z",
+      confidence: 1
+    });
+    expect(laterOfficial.status).toBe("VERIFIED");
+    expect(
+      (await db.founderProfileCandidates.getCanonicalForPerson(
+        context.runPerson.id,
+        OWNER
+      ))?.id
+    ).toBe(candidate.id);
+    expect((await db.people.get(context.person.id))?.publicProfileUrl)
+      .toBe("https://www.linkedin.com/in/ada-candidate");
+  });
+
+  it("rejects a candidate in one transaction and retains an append-only audit event", async () => {
+    const context = await addRunPerson({ companyName: "Rejected" });
+    const candidate = await db.founderProfileCandidates.saveCandidate({
+      runPersonId: context.runPerson.id,
+      ownerSubject: OWNER,
+      profileUrl: "https://www.linkedin.com/in/wrong-founder",
+      searchQuery: "Ada Founder Rejected LinkedIn",
+      evidenceUrl: "https://search.example/result/wrong",
+      evidenceMetadataJson: {},
+      checkedAt: CHECKED_AT,
+      confidence: 0.55
+    });
+
+    const rejected = await db.founderProfileCandidates.reject({
+      candidateId: candidate.id,
+      ownerSubject: OWNER,
+      note: "Different company",
+      decidedAt: "2099-07-24T16:11:00.000Z"
+    });
+    expect(rejected?.status).toBe("REJECTED");
+    const rediscovered = await db.founderProfileCandidates.saveCandidate({
+      runPersonId: context.runPerson.id,
+      ownerSubject: OWNER,
+      profileUrl: "https://www.linkedin.com/in/wrong-founder",
+      searchQuery: "Ada Founder Rejected LinkedIn",
+      evidenceUrl: "https://search.example/result/wrong",
+      evidenceMetadataJson: {},
+      checkedAt: "2099-07-24T16:12:00.000Z",
+      confidence: 0.6
+    });
+    expect(rediscovered.id).toBe(candidate.id);
+    expect(rediscovered.status).toBe("REJECTED");
+    expect(await db.founderProfileCandidates.reject({
+      candidateId: candidate.id,
+      ownerSubject: OTHER_OWNER,
+      decidedAt: "2099-07-24T16:12:00.000Z"
+    })).toBeUndefined();
+
+    const events = await queryTestDatabase<{
+      event: string;
+      note: string | null;
+    }>(db, `
+      select event, note
+      from career_mcp.founder_profile_confirmation_events
+      where candidate_id = '${candidate.id}'
+    `);
+    expect(events).toEqual([{ event: "REJECTED", note: "Different company" }]);
+  });
+
+  it("round-trips exact workbook bytes and checksum with owner isolation", async () => {
+    const created = await addFounderRun(["Workbook"]);
+    const workbookBytes = Buffer.from("PK\u0003\u0004private deterministic workbook", "utf8");
+    const checksumSha256 = createHash("sha256").update(workbookBytes).digest("hex");
+    const saved = await db.founderResearchExports.create({
+      runId: created.run.id,
+      ownerSubject: OWNER,
+      fileName: "yc-founder-research.xlsx",
+      mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      checksumSha256,
+      workbookBytes,
+      rowCount: 1,
+      sheetCount: 4,
+      createdAt: STARTED_AT,
+      expiresAt: "2099-07-31T16:00:00.000Z"
+    });
+
+    expect(saved.byteSize).toBe(workbookBytes.byteLength);
+    expect(Buffer.from(saved.workbookBytes)).toEqual(workbookBytes);
+    expect(saved.checksumSha256).toBe(checksumSha256);
+    expect(await db.founderResearchExports.getOwned(saved.id, OTHER_OWNER)).toBeUndefined();
+    expect(Buffer.from(
+      (await db.founderResearchExports.getOwned(saved.id, OWNER))!.workbookBytes
+    )).toEqual(workbookBytes);
+  });
+
+  it("stores only capability hashes and supports repeat downloads during its lifetime", async () => {
+    const created = await addFounderRun(["Capability"]);
+    const workbookBytes = Buffer.from("PK\u0003\u0004capability workbook", "utf8");
+    const checksumSha256 = createHash("sha256").update(workbookBytes).digest("hex");
+    const savedExport = await db.founderResearchExports.create({
+      runId: created.run.id,
+      ownerSubject: OWNER,
+      fileName: "capability.xlsx",
+      mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      checksumSha256,
+      workbookBytes,
+      rowCount: 1,
+      sheetCount: 4,
+      createdAt: STARTED_AT,
+      expiresAt: "2099-07-25T16:00:00.000Z"
+    });
+    const rawToken = "private-capability-token-that-must-not-be-stored";
+    const tokenHashSha256 = createHash("sha256").update(rawToken).digest("hex");
+    const capability = await db.founderExportCapabilities.create({
+      exportId: savedExport.id,
+      ownerSubject: OWNER,
+      tokenHashSha256,
+      createdAt: STARTED_AT,
+      expiresAt: "2099-07-24T16:15:00.000Z"
+    });
+
+    const stored = await queryTestDatabase<{
+      token_hash_sha256: string;
+      last_downloaded_at: string | null;
+    }>(db, `
+      select token_hash_sha256, last_downloaded_at
+      from career_mcp.founder_export_download_capabilities
+      where id = '${capability.id}'
+    `);
+    expect(stored).toEqual([{
+      token_hash_sha256: tokenHashSha256,
+      last_downloaded_at: null
+    }]);
+    expect(JSON.stringify(stored)).not.toContain(rawToken);
+
+    expect((await db.founderExportCapabilities.getUsable({
+      exportId: savedExport.id,
+      ownerSubject: OWNER,
+      tokenHashSha256,
+      now: "2099-07-24T16:05:00.000Z"
+    }))?.capability.id).toBe(capability.id);
+    const first = await db.founderExportCapabilities.recordDownload({
+      capabilityId: capability.id,
+      ownerSubject: OWNER,
+      downloadedAt: "2099-07-24T16:05:00.000Z"
+    });
+    const second = await db.founderExportCapabilities.recordDownload({
+      capabilityId: capability.id,
+      ownerSubject: OWNER,
+      downloadedAt: "2099-07-24T16:06:00.000Z"
+    });
+    expect(first?.lastDownloadedAt).toBe("2099-07-24T16:05:00.000Z");
+    expect(second?.lastDownloadedAt).toBe("2099-07-24T16:06:00.000Z");
+    expect((await db.founderExportCapabilities.getUsable({
+      exportId: savedExport.id,
+      ownerSubject: OWNER,
+      tokenHashSha256,
+      now: "2099-07-24T16:14:59.999Z"
+    }))?.capability.lastDownloadedAt).toBe("2099-07-24T16:06:00.000Z");
+    expect(await db.founderExportCapabilities.getUsable({
+      exportId: savedExport.id,
+      ownerSubject: OWNER,
+      tokenHashSha256,
+      now: "2099-07-24T16:15:00.000Z"
+    })).toBeUndefined();
+  });
+
+  it("deletes only expired owned exports and their capabilities", async () => {
+    const created = await addFounderRun(["Delete Export"]);
+    const workbookBytes = Buffer.from("PK\u0003\u0004delete workbook", "utf8");
+    const savedExport = await db.founderResearchExports.create({
+      runId: created.run.id,
+      ownerSubject: OWNER,
+      fileName: "delete.xlsx",
+      mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      checksumSha256: createHash("sha256").update(workbookBytes).digest("hex"),
+      workbookBytes,
+      rowCount: 1,
+      sheetCount: 4,
+      createdAt: STARTED_AT,
+      expiresAt: "2099-07-25T16:00:00.000Z"
+    });
+    await db.founderExportCapabilities.create({
+      exportId: savedExport.id,
+      ownerSubject: OWNER,
+      tokenHashSha256: "c".repeat(64),
+      createdAt: STARTED_AT,
+      expiresAt: "2099-07-24T16:15:00.000Z"
+    });
+
+    expect(await db.founderResearchExports.deleteExpired(
+      OWNER,
+      "2099-07-25T15:59:59.999Z"
+    )).toBe(0);
+    expect(await db.founderResearchExports.deleteExpired(
+      OTHER_OWNER,
+      "2099-07-25T16:00:00.000Z"
+    )).toBe(0);
+    expect(await db.founderResearchExports.deleteExpired(
+      OWNER,
+      "2099-07-25T16:00:00.000Z"
+    )).toBe(1);
+    expect(await db.founderResearchExports.getOwned(savedExport.id, OWNER)).toBeUndefined();
+  });
+});
+
 describe("PostgreSQL transaction retries", () => {
   function databaseThatRejectsTransactions(error: unknown) {
     const transaction = vi.fn().mockRejectedValue(error);
@@ -465,6 +976,22 @@ describe("PostgreSQL transaction retries", () => {
 
     expect(transaction).toHaveBeenCalledTimes(3);
   });
+
+  it.each(["40001", "40P01"])(
+    "retries founder candidate decisions for SQLSTATE %s",
+    async (code) => {
+      const error = Object.assign(new Error("retryable founder decision"), { code });
+      const { repositories, transaction } = databaseThatRejectsTransactions(error);
+
+      await expect(repositories.founderProfileCandidates.confirm({
+        candidateId: randomUUID(),
+        ownerSubject: DEFAULT_POST_OWNER,
+        decidedAt: "2099-07-24T16:00:00.000Z"
+      })).rejects.toBe(error);
+
+      expect(transaction).toHaveBeenCalledTimes(3);
+    }
+  );
 
   it.each([
     ["post_draft_version_unique", "postDrafts"] as const,
