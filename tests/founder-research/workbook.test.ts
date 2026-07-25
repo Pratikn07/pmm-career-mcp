@@ -132,7 +132,7 @@ const workbookInput: FounderResearchWorkbookInput = {
       checkedAt: "2026-07-25T10:04:00.000Z",
       confidence: 0,
       errorCode: "OFFICIAL_SOURCE_UNAVAILABLE",
-      errorSummary: "The allowed official source could not be processed."
+      errorSummary: "Official founder sources could not be processed safely"
     }
   ]
 };
@@ -340,6 +340,36 @@ describe("buildFounderResearchWorkbook", () => {
         rows: workbookInput.rows.map((row) => row.state === "FAILED" ? { ...row, ...unsafe } : row)
       })).rejects.toThrow("error");
     }
+  });
+
+  it("projects only code-mapped error summaries and rejects raw caller text", async () => {
+    const failedRow = workbookInput.rows.find((row) => row.state === "FAILED")!;
+    const mappedSummary = "Official founder sources could not be processed safely";
+    const mismatches = [
+      "credentials: abc",
+      "ＴｙｐｅＥｒｒｏｒ： at worker（index.ts：1：2）",
+      "Ａuthorization: Βearer abc",
+      "No supported founder evidence was found."
+    ];
+    const { zip } = await openWorkbook();
+    const failures = await text(zip, "xl/worksheets/sheet3.xml");
+
+    expect(failures).toContain(`${mappedSummary}</t>`);
+    await expect(build({
+      ...workbookInput,
+      rows: workbookInput.rows.map((row) => row.state === "FAILED"
+        ? { ...row, errorSummary: "Ｏfficial founder sources could not be processed safely" }
+        : row)
+    })).resolves.toBeInstanceOf(Buffer);
+    for (const errorSummary of mismatches) {
+      await expect(build({
+        ...workbookInput,
+        rows: workbookInput.rows.map((row) => row.state === "FAILED"
+          ? { ...row, errorSummary }
+          : row)
+      })).rejects.toThrow("errorSummary");
+    }
+    expect(failedRow.errorSummary).toBe(mappedSummary);
   });
 
   it("requires every candidate URL to remain visible in needs-verification output", async () => {

@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
 import JSZip from "jszip";
-import { containsUntrustedInstruction } from "../security/untrusted-text.js";
 
 const MAX_COMPANIES = 50;
 const MAX_WORKBOOK_BYTES = 5 * 1024 * 1024;
@@ -11,13 +10,12 @@ const ZIP_TIMESTAMP = new Date(Date.UTC(1980, 0, 1, 0, 0, 0));
 const OOXML_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
 const XML_DECLARATION = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>";
 const RFC3339_TIMESTAMP = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?(Z|[+-](\d{2}):(\d{2}))$/u;
-const SAFE_ERROR_CODES = new Set([
-  "DISCOVERY_BUDGET_EXHAUSTED",
-  "FOUNDER_NOT_FOUND",
-  "OFFICIAL_SOURCE_UNAVAILABLE",
-  "STALE_WORKER"
-]);
-const UNSAFE_ERROR_SUMMARY = /(?:\b(?:https?|ftp):\/\/|\bwww\.|\b(?:authorization|proxy-authorization|www-authenticate|bearer|api[-_ ]?key|access[_ -]?token|password|passwd|secret|cookie|set-cookie)\b|\bHTTP\/\d(?:\.\d)?\b|\b(?:Error|TypeError|ReferenceError|SyntaxError):|\bat\s+\S+\s*\([^)]*:\d+:\d+\))/iu;
+const SAFE_ERROR_SUMMARIES = Object.freeze({
+  DISCOVERY_BUDGET_EXHAUSTED: "Official founder discovery exceeded its bounded time budget",
+  FOUNDER_NOT_FOUND: "No supported founder evidence was found.",
+  OFFICIAL_SOURCE_UNAVAILABLE: "Official founder sources could not be processed safely",
+  STALE_WORKER: "A stale worker result was not applied."
+});
 
 const SHEET_NAMES = [
   "Ready to Review",
@@ -162,6 +160,7 @@ type CellValue = string | number | Date;
 type Cell = Readonly<{ value: CellValue; style?: 1 | 2 | 3 }>;
 type PreparedRow = FounderResearchWorkbookRow & Readonly<{ checkedDate: Date }>;
 type NormalizedTimestamp = Readonly<{ instant: Date; canonical: string }>;
+type SafeErrorCode = keyof typeof SAFE_ERROR_SUMMARIES;
 
 function invalidInput(reason: string): never {
   throw new Error(`Invalid founder research workbook input: ${reason}`);
@@ -246,22 +245,30 @@ function timestamp(field: string, value: unknown): NormalizedTimestamp {
   return Object.freeze({ instant: result, canonical: result.toISOString() });
 }
 
-function safeErrorCode(field: string, value: unknown): string | undefined {
+function safeErrorCode(field: string, value: unknown): SafeErrorCode | undefined {
   const code = optionalText(field, value);
   if (code === undefined) return undefined;
-  if (!/^[A-Z][A-Z0-9_]{2,63}$/u.test(code) || !SAFE_ERROR_CODES.has(code)) {
+  if (!/^[A-Z][A-Z0-9_]{2,63}$/u.test(code) || !Object.hasOwn(SAFE_ERROR_SUMMARIES, code)) {
     invalidInput(`${field} is not an approved safe error code`);
   }
-  return code;
+  return code as SafeErrorCode;
 }
 
-function safeErrorSummary(field: string, value: unknown): string | undefined {
-  const summary = optionalText(field, value);
-  if (summary === undefined) return undefined;
-  if (summary.length > 512 || UNSAFE_ERROR_SUMMARY.test(summary) || containsUntrustedInstruction(summary)) {
-    invalidInput(`${field} is not safe for workbook export`);
+function safeErrorSummary(
+  field: string,
+  code: SafeErrorCode | undefined,
+  value: unknown
+): string | undefined {
+  const supplied = optionalText(field, value);
+  if (code === undefined) {
+    if (supplied !== undefined) invalidInput(`${field} requires an approved error code`);
+    return undefined;
   }
-  return summary;
+  const mapped = SAFE_ERROR_SUMMARIES[code];
+  if (supplied === undefined || supplied.normalize("NFKC") !== mapped) {
+    invalidInput(`${field} must match the approved summary for ${code}`);
+  }
+  return mapped;
 }
 
 function validateUrl(field: string, value: string | undefined): string | undefined {
@@ -337,6 +344,12 @@ function validateInput(input: FounderResearchWorkbookInput): Readonly<{
       invalidInput(`rows[${index}].confidence must be between 0 and 1`);
     }
     const checkedAt = timestamp(`rows[${index}].checkedAt`, row.checkedAt);
+    const errorCode = safeErrorCode(`rows[${index}].errorCode`, row.errorCode);
+    const errorSummary = safeErrorSummary(
+      `rows[${index}].errorSummary`,
+      errorCode,
+      row.errorSummary
+    );
     const normalized: FounderResearchWorkbookRow = {
       ...row,
       id,
@@ -364,8 +377,8 @@ function validateInput(input: FounderResearchWorkbookInput): Readonly<{
       personId: optionalText(`rows[${index}].personId`, row.personId),
       targetId: optionalText(`rows[${index}].targetId`, row.targetId),
       draftId: optionalText(`rows[${index}].draftId`, row.draftId),
-      errorCode: safeErrorCode(`rows[${index}].errorCode`, row.errorCode),
-      errorSummary: safeErrorSummary(`rows[${index}].errorSummary`, row.errorSummary)
+      errorCode,
+      errorSummary
     };
     if (normalized.hiring !== undefined && typeof normalized.hiring !== "boolean") invalidInput(`rows[${index}].hiring must be boolean`);
     if ((normalized.state === "CONFIRMED" || normalized.state === "VERIFIED") && (
