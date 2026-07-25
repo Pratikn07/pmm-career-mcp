@@ -30,6 +30,17 @@ async function brandBriefSourceClaimsSnapshot(): Promise<string> {
   return await readFile(resolve("drizzle/meta/0006_snapshot.json"), "utf8");
 }
 
+async function founderResearchExportMigrationSql(): Promise<string> {
+  return await readFile(
+    resolve("drizzle/0007_yc_founder_research_export.sql"),
+    "utf8"
+  );
+}
+
+async function founderResearchExportSnapshot(): Promise<string> {
+  return await readFile(resolve("drizzle/meta/0007_snapshot.json"), "utf8");
+}
+
 describe("Supabase runtime-role operator template", () => {
   it("allows migrations after the runtime-role template bootstraps the private schema", async () => {
     const sql = await initialMigrationSql();
@@ -249,5 +260,68 @@ describe("Supabase runtime-role operator template", () => {
     expect(sql).toMatch(/pg_catalog\.pg_auth_members/i);
     expect(sql).toMatch(/member_role\.rolname\s*=\s*'career_mcp_runtime'/i);
     expect(sql).toMatch(/raise\s+exception[\s\S]*role membership/i);
+  });
+
+  it("keeps founder workbook bytes and capability hashes private to the runtime role", async () => {
+    const sql = await runtimeRoleSql();
+
+    expect(sql).toMatch(
+      /grant\s+select,\s*insert,\s*update,\s*delete\s+on\s+all\s+tables\s+in\s+schema\s+career_mcp\s+to\s+career_mcp_runtime/i
+    );
+    expect(sql).toMatch(
+      /founder_research_exports[\s\S]*workbook_bytes[\s\S]*career_mcp_runtime/i
+    );
+    expect(sql).toMatch(
+      /founder_export_download_capabilities[\s\S]*token_hash_sha256[\s\S]*career_mcp_runtime/i
+    );
+    expect(sql).not.toMatch(
+      /grant[\s\S]{0,160}(?:founder_research_exports|founder_export_download_capabilities)[\s\S]{0,160}\b(?:public|anon|authenticated|service_role)\b/i
+    );
+  });
+
+  it("keeps founder profile confirmation events append-only for the runtime role", async () => {
+    const sql = await runtimeRoleSql();
+    const broadCurrentGrant = sql.search(
+      /grant\s+select,\s*insert,\s*update,\s*delete\s+on\s+all\s+tables\s+in\s+schema\s+career_mcp/i
+    );
+    const broadDefaultGrant = sql.search(
+      /alter\s+default\s+privileges\s+in\s+schema\s+career_mcp[\s\S]*?grant\s+select,\s*insert,\s*update,\s*delete\s+on\s+tables\s+to\s+career_mcp_runtime/i
+    );
+    const eventMutationRevoke = sql.search(
+      /revoke\s+update,\s*delete,\s*truncate\s+on\s+table\s+career_mcp\.founder_profile_confirmation_events\s+from\s+career_mcp_runtime/i
+    );
+
+    expect(eventMutationRevoke).toBeGreaterThan(broadCurrentGrant);
+    expect(eventMutationRevoke).toBeGreaterThan(broadDefaultGrant);
+    expect(sql).toMatch(
+      /grant\s+select,\s*insert\s+on\s+table\s+career_mcp\.founder_profile_confirmation_events\s+to\s+career_mcp_runtime/i
+    );
+  });
+
+  it("generates only private non-destructive founder research objects", async () => {
+    const sql = await founderResearchExportMigrationSql();
+    const snapshot = await founderResearchExportSnapshot();
+
+    for (const table of [
+      "founder_research_runs",
+      "founder_research_run_items",
+      "founder_research_run_people",
+      "founder_profile_candidates",
+      "founder_profile_confirmation_events",
+      "founder_research_exports",
+      "founder_export_download_capabilities"
+    ]) {
+      expect(sql).toMatch(new RegExp(
+        `create\\s+table\\s+\"career_mcp\"\\.\"${table}\"`,
+        "i"
+      ));
+      expect(snapshot).toContain(`career_mcp.${table}`);
+    }
+
+    expect(sql).not.toMatch(/"(?:public|storage)"\./i);
+    expect(sql).not.toMatch(/\bservice_role\b/i);
+    expect(sql).not.toMatch(/disable\s+row\s+level\s+security/i);
+    expect(sql).not.toMatch(/(?:^|\n)\s*(?:drop|truncate|delete|update)\b/im);
+    expect(sql).not.toMatch(/\b(?:password|secret|credential)\b/i);
   });
 });

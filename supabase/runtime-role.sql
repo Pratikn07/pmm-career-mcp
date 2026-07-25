@@ -74,6 +74,42 @@ alter default privileges in schema career_mcp
 alter default privileges in schema career_mcp
   grant usage, select on sequences to career_mcp_runtime;
 
+-- Workbook bytes and capability token hashes remain private application data.
+-- Only career_mcp_runtime receives application privileges for
+-- founder_research_exports.workbook_bytes and
+-- founder_export_download_capabilities.token_hash_sha256.
+do $founder_artifact_privileges$
+declare
+  private_table text;
+  supabase_role text;
+begin
+  foreach private_table in array array[
+    'founder_research_exports',
+    'founder_export_download_capabilities'
+  ]
+  loop
+    if pg_catalog.to_regclass('career_mcp.' || private_table) is not null then
+      execute pg_catalog.format(
+        'revoke all privileges on table career_mcp.%I from public',
+        private_table
+      );
+
+      for supabase_role in
+        select role_row.rolname
+        from pg_catalog.pg_roles role_row
+        where role_row.rolname in ('anon', 'authenticated', 'service_role')
+      loop
+        execute pg_catalog.format(
+          'revoke all privileges on table career_mcp.%I from %I',
+          private_table,
+          supabase_role
+        );
+      end loop;
+    end if;
+  end loop;
+end
+$founder_artifact_privileges$;
+
 -- The durable claim ledger is trigger-managed. Keep this block after every
 -- broad current/default grant so an idempotent rerun cannot restore mutations.
 -- The guards also let operators provision the runtime role before migrations.
@@ -111,6 +147,13 @@ begin
   if pg_catalog.to_regclass('career_mcp.runtime_role_owners') is not null then
     execute 'revoke insert, update, delete, truncate on table career_mcp.runtime_role_owners from career_mcp_runtime';
     execute 'grant select on table career_mcp.runtime_role_owners to career_mcp_runtime';
+  end if;
+
+  if pg_catalog.to_regclass(
+    'career_mcp.founder_profile_confirmation_events'
+  ) is not null then
+    execute 'revoke update, delete, truncate on table career_mcp.founder_profile_confirmation_events from career_mcp_runtime';
+    execute 'grant select, insert on table career_mcp.founder_profile_confirmation_events to career_mcp_runtime';
   end if;
 
   if pg_catalog.to_regprocedure(

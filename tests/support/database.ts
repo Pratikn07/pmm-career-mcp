@@ -76,6 +76,13 @@ export async function createTestDatabase(options: {
     resetForTests: async () => {
       await client.exec(`
         truncate table
+          career_mcp.founder_export_download_capabilities,
+          career_mcp.founder_profile_confirmation_events,
+          career_mcp.founder_profile_candidates,
+          career_mcp.founder_research_exports,
+          career_mcp.founder_research_run_people,
+          career_mcp.founder_research_run_items,
+          career_mcp.founder_research_runs,
           career_mcp.publish_attempt_media,
           career_mcp.publish_attempts,
           career_mcp.post_previews,

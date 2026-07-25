@@ -3,6 +3,7 @@ import {
   bigint,
   boolean,
   check,
+  customType,
   doublePrecision,
   foreignKey,
   index,
@@ -22,6 +23,27 @@ export const careerMcp = pgSchema("career_mcp");
 const timestamptz = (name: string) => timestamp(name, {
   mode: "string",
   withTimezone: true
+});
+
+const privateBytea = customType<{
+  data: Buffer | Uint8Array;
+  driverData: Uint8Array;
+}>({
+  dataType() {
+    return "bytea";
+  },
+  toDriver(value) {
+    if (!(value instanceof Uint8Array)) {
+      throw new TypeError("Private bytea values must be a Buffer or Uint8Array");
+    }
+    return value;
+  },
+  fromDriver(value) {
+    if (!(value instanceof Uint8Array)) {
+      throw new TypeError("Private bytea driver values must be a Buffer or Uint8Array");
+    }
+    return value;
+  }
 });
 
 export const settings = careerMcp.table("settings", {
@@ -506,6 +528,415 @@ export const publishAttemptMedia = careerMcp.table("publish_attempt_media", {
   )
 ]);
 
+export const founderResearchRuns = careerMcp.table("founder_research_runs", {
+  id: uuid("id").primaryKey(),
+  ownerSubject: uuid("owner_subject").notNull(),
+  state: text("state").notNull(),
+  queryJson: jsonb("query_json").$type<Record<string, unknown>>().notNull(),
+  requestedLimit: integer("requested_limit").notNull(),
+  selectedCount: integer("selected_count").notNull().default(0),
+  processedCount: integer("processed_count").notNull().default(0),
+  completeCount: integer("complete_count").notNull().default(0),
+  partialCount: integer("partial_count").notNull().default(0),
+  ambiguousCount: integer("ambiguous_count").notNull().default(0),
+  notFoundCount: integer("not_found_count").notNull().default(0),
+  failedCount: integer("failed_count").notNull().default(0),
+  createdAt: timestamptz("created_at").notNull(),
+  startedAt: timestamptz("started_at"),
+  completedAt: timestamptz("completed_at"),
+  updatedAt: timestamptz("updated_at").notNull()
+}, (table) => [
+  unique("founder_research_runs_id_owner_unique").on(table.id, table.ownerSubject),
+  index("founder_research_runs_owner_subject_idx").on(table.ownerSubject),
+  check(
+    "founder_research_runs_state_check",
+    sql`${table.state} in (
+      'PENDING',
+      'RUNNING',
+      'NEEDS_PUBLIC_SEARCH',
+      'COMPLETE',
+      'PARTIAL',
+      'FAILED'
+    )`
+  ),
+  check(
+    "founder_research_runs_requested_limit_check",
+    sql`${table.requestedLimit} between 1 and 50`
+  ),
+  check(
+    "founder_research_runs_counts_check",
+    sql`
+      ${table.selectedCount} between 0 and ${table.requestedLimit}
+      and ${table.processedCount} between 0 and ${table.selectedCount}
+      and ${table.completeCount} >= 0
+      and ${table.partialCount} >= 0
+      and ${table.ambiguousCount} >= 0
+      and ${table.notFoundCount} >= 0
+      and ${table.failedCount} >= 0
+      and (
+        ${table.completeCount}
+        + ${table.partialCount}
+        + ${table.ambiguousCount}
+        + ${table.notFoundCount}
+        + ${table.failedCount}
+      ) <= ${table.processedCount}
+    `
+  ),
+  check(
+    "founder_research_runs_timestamps_check",
+    sql`
+      ${table.updatedAt} >= ${table.createdAt}
+      and (${table.startedAt} is null or ${table.startedAt} >= ${table.createdAt})
+      and (
+        ${table.completedAt} is null
+        or (
+          ${table.completedAt} >= ${table.createdAt}
+          and (${table.startedAt} is null or ${table.completedAt} >= ${table.startedAt})
+        )
+      )
+    `
+  )
+]);
+
+export const founderResearchRunItems = careerMcp.table("founder_research_run_items", {
+  id: uuid("id").primaryKey(),
+  runId: uuid("run_id").notNull(),
+  ownerSubject: uuid("owner_subject").notNull(),
+  companyId: uuid("company_id").notNull(),
+  state: text("state").notNull(),
+  attemptCount: integer("attempt_count").notNull().default(0),
+  leaseExpiresAt: timestamptz("lease_expires_at"),
+  errorCode: text("error_code"),
+  errorSummary: text("error_summary"),
+  errorDetailJson: jsonb("error_detail_json").$type<Record<string, unknown>>(),
+  checkedAt: timestamptz("checked_at"),
+  createdAt: timestamptz("created_at").notNull(),
+  updatedAt: timestamptz("updated_at").notNull()
+}, (table) => [
+  unique("founder_research_run_items_id_owner_unique").on(table.id, table.ownerSubject),
+  foreignKey({
+    name: "founder_research_run_items_run_owner_fk",
+    columns: [table.runId, table.ownerSubject],
+    foreignColumns: [founderResearchRuns.id, founderResearchRuns.ownerSubject]
+  }),
+  foreignKey({
+    name: "founder_research_run_items_company_id_fk",
+    columns: [table.companyId],
+    foreignColumns: [companies.id]
+  }),
+  unique("founder_research_run_items_run_company_unique")
+    .on(table.runId, table.companyId),
+  index("founder_research_run_items_run_owner_idx")
+    .on(table.runId, table.ownerSubject),
+  index("founder_research_run_items_company_id_idx").on(table.companyId),
+  index("founder_research_run_items_owner_subject_idx").on(table.ownerSubject),
+  check(
+    "founder_research_run_items_state_check",
+    sql`${table.state} in (
+      'PENDING',
+      'LEASED',
+      'NEEDS_PUBLIC_SEARCH',
+      'COMPLETE',
+      'PARTIAL',
+      'NOT_FOUND',
+      'AMBIGUOUS',
+      'FAILED'
+    )`
+  ),
+  check(
+    "founder_research_run_items_attempt_count_check",
+    sql`${table.attemptCount} >= 0`
+  ),
+  check(
+    "founder_research_run_items_error_bounds_check",
+    sql`
+      (${table.errorCode} is null or char_length(${table.errorCode}) between 1 and 128)
+      and (
+        ${table.errorSummary} is null
+        or char_length(${table.errorSummary}) between 1 and 1000
+      )
+    `
+  ),
+  check(
+    "founder_research_run_items_timestamps_check",
+    sql`
+      ${table.updatedAt} >= ${table.createdAt}
+      and (${table.checkedAt} is null or ${table.checkedAt} >= ${table.createdAt})
+    `
+  )
+]);
+
+export const founderResearchRunPeople = careerMcp.table("founder_research_run_people", {
+  id: uuid("id").primaryKey(),
+  runItemId: uuid("run_item_id").notNull(),
+  ownerSubject: uuid("owner_subject").notNull(),
+  personId: uuid("person_id").notNull(),
+  identityStatus: text("identity_status").notNull(),
+  founderRoleMatch: text("founder_role_match").notNull(),
+  confidence: doublePrecision("confidence").notNull(),
+  createdAt: timestamptz("created_at").notNull(),
+  updatedAt: timestamptz("updated_at").notNull()
+}, (table) => [
+  unique("founder_research_run_people_id_owner_unique")
+    .on(table.id, table.ownerSubject),
+  foreignKey({
+    name: "founder_research_run_people_run_item_owner_fk",
+    columns: [table.runItemId, table.ownerSubject],
+    foreignColumns: [founderResearchRunItems.id, founderResearchRunItems.ownerSubject]
+  }),
+  foreignKey({
+    name: "founder_research_run_people_person_id_fk",
+    columns: [table.personId],
+    foreignColumns: [people.id]
+  }),
+  unique("founder_research_run_people_item_person_unique")
+    .on(table.runItemId, table.personId),
+  index("founder_research_run_people_run_item_owner_idx")
+    .on(table.runItemId, table.ownerSubject),
+  index("founder_research_run_people_person_id_idx").on(table.personId),
+  index("founder_research_run_people_owner_subject_idx").on(table.ownerSubject),
+  check(
+    "founder_research_run_people_identity_status_check",
+    sql`${table.identityStatus} in ('VERIFIED','CANDIDATE','CONFIRMED')`
+  ),
+  check(
+    "founder_research_run_people_role_match_check",
+    sql`char_length(${table.founderRoleMatch}) between 1 and 128`
+  ),
+  check(
+    "founder_research_run_people_confidence_check",
+    sql`${table.confidence} between 0 and 1`
+  ),
+  check(
+    "founder_research_run_people_timestamps_check",
+    sql`${table.updatedAt} >= ${table.createdAt}`
+  )
+]);
+
+export const founderProfileCandidates = careerMcp.table("founder_profile_candidates", {
+  id: uuid("id").primaryKey(),
+  runPersonId: uuid("run_person_id").notNull(),
+  ownerSubject: uuid("owner_subject").notNull(),
+  profileUrl: text("profile_url").notNull(),
+  status: text("status").notNull(),
+  sourceKind: text("source_kind").notNull(),
+  searchQuery: text("search_query"),
+  evidenceUrl: text("evidence_url").notNull(),
+  evidenceTitle: text("evidence_title"),
+  evidenceSnippet: text("evidence_snippet"),
+  evidenceMetadataJson: jsonb("evidence_metadata_json")
+    .$type<Record<string, unknown>>()
+    .notNull(),
+  checkedAt: timestamptz("checked_at").notNull(),
+  confidence: doublePrecision("confidence").notNull(),
+  createdAt: timestamptz("created_at").notNull(),
+  updatedAt: timestamptz("updated_at").notNull()
+}, (table) => [
+  unique("founder_profile_candidates_id_owner_unique").on(table.id, table.ownerSubject),
+  foreignKey({
+    name: "founder_profile_candidates_run_person_owner_fk",
+    columns: [table.runPersonId, table.ownerSubject],
+    foreignColumns: [founderResearchRunPeople.id, founderResearchRunPeople.ownerSubject]
+  }),
+  unique("founder_profile_candidates_owner_person_url_unique")
+    .on(table.ownerSubject, table.runPersonId, table.profileUrl),
+  index("founder_profile_candidates_run_person_owner_idx")
+    .on(table.runPersonId, table.ownerSubject),
+  index("founder_profile_candidates_owner_subject_idx").on(table.ownerSubject),
+  check(
+    "founder_profile_candidates_status_check",
+    sql`${table.status} in ('VERIFIED','CANDIDATE','CONFIRMED','REJECTED')`
+  ),
+  check(
+    "founder_profile_candidates_source_kind_check",
+    sql`
+      ${table.sourceKind} in (
+        'OFFICIAL_YC',
+        'OFFICIAL_COMPANY',
+        'PUBLIC_SEARCH',
+        'MANUAL_CONFIRMATION'
+      )
+      and (
+        (
+          ${table.sourceKind} = 'PUBLIC_SEARCH'
+          and ${table.searchQuery} is not null
+          and char_length(${table.searchQuery}) between 1 and 500
+        )
+        or (${table.sourceKind} <> 'PUBLIC_SEARCH' and ${table.searchQuery} is null)
+      )
+    `
+  ),
+  check(
+    "founder_profile_candidates_profile_url_check",
+    sql`
+      char_length(${table.profileUrl}) <= 2048
+      and octet_length(${table.profileUrl}) <= 4096
+      and ${table.profileUrl} ~ '^https://([A-Za-z0-9-]+\\.)*linkedin\\.com/in/[A-Za-z0-9%._~-]+/?$'
+    `
+  ),
+  check(
+    "founder_profile_candidates_evidence_bounds_check",
+    sql`
+      char_length(${table.evidenceUrl}) between 1 and 2048
+      and octet_length(${table.evidenceUrl}) <= 4096
+      and (${table.evidenceTitle} is null or char_length(${table.evidenceTitle}) between 1 and 512)
+      and (
+        ${table.evidenceSnippet} is null
+        or char_length(${table.evidenceSnippet}) between 1 and 2000
+      )
+    `
+  ),
+  check(
+    "founder_profile_candidates_confidence_check",
+    sql`${table.confidence} between 0 and 1`
+  ),
+  check(
+    "founder_profile_candidates_timestamps_check",
+    sql`${table.updatedAt} >= ${table.createdAt}`
+  )
+]);
+
+export const founderProfileConfirmationEvents = careerMcp.table(
+  "founder_profile_confirmation_events",
+  {
+    id: uuid("id").primaryKey(),
+    candidateId: uuid("candidate_id").notNull(),
+    ownerSubject: uuid("owner_subject").notNull(),
+    event: text("event").notNull(),
+    note: text("note"),
+    createdAt: timestamptz("created_at").notNull()
+  },
+  (table) => [
+    foreignKey({
+      name: "founder_profile_confirmation_events_candidate_owner_fk",
+      columns: [table.candidateId, table.ownerSubject],
+      foreignColumns: [
+        founderProfileCandidates.id,
+        founderProfileCandidates.ownerSubject
+      ]
+    }),
+    index("founder_profile_confirmation_events_candidate_owner_idx")
+      .on(table.candidateId, table.ownerSubject),
+    index("founder_profile_confirmation_events_owner_subject_idx")
+      .on(table.ownerSubject),
+    check(
+      "founder_profile_confirmation_events_event_check",
+      sql`${table.event} in ('CONFIRMED','REJECTED')`
+    ),
+    check(
+      "founder_profile_confirmation_events_note_check",
+      sql`${table.note} is null or char_length(${table.note}) between 1 and 1000`
+    )
+  ]
+);
+
+export const founderResearchExports = careerMcp.table("founder_research_exports", {
+  id: uuid("id").primaryKey(),
+  runId: uuid("run_id").notNull(),
+  ownerSubject: uuid("owner_subject").notNull(),
+  state: text("state").notNull(),
+  fileName: text("file_name").notNull(),
+  mimeType: text("mime_type").notNull(),
+  byteSize: bigint("byte_size", { mode: "number" }).notNull(),
+  checksumSha256: text("checksum_sha256").notNull(),
+  workbookBytes: privateBytea("workbook_bytes").notNull(),
+  rowCount: integer("row_count").notNull(),
+  sheetCount: integer("sheet_count").notNull(),
+  createdAt: timestamptz("created_at").notNull(),
+  expiresAt: timestamptz("expires_at").notNull()
+}, (table) => [
+  unique("founder_research_exports_id_owner_unique").on(table.id, table.ownerSubject),
+  foreignKey({
+    name: "founder_research_exports_run_owner_fk",
+    columns: [table.runId, table.ownerSubject],
+    foreignColumns: [founderResearchRuns.id, founderResearchRuns.ownerSubject]
+  }),
+  index("founder_research_exports_run_owner_idx")
+    .on(table.runId, table.ownerSubject),
+  index("founder_research_exports_owner_subject_idx").on(table.ownerSubject),
+  check(
+    "founder_research_exports_state_check",
+    sql`${table.state} in ('READY','EXPIRED','DELETED')`
+  ),
+  check(
+    "founder_research_exports_file_name_check",
+    sql`
+      char_length(${table.fileName}) between 6 and 255
+      and ${table.fileName} ~ '\\.xlsx$'
+    `
+  ),
+  check(
+    "founder_research_exports_mime_type_check",
+    sql`${table.mimeType} = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'`
+  ),
+  check(
+    "founder_research_exports_size_check",
+    sql`
+      ${table.byteSize} between 1 and 5242880
+      and octet_length(${table.workbookBytes}) = ${table.byteSize}
+    `
+  ),
+  check(
+    "founder_research_exports_checksum_check",
+    sql`${table.checksumSha256} ~ '^[0-9a-f]{64}$'`
+  ),
+  check(
+    "founder_research_exports_counts_check",
+    sql`${table.rowCount} >= 0 and ${table.sheetCount} between 1 and 4`
+  ),
+  check(
+    "founder_research_exports_timestamps_check",
+    sql`
+      ${table.expiresAt} > ${table.createdAt}
+      and ${table.expiresAt} <= ${table.createdAt} + interval '7 days'
+    `
+  )
+]);
+
+export const founderExportDownloadCapabilities = careerMcp.table(
+  "founder_export_download_capabilities",
+  {
+    id: uuid("id").primaryKey(),
+    exportId: uuid("export_id").notNull(),
+    ownerSubject: uuid("owner_subject").notNull(),
+    tokenHashSha256: text("token_hash_sha256").notNull(),
+    expiresAt: timestamptz("expires_at").notNull(),
+    createdAt: timestamptz("created_at").notNull(),
+    lastDownloadedAt: timestamptz("last_downloaded_at")
+  },
+  (table) => [
+    foreignKey({
+      name: "founder_export_download_capabilities_export_owner_fk",
+      columns: [table.exportId, table.ownerSubject],
+      foreignColumns: [founderResearchExports.id, founderResearchExports.ownerSubject]
+    }),
+    uniqueIndex("founder_export_download_capabilities_token_hash_unique")
+      .on(table.tokenHashSha256),
+    index("founder_export_download_capabilities_export_owner_idx")
+      .on(table.exportId, table.ownerSubject),
+    index("founder_export_download_capabilities_owner_subject_idx")
+      .on(table.ownerSubject),
+    check(
+      "founder_export_download_capabilities_token_hash_check",
+      sql`${table.tokenHashSha256} ~ '^[0-9a-f]{64}$'`
+    ),
+    check(
+      "founder_export_download_capabilities_timestamps_check",
+      sql`
+        ${table.expiresAt} > ${table.createdAt}
+        and ${table.expiresAt} <= ${table.createdAt} + interval '15 minutes'
+        and (
+          ${table.lastDownloadedAt} is null
+          or (
+            ${table.lastDownloadedAt} >= ${table.createdAt}
+            and ${table.lastDownloadedAt} <= ${table.expiresAt}
+          )
+        )
+      `
+    )
+  ]
+);
+
 export const oauthTokens = careerMcp.table("oauth_tokens", {
   id: uuid("id").primaryKey(),
   provider: text("provider").notNull().unique(),
@@ -539,5 +970,12 @@ export const schema = {
   postPreviews,
   publishAttempts,
   publishAttemptMedia,
+  founderResearchRuns,
+  founderResearchRunItems,
+  founderResearchRunPeople,
+  founderProfileCandidates,
+  founderProfileConfirmationEvents,
+  founderResearchExports,
+  founderExportDownloadCapabilities,
   oauthTokens
 };

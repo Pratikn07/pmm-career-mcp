@@ -576,6 +576,219 @@ describe("brand brief source claims", () => {
 });
 
 describe("database domain constraints", () => {
+  it("defines the complete owner-scoped founder research constraint inventory", async () => {
+    const constraints = await queryTestDatabase<{
+      constraint_name: string;
+      definition: string;
+    }>(db, `
+      select
+        constraint_row.conname as constraint_name,
+        pg_get_constraintdef(constraint_row.oid) as definition
+      from pg_constraint constraint_row
+      where constraint_row.connamespace = 'career_mcp'::regnamespace
+        and constraint_row.conname like 'founder_%'
+      order by constraint_row.conname
+    `);
+    const byName = new Map(
+      constraints.map(({ constraint_name, definition }) => [constraint_name, definition])
+    );
+
+    for (const name of [
+      "founder_research_runs_requested_limit_check",
+      "founder_research_runs_counts_check",
+      "founder_research_runs_state_check",
+      "founder_research_runs_timestamps_check",
+      "founder_research_run_items_attempt_count_check",
+      "founder_research_run_items_error_bounds_check",
+      "founder_research_run_items_state_check",
+      "founder_research_run_items_timestamps_check",
+      "founder_research_run_people_confidence_check",
+      "founder_research_run_people_identity_status_check",
+      "founder_research_run_people_timestamps_check",
+      "founder_profile_candidates_confidence_check",
+      "founder_profile_candidates_evidence_bounds_check",
+      "founder_profile_candidates_profile_url_check",
+      "founder_profile_candidates_source_kind_check",
+      "founder_profile_candidates_status_check",
+      "founder_profile_candidates_timestamps_check",
+      "founder_profile_confirmation_events_event_check",
+      "founder_profile_confirmation_events_note_check",
+      "founder_research_exports_checksum_check",
+      "founder_research_exports_counts_check",
+      "founder_research_exports_file_name_check",
+      "founder_research_exports_mime_type_check",
+      "founder_research_exports_size_check",
+      "founder_research_exports_state_check",
+      "founder_research_exports_timestamps_check",
+      "founder_export_download_capabilities_token_hash_check",
+      "founder_export_download_capabilities_timestamps_check"
+    ]) {
+      expect(byName.has(name), `missing ${name}`).toBe(true);
+    }
+
+    expect(byName.get("founder_research_runs_requested_limit_check"))
+      .toMatch(/requested_limit.*>= 1.*requested_limit.*<= 50/i);
+    expect(byName.get("founder_research_runs_state_check"))
+      .toMatch(/PENDING.*RUNNING.*NEEDS_PUBLIC_SEARCH.*COMPLETE.*PARTIAL.*FAILED/i);
+    expect(byName.get("founder_research_run_items_state_check"))
+      .toMatch(/PENDING.*LEASED.*NEEDS_PUBLIC_SEARCH.*COMPLETE.*PARTIAL.*NOT_FOUND.*AMBIGUOUS.*FAILED/i);
+    expect(byName.get("founder_profile_candidates_status_check"))
+      .toMatch(/VERIFIED.*CANDIDATE.*CONFIRMED.*REJECTED/i);
+    expect(byName.get("founder_profile_candidates_source_kind_check"))
+      .toMatch(/PUBLIC_SEARCH.*search_query IS NOT NULL.*char_length/i);
+    expect(byName.get("founder_research_exports_size_check"))
+      .toMatch(/byte_size.*>= 1.*byte_size.*<= 5242880.*octet_length.*workbook_bytes/i);
+    expect(byName.get("founder_research_exports_mime_type_check"))
+      .toContain("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    expect(byName.get("founder_export_download_capabilities_token_hash_check"))
+      .toMatch(/\^\[0-9a-f\]\{64\}\$/i);
+  });
+
+  it("uses native jsonb and private bytea storage for founder research artifacts", async () => {
+    const columns = await queryTestDatabase<{
+      table_name: string;
+      column_name: string;
+      data_type: string;
+    }>(db, `
+      select table_name, column_name, data_type
+      from information_schema.columns
+      where table_schema = 'career_mcp'
+        and (
+          (table_name = 'founder_research_runs' and column_name = 'query_json')
+          or (
+            table_name = 'founder_research_run_items'
+            and column_name = 'error_detail_json'
+          )
+          or (
+            table_name = 'founder_profile_candidates'
+            and column_name = 'evidence_metadata_json'
+          )
+          or (
+            table_name = 'founder_research_exports'
+            and column_name = 'workbook_bytes'
+          )
+        )
+      order by table_name, column_name
+    `);
+
+    expect(columns).toEqual([
+      {
+        table_name: "founder_profile_candidates",
+        column_name: "evidence_metadata_json",
+        data_type: "jsonb"
+      },
+      {
+        table_name: "founder_research_exports",
+        column_name: "workbook_bytes",
+        data_type: "bytea"
+      },
+      {
+        table_name: "founder_research_run_items",
+        column_name: "error_detail_json",
+        data_type: "jsonb"
+      },
+      {
+        table_name: "founder_research_runs",
+        column_name: "query_json",
+        data_type: "jsonb"
+      }
+    ]);
+  });
+
+  it("uses composite owner foreign keys and complete owner indexes for every founder child", async () => {
+    const foreignKeys = await queryTestDatabase<{
+      constraint_name: string;
+      columns: string;
+      foreign_columns: string;
+    }>(db, `
+      select
+        constraint_row.conname as constraint_name,
+        (
+          select string_agg(attribute.attname, ',' order by key_column.ordinality)
+          from unnest(constraint_row.conkey) with ordinality as key_column(attnum, ordinality)
+          join pg_attribute attribute
+            on attribute.attrelid = constraint_row.conrelid
+           and attribute.attnum = key_column.attnum
+        ) as columns,
+        (
+          select string_agg(attribute.attname, ',' order by key_column.ordinality)
+          from unnest(constraint_row.confkey) with ordinality as key_column(attnum, ordinality)
+          join pg_attribute attribute
+            on attribute.attrelid = constraint_row.confrelid
+           and attribute.attnum = key_column.attnum
+        ) as foreign_columns
+      from pg_constraint constraint_row
+      where constraint_row.connamespace = 'career_mcp'::regnamespace
+        and constraint_row.contype = 'f'
+        and constraint_row.conname in (
+          'founder_research_run_items_run_owner_fk',
+          'founder_research_run_people_run_item_owner_fk',
+          'founder_profile_candidates_run_person_owner_fk',
+          'founder_profile_confirmation_events_candidate_owner_fk',
+          'founder_research_exports_run_owner_fk',
+          'founder_export_download_capabilities_export_owner_fk'
+        )
+      order by constraint_row.conname
+    `);
+
+    expect(foreignKeys).toHaveLength(6);
+    expect(foreignKeys.every(({ columns, foreign_columns }) =>
+      columns.endsWith(",owner_subject") && foreign_columns.endsWith(",owner_subject")
+    )).toBe(true);
+
+    const missingOwnerIndexes = await queryTestDatabase<{ table_name: string }>(db, `
+      select required.table_name
+      from (
+        values
+          ('founder_research_runs'),
+          ('founder_research_run_items'),
+          ('founder_research_run_people'),
+          ('founder_profile_candidates'),
+          ('founder_profile_confirmation_events'),
+          ('founder_research_exports'),
+          ('founder_export_download_capabilities')
+      ) required(table_name)
+      where not exists (
+        select 1
+        from pg_indexes index_row
+        where index_row.schemaname = 'career_mcp'
+          and index_row.tablename = required.table_name
+          and index_row.indexdef ~ '\\(owner_subject(?:,|\\))'
+      )
+      order by required.table_name
+    `);
+    expect(missingOwnerIndexes).toEqual([]);
+  });
+
+  it("rejects cross-owner founder research relationships", async () => {
+    const runId = randomUUID();
+    const runOwner = randomUUID();
+    const otherOwner = randomUUID();
+    const company = await db.companies.upsert({
+      ycId: `cross-owner-${randomUUID()}`,
+      name: "Cross Owner"
+    });
+    await queryTestDatabase(db, `
+      insert into career_mcp.founder_research_runs (
+        id, owner_subject, state, query_json, requested_limit,
+        selected_count, processed_count, complete_count, partial_count,
+        ambiguous_count, not_found_count, failed_count, created_at, updated_at
+      ) values (
+        '${runId}', '${runOwner}', 'PENDING', '{}'::jsonb, 1,
+        0, 0, 0, 0, 0, 0, 0, now(), now()
+      )
+    `);
+
+    await expect(queryTestDatabase(db, `
+      insert into career_mcp.founder_research_run_items (
+        id, run_id, owner_subject, company_id, state, attempt_count, created_at, updated_at
+      ) values (
+        '${randomUUID()}', '${runId}', '${otherOwner}', '${company.id}',
+        'PENDING', 0, now(), now()
+      )
+    `)).rejects.toMatchObject({ code: "23503" });
+  });
+
   it.each([-0.01, 1.01])("rejects evidence confidence %s outside 0..1", async (confidence) => {
     const { person } = await seedConstraintGraph();
     await expectCheckViolation(`

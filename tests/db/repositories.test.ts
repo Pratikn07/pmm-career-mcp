@@ -111,7 +111,7 @@ it("persists a target with evidence provenance", async () => {
 });
 
 describe("database lifecycle", () => {
-  it("migrates exactly the twenty-three application tables into the private schema", async () => {
+  it("migrates exactly the thirty application tables into the private schema", async () => {
     const tables = await queryTestDatabase<{ table_name: string }>(db, `
       select table_name
       from information_schema.tables
@@ -127,6 +127,13 @@ describe("database lifecycle", () => {
       "brand_visual_renders",
       "companies",
       "evidence",
+      "founder_export_download_capabilities",
+      "founder_profile_candidates",
+      "founder_profile_confirmation_events",
+      "founder_research_exports",
+      "founder_research_run_items",
+      "founder_research_run_people",
+      "founder_research_runs",
       "media_usage_claims",
       "oauth_tokens",
       "outreach_drafts",
@@ -315,6 +322,95 @@ describe("database lifecycle", () => {
 
     expect(await db.settings.get("reset-check")).toBeUndefined();
     expect(await db.companies.list()).toEqual([]);
+  });
+
+  it("resets founder research and export rows in child-to-parent order", async () => {
+    const ownerSubject = randomUUID();
+    const runId = randomUUID();
+    const runItemId = randomUUID();
+    const runPersonId = randomUUID();
+    const candidateId = randomUUID();
+    const exportId = randomUUID();
+    const company = await db.companies.upsert({
+      ycId: `reset-founder-${randomUUID()}`,
+      name: "Reset Founder Co"
+    });
+    const person = await db.people.upsert({
+      companyId: company.id,
+      name: "Reset Founder",
+      role: "Founder"
+    });
+
+    for (const statement of [
+      `insert into career_mcp.founder_research_runs (
+        id, owner_subject, state, query_json, requested_limit,
+        selected_count, processed_count, complete_count, partial_count,
+        ambiguous_count, not_found_count, failed_count, created_at, updated_at
+      ) values (
+        '${runId}', '${ownerSubject}', 'COMPLETE', '{}'::jsonb, 1,
+        1, 1, 1, 0, 0, 0, 0, now(), now()
+      )`,
+      `insert into career_mcp.founder_research_run_items (
+        id, run_id, owner_subject, company_id, state, attempt_count, created_at, updated_at
+      ) values (
+        '${runItemId}', '${runId}', '${ownerSubject}', '${company.id}',
+        'COMPLETE', 1, now(), now()
+      )`,
+      `insert into career_mcp.founder_research_run_people (
+        id, run_item_id, owner_subject, person_id, identity_status,
+        founder_role_match, confidence, created_at, updated_at
+      ) values (
+        '${runPersonId}', '${runItemId}', '${ownerSubject}', '${person.id}',
+        'VERIFIED', 'founder', 1, now(), now()
+      )`,
+      `insert into career_mcp.founder_profile_candidates (
+        id, run_person_id, owner_subject, profile_url, status, source_kind,
+        evidence_url, checked_at, confidence, evidence_metadata_json, created_at, updated_at
+      ) values (
+        '${candidateId}', '${runPersonId}', '${ownerSubject}',
+        'https://www.linkedin.com/in/reset-founder', 'VERIFIED',
+        'OFFICIAL_COMPANY', 'https://example.com/team', now(), 1, '{}'::jsonb,
+        now(), now()
+      )`,
+      `insert into career_mcp.founder_profile_confirmation_events (
+        id, candidate_id, owner_subject, event, created_at
+      ) values (
+        '${randomUUID()}', '${candidateId}', '${ownerSubject}', 'CONFIRMED', now()
+      )`,
+      `insert into career_mcp.founder_research_exports (
+        id, run_id, owner_subject, state, file_name, mime_type, byte_size,
+        checksum_sha256, workbook_bytes, row_count, sheet_count, created_at, expires_at
+      ) values (
+        '${exportId}', '${runId}', '${ownerSubject}', 'READY', 'reset.xlsx',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        1, '${"a".repeat(64)}', decode('00', 'hex'), 0, 1, now(), now() + interval '1 day'
+      )`,
+      `insert into career_mcp.founder_export_download_capabilities (
+        id, export_id, owner_subject, token_hash_sha256, expires_at, created_at
+      ) values (
+        '${randomUUID()}', '${exportId}', '${ownerSubject}', '${"b".repeat(64)}',
+        now() + interval '15 minutes', now()
+      )
+      `
+    ]) {
+      await queryTestDatabase(db, statement);
+    }
+
+    await db.resetForTests();
+
+    const remaining = await queryTestDatabase<{ count: number }>(db, `
+      select count(*)::integer as count
+      from (
+        select id from career_mcp.founder_export_download_capabilities
+        union all select id from career_mcp.founder_profile_confirmation_events
+        union all select id from career_mcp.founder_profile_candidates
+        union all select id from career_mcp.founder_research_exports
+        union all select id from career_mcp.founder_research_run_people
+        union all select id from career_mcp.founder_research_run_items
+        union all select id from career_mcp.founder_research_runs
+      ) rows
+    `);
+    expect(remaining).toEqual([{ count: 0 }]);
   });
 
   it("enforces foreign keys", async () => {
