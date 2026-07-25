@@ -20,6 +20,18 @@ const UUID_PATTERN =
 const UNSAFE_CONTROL = /[\p{Cc}\p{Cf}]/u;
 const NAME_TOKEN = /[\p{L}\p{N}][\p{L}\p{N}\p{M}'’\p{Pd}-]*/gu;
 const WHITESPACE = /\s+/gu;
+const COMPANY_LEGAL_SUFFIXES = new Set([
+  "co",
+  "company",
+  "corp",
+  "corporation",
+  "inc",
+  "incorporated",
+  "limited",
+  "llc",
+  "ltd",
+  "plc"
+]);
 
 export const CANDIDATE_FIELD_LIMITS = Object.freeze({
   founderName: Object.freeze({ characters: 200, bytes: 512 }),
@@ -169,6 +181,41 @@ function normalizedNameSignature(value: string): string | undefined {
   return [...tokens].sort().join("\u0000");
 }
 
+function comparableTokens(value: string): string[] {
+  const normalized = normalizedComparableText(value);
+  return normalized === "" ? [] : normalized.split(" ");
+}
+
+function containsAllTokens(
+  actualTokens: readonly string[],
+  expectedTokens: readonly string[]
+): boolean {
+  const remaining = new Map<string, number>();
+  for (const token of actualTokens) {
+    remaining.set(token, (remaining.get(token) ?? 0) + 1);
+  }
+  for (const token of expectedTokens) {
+    const count = remaining.get(token) ?? 0;
+    if (count === 0) {
+      return false;
+    }
+    remaining.set(token, count - 1);
+  }
+  return expectedTokens.length > 0;
+}
+
+function companyIdentityTokens(value: string): string[] {
+  const allTokens = comparableTokens(value);
+  const identityTokens = [...allTokens];
+  while (
+    identityTokens.length > 0
+    && COMPANY_LEGAL_SUFFIXES.has(identityTokens[identityTokens.length - 1]!)
+  ) {
+    identityTokens.pop();
+  }
+  return identityTokens.length === 0 ? allTokens : identityTokens;
+}
+
 function validateUuid(field: string, value: unknown): string {
   if (typeof value !== "string" || !UUID_PATTERN.test(value)) {
     throw validationError(field, "must_be_uuid");
@@ -228,10 +275,16 @@ function currentFounderRoleContext(
   return undefined;
 }
 
-function mapPersistenceError(error: unknown): never {
+function mapPersistenceError(
+  error: unknown,
+  operation: "read" | "write"
+): never {
   if (error instanceof DomainError) {
     throw error;
   }
+  const message = operation === "read"
+    ? "Founder profile candidate data could not be read"
+    : "Founder profile candidate could not be saved";
   switch (postgresErrorKind(error)) {
     case "foreign_key":
       throw notFound();
@@ -239,15 +292,26 @@ function mapPersistenceError(error: unknown): never {
     case "retryable":
       throw new DomainError(
         "CONFLICT",
-        "Founder profile candidate could not be saved",
+        message,
         { entity: "founder_profile_candidate" }
       );
     default:
       throw new DomainError(
         "DATA_INTEGRITY",
-        "Founder profile candidate could not be saved",
+        message,
         { entity: "founder_profile_candidate" }
       );
+  }
+}
+
+async function withPersistenceMapping<T>(
+  operation: "read" | "write",
+  action: () => Promise<T>
+): Promise<T> {
+  try {
+    return await action();
+  } catch (error) {
+    mapPersistenceError(error, operation);
   }
 }
 
@@ -386,26 +450,49 @@ export function createFounderCandidateService(
     const runId = validateUuid("runId", input.runId);
     const runItemId = validateUuid("runItemId", input.runItemId);
     const runPersonId = validateUuid("runPersonId", input.runPersonId);
-    const run = await database.founderResearchRuns.getOwned(runId, subject);
-    if (run === undefined) {
-      throw notFound();
-    }
-    const runPeople = await database.founderResearchPeople.listForRun(run.id, subject);
-    const runPerson = runPeople.find((item) => (
-      item.id === runPersonId && item.runItemId === runItemId
-    ));
-    if (runPerson === undefined) {
-      throw notFound();
-    }
-    const person = await database.people.getWithEvidence(runPerson.personId);
-    if (person === undefined) {
-      throw notFound();
-    }
-    const company = await database.companies.get(person.companyId);
-    if (company === undefined) {
-      throw notFound();
-    }
-    return { company, person, runPerson };
+    return await withPersistenceMapping("read", async () => {
+      const run = await database.founderResearchRuns.getOwned(runId, subject);
+      if (run === undefined) {
+        throw notFound();
+      }
+      const runPeople = await database.founderResearchPeople.listForRun(run.id, subject);
+      const runPerson = runPeople.find((item) => (
+        item.id === runPersonId && item.runItemId === runItemId
+      ));
+      if (runPerson === undefined) {
+        throw notFound();
+      }
+      const person = await database.people.getWithEvidence(runPerson.personId);
+      if (person === undefined) {
+        throw notFound();
+      }
+      const company = await database.companies.get(person.companyId);
+      if (company === undefined) {
+        throw notFound();
+      }
+      return { company, person, runPerson };
+    });
+  }
+
+  async function loadCandidateState(runPersonId: string): Promise<{
+    canonical: FounderProfileCandidate | undefined;
+    requiresManualReview: boolean;
+  }> {
+    return await withPersistenceMapping("read", async () => {
+      const [canonical, candidates] = await Promise.all([
+        database.founderProfileCandidates.getCanonicalForPerson(
+          runPersonId,
+          subject
+        ),
+        database.founderProfileCandidates.listForPerson(runPersonId, subject)
+      ]);
+      return {
+        canonical,
+        requiresManualReview: candidates.some(
+          ({ status }) => status === "CANDIDATE"
+        )
+      };
+    });
   }
 
   return Object.freeze({
@@ -495,21 +582,20 @@ export function createFounderCandidateService(
       ) {
         throw evidenceMismatch("founderRole", "persisted_role_mismatch");
       }
-      const companyContext = normalizedComparableText(company.name);
-      const evidenceContext = normalizedComparableText([
-        searchQuery,
+      const evidenceTokens = comparableTokens([
         resultTitle ?? "",
         resultSnippet ?? ""
       ].join(" "));
-      if (
-        companyContext === ""
-        || !` ${evidenceContext} `.includes(` ${companyContext} `)
-      ) {
-        throw evidenceMismatch("searchQuery", "company_context_mismatch");
+      if (!containsAllTokens(evidenceTokens, comparableTokens(person.name))) {
+        throw evidenceMismatch("resultEvidence", "founder_identity_mismatch");
+      }
+      if (!containsAllTokens(evidenceTokens, companyIdentityTokens(company.name))) {
+        throw evidenceMismatch("resultEvidence", "company_context_mismatch");
       }
 
-      try {
-        const candidate = await database.founderProfileCandidates.saveCandidate({
+      const candidate = await withPersistenceMapping(
+        "write",
+        async () => await database.founderProfileCandidates.saveCandidate({
           runPersonId: runPerson.id,
           ownerSubject: subject,
           profileUrl: normalizedProfileUrl,
@@ -529,20 +615,13 @@ export function createFounderCandidateService(
           },
           checkedAt,
           confidence
-        });
-        const canonical =
-          await database.founderProfileCandidates.getCanonicalForPerson(
-            runPerson.id,
-            subject
-          );
-        return Object.freeze({
-          candidate,
-          canonical,
-          requiresManualReview: candidate.status === "CANDIDATE"
-        });
-      } catch (error) {
-        mapPersistenceError(error);
-      }
+        })
+      );
+      const state = await loadCandidateState(runPerson.id);
+      return Object.freeze({
+        candidate,
+        ...state
+      });
     },
 
     async decideCandidate(
@@ -553,8 +632,8 @@ export function createFounderCandidateService(
       }
       const validated = validateDecision(input);
       const decidedAt = trustedNow(now()).toISOString();
-      try {
-        const candidate = validated.decision === "CONFIRM"
+      const candidate = await withPersistenceMapping("write", async () => {
+        const decided = validated.decision === "CONFIRM"
           ? await database.founderProfileCandidates.confirm({
               candidateId: validated.candidateId,
               ownerSubject: subject,
@@ -567,22 +646,16 @@ export function createFounderCandidateService(
               ...(validated.note === undefined ? {} : { note: validated.note }),
               decidedAt
             });
-        if (candidate === undefined) {
+        if (decided === undefined) {
           throw notFound();
         }
-        const canonical =
-          await database.founderProfileCandidates.getCanonicalForPerson(
-            candidate.runPersonId,
-            subject
-          );
-        return Object.freeze({
-          candidate,
-          canonical,
-          requiresManualReview: candidate.status === "CANDIDATE"
-        });
-      } catch (error) {
-        mapPersistenceError(error);
-      }
+        return decided;
+      });
+      const state = await loadCandidateState(candidate.runPersonId);
+      return Object.freeze({
+        candidate,
+        ...state
+      });
     }
   });
 }

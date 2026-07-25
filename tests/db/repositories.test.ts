@@ -889,6 +889,46 @@ describe("founder research repositories", () => {
       .toBe("https://www.linkedin.com/in/ada-candidate");
   });
 
+  it("lists every candidate for one owned run person with deterministic owner isolation", async () => {
+    const context = await addRunPerson({ companyName: "Candidate List" });
+    const earlier = await db.founderProfileCandidates.saveCandidate({
+      runPersonId: context.runPerson.id,
+      ownerSubject: OWNER,
+      profileUrl: "https://www.linkedin.com/in/ada-earlier",
+      searchQuery: "Ada Founder Candidate List LinkedIn",
+      evidenceUrl: "https://www.linkedin.com/in/ada-earlier",
+      evidenceMetadataJson: {},
+      checkedAt: CHECKED_AT,
+      confidence: 0.65
+    });
+    const later = await db.founderProfileCandidates.saveCandidate({
+      runPersonId: context.runPerson.id,
+      ownerSubject: OWNER,
+      profileUrl: "https://www.linkedin.com/in/ada-later",
+      searchQuery: "Ada Founder Candidate List LinkedIn",
+      evidenceUrl: "https://www.linkedin.com/in/ada-later",
+      evidenceMetadataJson: {},
+      checkedAt: "2099-07-24T16:11:00.000Z",
+      confidence: 0.75
+    });
+
+    expect(
+      (await db.founderProfileCandidates.listForPerson(
+        context.runPerson.id,
+        OWNER
+      )).map(({ id }) => id)
+    ).toEqual([later.id, earlier.id]);
+    expect(
+      await db.founderProfileCandidates.listForPerson(
+        context.runPerson.id,
+        OTHER_OWNER
+      )
+    ).toEqual([]);
+    expect(
+      await db.founderProfileCandidates.listForPerson("not-a-uuid", OWNER)
+    ).toEqual([]);
+  });
+
   it("rejects a candidate in one transaction and retains an append-only audit event", async () => {
     const context = await addRunPerson({ companyName: "Rejected" });
     const candidate = await db.founderProfileCandidates.saveCandidate({

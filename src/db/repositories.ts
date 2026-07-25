@@ -1847,6 +1847,22 @@ export function createRepositories(database: Database) {
           await decideFounderProfileCandidate(transaction, input, "REJECTED")
         ));
       },
+      async listForPerson(
+        runPersonId: string,
+        ownerSubject: string
+      ): Promise<FounderProfileCandidate[]> {
+        if (!isUuid(runPersonId) || !isUuid(ownerSubject)) {
+          return [];
+        }
+        const rows = await database.select().from(founderProfileCandidates).where(and(
+          eq(founderProfileCandidates.runPersonId, runPersonId),
+          eq(founderProfileCandidates.ownerSubject, ownerSubject.toLowerCase())
+        )).orderBy(
+          desc(founderProfileCandidates.checkedAt),
+          asc(founderProfileCandidates.id)
+        );
+        return normalizeRows(rows);
+      },
       async getCanonicalForPerson(
         runPersonId: string,
         ownerSubject: string

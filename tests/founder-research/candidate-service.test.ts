@@ -386,6 +386,50 @@ describe("Founder candidate service", () => {
     ]);
   });
 
+  it("keeps manual review required after confirming one of multiple unresolved candidates", async () => {
+    const context = await addCandidateContext();
+    const first = await service().saveCandidate(candidateInput(context));
+    const second = await service().saveCandidate(candidateInput(context, {
+      candidateProfileUrl: "https://www.linkedin.com/in/ada-lovelace-pmm",
+      resultUrl: "https://www.linkedin.com/in/ada-lovelace-pmm",
+      confidence: 0.72
+    }));
+
+    const confirmed = await service().decideCandidate({
+      candidateId: first.candidate.id,
+      decision: "CONFIRM"
+    });
+    expect(confirmed.requiresManualReview).toBe(true);
+
+    const resolved = await service().decideCandidate({
+      candidateId: second.candidate.id,
+      decision: "REJECT"
+    });
+    expect(resolved.requiresManualReview).toBe(false);
+  });
+
+  it("keeps manual review required after rejecting one of multiple unresolved candidates", async () => {
+    const context = await addCandidateContext();
+    const first = await service().saveCandidate(candidateInput(context));
+    const second = await service().saveCandidate(candidateInput(context, {
+      candidateProfileUrl: "https://www.linkedin.com/in/ada-lovelace-pmm",
+      resultUrl: "https://www.linkedin.com/in/ada-lovelace-pmm",
+      confidence: 0.72
+    }));
+
+    const rejected = await service().decideCandidate({
+      candidateId: first.candidate.id,
+      decision: "REJECT"
+    });
+    expect(rejected.requiresManualReview).toBe(true);
+
+    const resolved = await service().decideCandidate({
+      candidateId: second.candidate.id,
+      decision: "CONFIRM"
+    });
+    expect(resolved.requiresManualReview).toBe(false);
+  });
+
   it("does not replace a VERIFIED canonical profile when saving a public-search candidate", async () => {
     const context = await addCandidateContext();
     const verified = await db.founderProfileCandidates.recordOfficial({
@@ -560,20 +604,62 @@ describe("Founder candidate service", () => {
     );
   });
 
-  it("requires saved public-search evidence to contain current company context", async () => {
+  it("does not let a correct query spoof unrelated actual result evidence", async () => {
     const context = await addCandidateContext();
     const error = await expectDomainError(
       () => service().saveCandidate(candidateInput(context, {
-        searchQuery: "Ada Lovelace Other Company founder LinkedIn",
+        searchQuery: "Ada Lovelace Candidate Labs founder LinkedIn",
+        resultTitle: "Grace Hopper - Founder at Candidate Labs",
+        resultSnippet: "Grace Hopper founded Candidate Labs."
+      })),
+      "EVIDENCE_MISMATCH"
+    );
+    expect(error.details).toMatchObject({
+      field: "resultEvidence",
+      reason: "founder_identity_mismatch"
+    });
+  });
+
+  it("requires the complete persisted founder name in actual result evidence", async () => {
+    const context = await addCandidateContext();
+    const error = await expectDomainError(
+      () => service().saveCandidate(candidateInput(context, {
+        resultTitle: "Ada - Founder at Candidate Labs",
+        resultSnippet: "Ada founded Candidate Labs."
+      })),
+      "EVIDENCE_MISMATCH"
+    );
+    expect(error.details).toMatchObject({
+      field: "resultEvidence",
+      reason: "founder_identity_mismatch"
+    });
+  });
+
+  it("requires sufficient persisted company identity in actual result evidence", async () => {
+    const context = await addCandidateContext();
+    const error = await expectDomainError(
+      () => service().saveCandidate(candidateInput(context, {
+        searchQuery: "Ada Lovelace Candidate Labs founder LinkedIn",
         resultTitle: "Ada Lovelace - Founder at Other Company",
         resultSnippet: "Ada Lovelace founded Other Company."
       })),
       "EVIDENCE_MISMATCH"
     );
     expect(error.details).toMatchObject({
-      field: "searchQuery",
+      field: "resultEvidence",
       reason: "company_context_mismatch"
     });
+  });
+
+  it("accepts reordered complete founder tokens and ignores a company legal suffix", async () => {
+    const context = await addCandidateContext({
+      companyName: "Candidate Labs, Incorporated"
+    });
+
+    await expect(service().saveCandidate(candidateInput(context, {
+      resultTitle: "Lovelace Ada — Co-Founder, Candidate Labs",
+      resultSnippet: "Candidate Labs leadership profile."
+    }))).resolves.toMatchObject({ requiresManualReview: true });
   });
 
   it("does not mistake a short company name for a substring in another word", async () => {
@@ -615,5 +701,56 @@ describe("Founder candidate service", () => {
       select count(*)::int as count
       from career_mcp.founder_profile_confirmation_events
     `)).toEqual([{ count: 0 }]);
+  });
+
+  it("maps every owner-context database read failure without exposing raw adapter details", async () => {
+    const context = await addCandidateContext();
+    const sentinel = `RAW-OWNER-CONTEXT-${randomUUID()}`;
+    const failingReads = [
+      () => vi.spyOn(db.founderResearchRuns, "getOwned")
+        .mockRejectedValueOnce(new Error(sentinel)),
+      () => vi.spyOn(db.founderResearchPeople, "listForRun")
+        .mockRejectedValueOnce(new Error(sentinel)),
+      () => vi.spyOn(db.people, "getWithEvidence")
+        .mockRejectedValueOnce(new Error(sentinel)),
+      () => vi.spyOn(db.companies, "get")
+        .mockRejectedValueOnce(new Error(sentinel))
+    ];
+
+    for (const failRead of failingReads) {
+      const spy = failRead();
+      const error = await expectDomainError(
+        () => service().saveCandidate(candidateInput(context)),
+        "DATA_INTEGRITY"
+      );
+      expect(`${error.message}${JSON.stringify(error.details)}`).not.toContain(sentinel);
+      spy.mockRestore();
+    }
+  });
+
+  it("maps candidate-list database failures without exposing raw adapter details", async () => {
+    const context = await addCandidateContext();
+    const sentinel = `RAW-CANDIDATE-LIST-${randomUUID()}`;
+    vi.spyOn(db.founderProfileCandidates, "listForPerson")
+      .mockRejectedValueOnce(new Error(sentinel));
+
+    const error = await expectDomainError(
+      () => service().saveCandidate(candidateInput(context)),
+      "DATA_INTEGRITY"
+    );
+    expect(`${error.message}${JSON.stringify(error.details)}`).not.toContain(sentinel);
+  });
+
+  it("maps canonical candidate database failures without exposing raw adapter details", async () => {
+    const context = await addCandidateContext();
+    const sentinel = `RAW-CANONICAL-${randomUUID()}`;
+    vi.spyOn(db.founderProfileCandidates, "getCanonicalForPerson")
+      .mockRejectedValueOnce(new Error(sentinel));
+
+    const error = await expectDomainError(
+      () => service().saveCandidate(candidateInput(context)),
+      "DATA_INTEGRITY"
+    );
+    expect(`${error.message}${JSON.stringify(error.details)}`).not.toContain(sentinel);
   });
 });
