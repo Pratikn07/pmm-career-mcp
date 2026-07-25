@@ -572,13 +572,16 @@ describe("founder research run service", () => {
       peopleDiscovery: {
         async discoverPublicPeople(companyId) {
           calls += 1;
-          if (calls === 1) {
+          const attempt = calls;
+          if (attempt === 1) {
             markFirstStarted();
             await firstGate;
           }
           return discovery([
-            person(companyId, "Lease Founder", "Founder", {
-              profileUrl: "https://www.linkedin.com/in/lease-founder",
+            person(companyId, attempt === 1 ? "Old Lease Founder" : "Lease Founder", "Founder", {
+              profileUrl: attempt === 1
+                ? "https://www.linkedin.com/in/old-lease-founder"
+                : "https://www.linkedin.com/in/lease-founder",
               sourceUrl: "https://staleworker.example/team",
               checkedAt: clock.toISOString()
             })
@@ -610,6 +613,14 @@ describe("founder research run service", () => {
       processedCount: 1,
       completeCount: 1
     });
+    const savedRunPeople = await database.founderResearchPeople.listForRun(
+      started.run.id,
+      OWNER
+    );
+    const savedNames = await Promise.all(savedRunPeople.map(async ({ personId }) => (
+      (await database.people.get(personId))?.name
+    )));
+    expect(savedNames).toEqual(["Lease Founder"]);
   });
 
   it("isolates simultaneous processors and hides runs owned by another subject", async () => {

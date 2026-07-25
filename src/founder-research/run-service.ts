@@ -602,11 +602,28 @@ export function createFounderResearchRunService(
         ? await dependencies.peopleDiscovery.discoverPublicPeople(company.id)
         : undefined;
       const people = reusable ?? result!.people;
+      const afterDiscovery = trustedNow(now);
+      if (
+        item.leaseExpiresAt === null
+        || new Date(item.leaseExpiresAt).getTime() <= afterDiscovery.getTime()
+      ) {
+        return {
+          item: {
+            runItemId: item.id,
+            companyId: company.id,
+            leaseAttempt: item.attemptCount,
+            state: "STALE_ATTEMPT",
+            founderCount: 0,
+            verifiedProfileCount: 0
+          },
+          publicSearchTasks: []
+        };
+      }
       const founders = await saveOfficialFounders(
         item,
         company,
         people,
-        requestNow
+        afterDiscovery
       );
       const duplicateNames = new Set<string>();
       const seenNames = new Set<string>();
@@ -658,7 +675,7 @@ export function createFounderResearchRunService(
         ownerSubject: subject,
         leaseAttempt: item.attemptCount,
         state,
-        checkedAt: requestNow.toISOString()
+        checkedAt: afterDiscovery.toISOString()
       });
       if (completed === undefined) {
         return {
