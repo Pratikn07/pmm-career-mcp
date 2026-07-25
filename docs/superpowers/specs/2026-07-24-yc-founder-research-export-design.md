@@ -2,7 +2,7 @@
 
 Date: 2026-07-24
 
-Status: Approved product direction; written specification awaiting user review
+Status: Approved
 
 Audience: One private user operating PMM Career MCP through ChatGPT
 
