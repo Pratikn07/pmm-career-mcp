@@ -10,10 +10,25 @@ export type { NonFetchingLinkedInProfileUrl };
 
 export type FounderEvidenceSource = "OFFICIAL_YC" | "SAVED_PUBLIC_EVIDENCE";
 
-export interface SamePersonFounderEvidence {
+interface SamePersonFounderEvidenceCommon {
+  companyId: string;
+  evidenceId: string;
   explicitFounder: boolean;
   source: FounderEvidenceSource;
 }
+
+export type SamePersonFounderEvidence = SamePersonFounderEvidenceCommon & (
+  | {
+      assertedPersonIdentity: string;
+      bindingKind: "NORMALIZED_IDENTITY";
+      expectedPersonIdentity: string;
+    }
+  | {
+      assertedRunPersonId: string;
+      bindingKind: "RUN_PERSON_ID";
+      expectedRunPersonId: string;
+    }
+);
 
 export type FounderRoleValidationReason =
   | "INVALID_ROLE_TYPE"
@@ -47,6 +62,8 @@ export type LinkedInProfileUrlValidationReason =
   | "HTTPS_REQUIRED"
   | "CREDENTIALS_NOT_ALLOWED"
   | "PORT_NOT_ALLOWED"
+  | "ENCODED_AUTHORITY_NOT_ALLOWED"
+  | "INVALID_HOSTNAME"
   | "HOST_NOT_LINKEDIN"
   | "ENCODED_PATH_NOT_ALLOWED"
   | "DOT_SEGMENT_NOT_ALLOWED"

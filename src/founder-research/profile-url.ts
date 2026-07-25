@@ -10,7 +10,10 @@ export const LINKEDIN_PROFILE_URL_LIMITS = Object.freeze({
   slugBytes: 256
 });
 
+export const LINKEDIN_PROFILE_URL_RAW_CODE_UNIT_LIMIT = 4_096;
+
 const PROFILE_SLUG = /^[A-Za-z0-9][A-Za-z0-9_-]*$/u;
+const DNS_LABEL = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/u;
 const TRACKING_QUERY_PARAMETERS = new Set([
   "ebp",
   "lipi",
@@ -31,16 +34,28 @@ function isLinkedInHostname(hostname: string): boolean {
   return normalized === "linkedin.com" || normalized.endsWith(".linkedin.com");
 }
 
-function rawAuthority(input: string): string | undefined {
-  const match = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/([^/?#]*)/u.exec(input);
-  return match?.[1];
+interface RawUrlParts {
+  authority: string;
+  scheme: string;
+}
+
+function rawUrlParts(input: string): RawUrlParts | undefined {
+  const match = /^([A-Za-z][A-Za-z0-9+.-]*):\/\/([^/?#]*)/u.exec(input);
+  if (match === null) {
+    return undefined;
+  }
+  return {
+    authority: match[2]!,
+    scheme: match[1]!
+  };
 }
 
 function rawPath(input: string): string {
-  const authority = rawAuthority(input);
-  if (authority === undefined) {
+  const parts = rawUrlParts(input);
+  if (parts === undefined) {
     return "";
   }
+  const { authority } = parts;
   const pathStart = input.indexOf("/", input.indexOf(authority) + authority.length);
   if (pathStart < 0) {
     return "";
@@ -58,6 +73,14 @@ function containsExplicitPort(authority: string): boolean {
   return hostAndPort.includes(":");
 }
 
+function isValidRawDnsHostname(hostname: string): boolean {
+  if (hostname.length < 1 || hostname.length > 253) {
+    return false;
+  }
+  const labels = hostname.split(".");
+  return labels.every((label) => DNS_LABEL.test(label));
+}
+
 function isTrackingQueryParameter(name: string): boolean {
   const normalized = name.toLowerCase();
   return normalized.startsWith("utm_")
@@ -71,6 +94,12 @@ export function validateNonFetchingLinkedInProfileUrl(
     return {
       ok: false,
       reason: "INVALID_URL_TYPE"
+    };
+  }
+  if (input.length > LINKEDIN_PROFILE_URL_RAW_CODE_UNIT_LIMIT) {
+    return {
+      ok: false,
+      reason: "URL_TOO_LONG"
     };
   }
   if (input === "") {
@@ -95,6 +124,53 @@ export function validateNonFetchingLinkedInProfileUrl(
     return {
       ok: false,
       reason: "BACKSLASH_NOT_ALLOWED"
+    };
+  }
+  if (
+    /\s/u.test(input)
+    && /^[A-Za-z][A-Za-z0-9+.-]*:\/\//u.test(input.trimStart())
+  ) {
+    return {
+      ok: false,
+      reason: "WHITESPACE_NOT_ALLOWED"
+    };
+  }
+
+  const raw = rawUrlParts(input);
+  if (raw === undefined) {
+    return {
+      ok: false,
+      reason: "INVALID_URL"
+    };
+  }
+  if (raw.authority.includes("%")) {
+    return {
+      ok: false,
+      reason: "ENCODED_AUTHORITY_NOT_ALLOWED"
+    };
+  }
+  if (raw.authority.includes("@")) {
+    return {
+      ok: false,
+      reason: "CREDENTIALS_NOT_ALLOWED"
+    };
+  }
+  if (containsExplicitPort(raw.authority)) {
+    return {
+      ok: false,
+      reason: "PORT_NOT_ALLOWED"
+    };
+  }
+  if (!isValidRawDnsHostname(raw.authority)) {
+    return {
+      ok: false,
+      reason: "INVALID_HOSTNAME"
+    };
+  }
+  if (!isLinkedInHostname(raw.authority)) {
+    return {
+      ok: false,
+      reason: "HOST_NOT_LINKEDIN"
     };
   }
 
@@ -127,20 +203,10 @@ export function validateNonFetchingLinkedInProfileUrl(
     };
   }
 
-  const authority = rawAuthority(input);
-  if (authority === undefined) {
-    return {
-      ok: false,
-      reason: "INVALID_URL"
-    };
-  }
-  if (containsExplicitPort(authority)) {
-    return {
-      ok: false,
-      reason: "PORT_NOT_ALLOWED"
-    };
-  }
-  if (!isLinkedInHostname(parsed.hostname)) {
+  if (
+    parsed.hostname.toLowerCase() !== raw.authority.toLowerCase()
+    || !isLinkedInHostname(parsed.hostname)
+  ) {
     return {
       ok: false,
       reason: "HOST_NOT_LINKEDIN"

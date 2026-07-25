@@ -1,6 +1,7 @@
 import { describe, expect, expectTypeOf, it } from "vitest";
 
 import {
+  LINKEDIN_PROFILE_URL_RAW_CODE_UNIT_LIMIT,
   LINKEDIN_PROFILE_URL_LIMITS,
   validateNonFetchingLinkedInProfileUrl
 } from "../../src/founder-research/profile-url.js";
@@ -16,7 +17,8 @@ describe("validateNonFetchingLinkedInProfileUrl", () => {
   it.each([
     "https://linkedin.com/in/ada-lovelace",
     "https://www.linkedin.com/in/ada-lovelace/",
-    "https://uk.linkedin.com/in/Ada_Lovelace"
+    "https://uk.linkedin.com/in/Ada_Lovelace",
+    "https://sub-domain.linkedin.com/in/ada-lovelace"
   ])("accepts and canonicalizes the profile URL %j", (input) => {
     const result = validateNonFetchingLinkedInProfileUrl(input);
 
@@ -45,6 +47,12 @@ describe("validateNonFetchingLinkedInProfileUrl", () => {
     ["credentials", "https://user:pass@www.linkedin.com/in/ada-lovelace", "CREDENTIALS_NOT_ALLOWED"],
     ["custom port", "https://www.linkedin.com:444/in/ada-lovelace", "PORT_NOT_ALLOWED"],
     ["explicit default port", "https://www.linkedin.com:443/in/ada-lovelace", "PORT_NOT_ALLOWED"],
+    ["empty leading host label", "https://.linkedin.com/in/ada-lovelace", "INVALID_HOSTNAME"],
+    ["empty interior host label", "https://uk..linkedin.com/in/ada-lovelace", "INVALID_HOSTNAME"],
+    ["empty repeated host label", "https://..linkedin.com/in/ada-lovelace", "INVALID_HOSTNAME"],
+    ["leading-hyphen host label", "https://-uk.linkedin.com/in/ada-lovelace", "INVALID_HOSTNAME"],
+    ["encoded hostname", "https://%6cinkedin.com/in/ada-lovelace", "ENCODED_AUTHORITY_NOT_ALLOWED"],
+    ["encoded hostname suffix trap", "https://www.linkedin%2ecom/in/ada-lovelace", "ENCODED_AUTHORITY_NOT_ALLOWED"],
     ["host suffix trap", "https://linkedin.com.evil.example/in/ada-lovelace", "HOST_NOT_LINKEDIN"],
     ["host prefix trap", "https://evillinkedin.com/in/ada-lovelace", "HOST_NOT_LINKEDIN"],
     ["shortened link", "https://lnkd.in/abc123", "HOST_NOT_LINKEDIN"],
@@ -137,6 +145,15 @@ describe("validateNonFetchingLinkedInProfileUrl", () => {
     expect(validateNonFetchingLinkedInProfileUrl(overBytes)).toEqual({
       ok: false,
       reason: "URL_TOO_LARGE"
+    });
+  });
+
+  it("rejects an excessive raw URL before parsing it", () => {
+    expect(validateNonFetchingLinkedInProfileUrl(
+      "a".repeat(LINKEDIN_PROFILE_URL_RAW_CODE_UNIT_LIMIT + 1)
+    )).toEqual({
+      ok: false,
+      reason: "URL_TOO_LONG"
     });
   });
 
