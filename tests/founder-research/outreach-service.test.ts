@@ -132,7 +132,7 @@ function entryFor(
     missingEvidence: [],
     evidenceIds: [context.evidence.id],
     personalizationClaims: [{
-      text: "Ada Lovelace led the Atlas launch at Evidence Labs.",
+      text: "Atlas launch",
       evidenceIds: [context.evidence.id]
     }],
     text: "Hi Ada — I appreciated the Atlas launch at Evidence Labs. I’d value connecting.",
@@ -274,6 +274,72 @@ describe("founder outreach batches", () => {
     expect(result.drafts).toEqual([expect.objectContaining({ evidenceIds: [] })]);
   });
 
+  it("rejects factual personalized note text that has no supported claim", async () => {
+    const context = await addRunPerson();
+
+    await expectDomainError(
+      () => service().saveBatch({
+        runId: context.run.id,
+        requestId: "unclaimed-series-b",
+        entries: [entryFor(context, {
+          text: "Congrats on your Series B — I’d value connecting.",
+          evidenceIds: [],
+          personalizationClaims: []
+        })]
+      }),
+      "EVIDENCE_MISMATCH"
+    );
+    expect(await db.targets.getByPerson(context.person.id)).toBeUndefined();
+  });
+
+  it("requires each claim to occur wholly in one cited evidence title or fact", async () => {
+    const context = await addRunPerson();
+    const secondEvidence = await db.evidence.add({
+      personId: context.person.id,
+      sourceUrl: "https://evidence.example/funding",
+      title: "secured Series B",
+      factType: "public_role",
+      fact: "Funding update",
+      checkedAt: CHECKED_AT,
+      confidence: 0.95
+    });
+
+    await expectDomainError(
+      () => service().saveBatch({
+        runId: context.run.id,
+        requestId: "claim-spans-evidence-records",
+        entries: [entryFor(context, {
+          text: "Congrats on Evidence Labs. secured Series B.",
+          evidenceIds: [context.evidence.id, secondEvidence.id],
+          personalizationClaims: [{
+            text: "Evidence Labs. secured Series B",
+            evidenceIds: [context.evidence.id, secondEvidence.id]
+          }]
+        })]
+      }),
+      "EVIDENCE_MISMATCH"
+    );
+  });
+
+  it("does not match a claim across one evidence title and fact", async () => {
+    const context = await addRunPerson();
+
+    await expectDomainError(
+      () => service().saveBatch({
+        runId: context.run.id,
+        requestId: "claim-spans-title-and-fact",
+        entries: [entryFor(context, {
+          text: "I appreciated Product launch Ada Lovelace.",
+          personalizationClaims: [{
+            text: "Product launch Ada Lovelace",
+            evidenceIds: [context.evidence.id]
+          }]
+        })]
+      }),
+      "EVIDENCE_MISMATCH"
+    );
+  });
+
   it("creates one immutable connection-request version per target and is idempotent per request", async () => {
     const context = await addRunPerson();
     const input = {
@@ -291,6 +357,45 @@ describe("founder outreach batches", () => {
     expect(second).toEqual(first);
     expect(retriedAfterRestart).toEqual(first);
     expect(targetUpsertSpy).not.toHaveBeenCalled();
+    expect(first.drafts[0]).toMatchObject({ version: 1 });
+    expect(await db.outreachDrafts.listForTarget(target!.id)).toHaveLength(1);
+  });
+
+  it("creates the next immutable version for a genuinely changed batch request", async () => {
+    const context = await addRunPerson();
+    const first = await service().saveBatch({
+      runId: context.run.id,
+      requestId: "original-note",
+      entries: [entryFor(context)]
+    });
+    const changed = await service().saveBatch({
+      runId: context.run.id,
+      requestId: "changed-note",
+      entries: [entryFor(context, {
+        text: "Hi Ada — I appreciated the Atlas launch and would value connecting."
+      })]
+    });
+
+    expect(first.drafts[0]).toMatchObject({ version: 1 });
+    expect(changed.drafts[0]).toMatchObject({ version: 2 });
+  });
+
+  it("coalesces simultaneous identical batch requests into one immutable version", async () => {
+    const context = await addRunPerson();
+    const input = {
+      runId: context.run.id,
+      requestId: "concurrent-batch-request",
+      entries: [entryFor(context)]
+    };
+    const outreach = service();
+
+    const [first, second] = await Promise.all([
+      outreach.saveBatch(input),
+      outreach.saveBatch(structuredClone(input))
+    ]);
+    const target = await db.targets.getByPerson(context.person.id);
+
+    expect(second).toEqual(first);
     expect(first.drafts[0]).toMatchObject({ version: 1 });
     expect(await db.outreachDrafts.listForTarget(target!.id)).toHaveLength(1);
   });

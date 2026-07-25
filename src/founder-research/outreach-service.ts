@@ -10,6 +10,7 @@ const MAX_REQUEST_ID_LENGTH = 200;
 const MAX_CLAIM_LENGTH = 500;
 const MAX_CLAIMS_PER_ENTRY = 25;
 const MAX_EVIDENCE_IDS = 25;
+const UNSUPPORTED_UNCLAIMED_PERSONALIZATION = /(?:\bseries\s+[a-z0-9]+\b|\bfund(?:ing|ed)\b|\braised\b|\blaunch(?:ed)?\b|\bmilestone\b|\baward\b|\bacquisition\b|\bhiring\b|\byour\s+(?:product|company|team|work|launch|funding|series|round)\b)/iu;
 
 export const LINKEDIN_CONNECTION_NOTE_MAX_CODE_POINTS = 200;
 export const LINKEDIN_CONNECTION_REQUEST_PURPOSE = "linkedin_connection_request";
@@ -125,6 +126,17 @@ function comparable(value: string): string {
   return value.normalize("NFC").replace(/\s+/gu, " ").trim().toLocaleLowerCase("en-US");
 }
 
+function hasUnsupportedUnclaimedPersonalization(
+  text: string,
+  claims: readonly Readonly<{ text: string }> []
+): boolean {
+  let unexplained = comparable(text);
+  for (const claim of claims) {
+    unexplained = unexplained.replaceAll(comparable(claim.text), " ");
+  }
+  return UNSUPPORTED_UNCLAIMED_PERSONALIZATION.test(unexplained);
+}
+
 function validatedEntry(value: unknown, index: number): ValidatedEntry {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw validationError(`entries[${index}]`, "must_be_object");
@@ -223,6 +235,7 @@ export function createFounderOutreachService(
   const subject = dependencies.subject.toLowerCase();
   const pipeline = createPipelineService(database);
   const completedRequests = new Map<string, SaveFounderOutreachBatchResult>();
+  const inFlightRequests = new Map<string, Promise<SaveFounderOutreachBatchResult>>();
 
   return Object.freeze({
     async saveBatch(input: SaveFounderOutreachBatchInput): Promise<SaveFounderOutreachBatchResult> {
@@ -234,102 +247,121 @@ export function createFounderOutreachService(
       const idempotencyKey = `${runId}\u0000${requestId}`;
       const existing = completedRequests.get(idempotencyKey);
       if (existing !== undefined) return existing;
-      if (!Array.isArray(input.entries) || input.entries.length === 0 || input.entries.length > MAX_BATCH_ENTRIES) {
-        throw validationError("entries", "invalid_collection", MAX_BATCH_ENTRIES);
-      }
-      const entries = input.entries.map(validatedEntry);
-      if (new Set(entries.map(({ personId }) => personId)).size !== entries.length) {
-        throw new DomainError("CONFLICT", "A batch may include a person only once", { entity: "person" });
-      }
-      if ((await database.founderResearchRuns.getOwned(runId, subject)) === undefined) {
-        throw notFound("founder_research_run");
-      }
-      const runPeople = new Map((await database.founderResearchPeople.listForRun(runId, subject)).map(
-        (runPerson) => [runPerson.personId, runPerson] as const
-      ));
-      const drafts: SavedFounderOutreachDraft[] = [];
-      const needsVerification: FounderOutreachNeedsVerification[] = [];
+      const inFlight = inFlightRequests.get(idempotencyKey);
+      if (inFlight !== undefined) return await inFlight;
+      const operation = (async (): Promise<SaveFounderOutreachBatchResult> => {
+        if (!Array.isArray(input.entries) || input.entries.length === 0 || input.entries.length > MAX_BATCH_ENTRIES) {
+          throw validationError("entries", "invalid_collection", MAX_BATCH_ENTRIES);
+        }
+        const entries = input.entries.map(validatedEntry);
+        if (new Set(entries.map(({ personId }) => personId)).size !== entries.length) {
+          throw new DomainError("CONFLICT", "A batch may include a person only once", { entity: "person" });
+        }
+        if ((await database.founderResearchRuns.getOwned(runId, subject)) === undefined) {
+          throw notFound("founder_research_run");
+        }
+        const runPeople = new Map((await database.founderResearchPeople.listForRun(runId, subject)).map(
+          (runPerson) => [runPerson.personId, runPerson] as const
+        ));
+        const drafts: SavedFounderOutreachDraft[] = [];
+        const needsVerification: FounderOutreachNeedsVerification[] = [];
 
-      for (const [index, entry] of entries.entries()) {
-        const runPerson = runPeople.get(entry.personId);
-        if (runPerson === undefined) throw notFound("founder_research_person");
-        const canonical = await database.founderProfileCandidates.getCanonicalForPerson(
-          runPerson.id,
-          subject
-        );
-        if (
-          (runPerson.identityStatus !== "VERIFIED" && runPerson.identityStatus !== "CONFIRMED")
-          || canonical === undefined
-          || (canonical.status !== "VERIFIED" && canonical.status !== "CONFIRMED")
-        ) {
-          needsVerification.push(Object.freeze({
-            personId: entry.personId,
-            reason: "PROFILE_NOT_CONFIRMED"
+        for (const [index, entry] of entries.entries()) {
+          const runPerson = runPeople.get(entry.personId);
+          if (runPerson === undefined) throw notFound("founder_research_person");
+          const canonical = await database.founderProfileCandidates.getCanonicalForPerson(
+            runPerson.id,
+            subject
+          );
+          if (
+            (runPerson.identityStatus !== "VERIFIED" && runPerson.identityStatus !== "CONFIRMED")
+            || canonical === undefined
+            || (canonical.status !== "VERIFIED" && canonical.status !== "CONFIRMED")
+          ) {
+            needsVerification.push(Object.freeze({
+              personId: entry.personId,
+              reason: "PROFILE_NOT_CONFIRMED"
+            }));
+            continue;
+          }
+          const person = await database.people.get(entry.personId);
+          if (person === undefined) throw notFound("founder_research_person");
+          const company = await database.companies.get(person.companyId);
+          if (company === undefined) throw notFound("founder_research_person");
+
+          const evidence = await Promise.all(entry.evidenceIds.map(async (evidenceId) => {
+            const row = await database.evidence.get(evidenceId);
+            if (row === undefined || row.personId !== person.id) {
+              throw evidenceMismatch(`entries[${index}].evidenceIds`);
+            }
+            return row;
           }));
-          continue;
-        }
-        const person = await database.people.get(entry.personId);
-        if (person === undefined) throw notFound("founder_research_person");
-        const company = await database.companies.get(person.companyId);
-        if (company === undefined) throw notFound("founder_research_person");
+          for (const claim of entry.personalizationClaims) {
+            if (claim.evidenceIds.some((id) => !entry.evidenceIds.includes(id))) {
+              throw evidenceMismatch(`entries[${index}].personalizationClaims`);
+            }
+            const claimText = comparable(claim.text);
+            const claimEvidence = evidence.filter(({ id }) => claim.evidenceIds.includes(id));
+            const isSupported = claimEvidence.some(({ title, fact }) => (
+              comparable(title ?? "").includes(claimText)
+              || comparable(fact).includes(claimText)
+            ));
+            if (!isSupported || !comparable(entry.text).includes(claimText)) {
+              throw evidenceMismatch(`entries[${index}].personalizationClaims`);
+            }
+          }
+          if (hasUnsupportedUnclaimedPersonalization(entry.text, entry.personalizationClaims)) {
+            throw evidenceMismatch(`entries[${index}].text`);
+          }
 
-        const evidence = await Promise.all(entry.evidenceIds.map(async (evidenceId) => {
-          const row = await database.evidence.get(evidenceId);
-          if (row === undefined || row.personId !== person.id) {
-            throw evidenceMismatch(`entries[${index}].evidenceIds`);
+          const existingTarget = await database.targets.getByPerson(person.id);
+          const latest = existingTarget === undefined
+            ? undefined
+            : (await database.outreachDrafts.listForTarget(existingTarget.id))
+              .filter(({ purpose }) => purpose === LINKEDIN_CONNECTION_REQUEST_PURPOSE)
+              .at(-1);
+          if (
+            existingTarget !== undefined
+            && latest !== undefined
+            && isSameSavedDraft(latest, entry)
+          ) {
+            drafts.push(publicDraft(person.id, existingTarget, latest));
+            continue;
           }
-          return row;
-        }));
-        for (const claim of entry.personalizationClaims) {
-          if (claim.evidenceIds.some((id) => !entry.evidenceIds.includes(id))) {
-            throw evidenceMismatch(`entries[${index}].personalizationClaims`);
-          }
-          const claimEvidence = evidence.filter(({ id }) => claim.evidenceIds.includes(id));
-          const sourceText = claimEvidence.map(({ title, fact }) => `${title ?? ""}\n${fact}`).join("\n");
-          if (!comparable(sourceText).includes(comparable(claim.text))) {
-            throw evidenceMismatch(`entries[${index}].personalizationClaims`);
-          }
+          const target = await pipeline.saveTarget({
+            personId: person.id,
+            companyId: company.id,
+            companyName: company.name,
+            name: person.name,
+            pmmOpportunity: entry.pmmOpportunity,
+            referralPotential: entry.referralPotential,
+            networkValue: entry.networkValue,
+            total: entry.total,
+            confidence: entry.confidence,
+            reasons: [...entry.reasons],
+            missingEvidence: [...entry.missingEvidence]
+          });
+          const draft = await database.outreachDrafts.createVersion({
+            targetId: target.id,
+            purpose: LINKEDIN_CONNECTION_REQUEST_PURPOSE,
+            text: entry.text,
+            evidenceIds: [...entry.evidenceIds]
+          });
+          drafts.push(publicDraft(person.id, target, draft));
         }
 
-        const existingTarget = await database.targets.getByPerson(person.id);
-        const latest = existingTarget === undefined
-          ? undefined
-          : (await database.outreachDrafts.listForTarget(existingTarget.id))
-            .filter(({ purpose }) => purpose === LINKEDIN_CONNECTION_REQUEST_PURPOSE)
-            .at(-1);
-        if (
-          existingTarget !== undefined
-          && latest !== undefined
-          && isSameSavedDraft(latest, entry)
-        ) {
-          drafts.push(publicDraft(person.id, existingTarget, latest));
-          continue;
+        const result = frozenResult(drafts, needsVerification);
+        completedRequests.set(idempotencyKey, result);
+        return result;
+      })();
+      inFlightRequests.set(idempotencyKey, operation);
+      try {
+        return await operation;
+      } finally {
+        if (inFlightRequests.get(idempotencyKey) === operation) {
+          inFlightRequests.delete(idempotencyKey);
         }
-        const target = await pipeline.saveTarget({
-          personId: person.id,
-          companyId: company.id,
-          companyName: company.name,
-          name: person.name,
-          pmmOpportunity: entry.pmmOpportunity,
-          referralPotential: entry.referralPotential,
-          networkValue: entry.networkValue,
-          total: entry.total,
-          confidence: entry.confidence,
-          reasons: [...entry.reasons],
-          missingEvidence: [...entry.missingEvidence]
-        });
-        const draft = await database.outreachDrafts.createVersion({
-          targetId: target.id,
-          purpose: LINKEDIN_CONNECTION_REQUEST_PURPOSE,
-          text: entry.text,
-          evidenceIds: [...entry.evidenceIds]
-        });
-        drafts.push(publicDraft(person.id, target, draft));
       }
-
-      const result = frozenResult(drafts, needsVerification);
-      completedRequests.set(idempotencyKey, result);
-      return result;
     }
   });
 }
