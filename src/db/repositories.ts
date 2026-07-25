@@ -341,6 +341,7 @@ export type OutreachDraftVersionInput = {
 
 export type IdempotentOutreachDraftVersionInput = OutreachDraftVersionInput & {
   requestId: string;
+  requestPayloadHash: string;
 };
 
 export type PostDraftVersionInput = {
@@ -2838,6 +2839,7 @@ export function createRepositories(database: Database) {
             purpose: input.purpose,
             text: input.text,
             requestId: null,
+            requestPayloadHash: null,
             version: (latest?.version ?? 0) + 1,
             evidenceIdsJson: input.evidenceIds,
             createdAt: now,
@@ -2859,10 +2861,7 @@ export function createRepositories(database: Database) {
             eq(outreachDrafts.requestId, input.requestId)
           )).limit(1).for("update");
           if (existing !== undefined) {
-            if (
-              existing.text === input.text
-              && isDeepStrictEqual(existing.evidenceIdsJson, input.evidenceIds)
-            ) {
+            if (existing.requestPayloadHash === input.requestPayloadHash) {
               return decodeOutreachDraft(existing);
             }
             throw new DomainError("CONFLICT", "Outreach request ID conflicts with saved content", {
@@ -2880,6 +2879,7 @@ export function createRepositories(database: Database) {
             purpose: input.purpose,
             text: input.text,
             requestId: input.requestId,
+            requestPayloadHash: input.requestPayloadHash,
             version: (latest?.version ?? 0) + 1,
             evidenceIdsJson: input.evidenceIds,
             createdAt: now,
@@ -2887,6 +2887,19 @@ export function createRepositories(database: Database) {
           }).returning();
           return decodeOutreachDraft(requiredRow(row, "outreach draft"));
         }, "outreach_target_purpose_version_unique");
+      },
+      async getByRequest(
+        targetId: string,
+        purpose: string,
+        requestId: string
+      ): Promise<OutreachDraft | undefined> {
+        if (!isUuid(targetId)) return undefined;
+        const [row] = await database.select().from(outreachDrafts).where(and(
+          eq(outreachDrafts.targetId, targetId),
+          eq(outreachDrafts.purpose, purpose),
+          eq(outreachDrafts.requestId, requestId)
+        )).limit(1);
+        return row === undefined ? undefined : decodeOutreachDraft(row);
       },
       async getVersion(
         targetId: string,

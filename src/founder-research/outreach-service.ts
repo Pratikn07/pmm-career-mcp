@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { CareerDatabase } from "../db/client.js";
 import type { OutreachDraft } from "../db/repositories.js";
 import { DomainError } from "../domain/errors.js";
@@ -47,6 +48,7 @@ export type FounderOutreachBatchEntry = Readonly<{
   evidenceIds: readonly string[];
   personalizationClaims: readonly FounderOutreachPersonalizationClaim[];
   text: string;
+  reviewState?: "READY_TO_REVIEW" | "NEEDS_REVIEW";
 }>;
 
 export type SaveFounderOutreachBatchInput = Readonly<{
@@ -60,7 +62,6 @@ export type SavedFounderOutreachDraft = Readonly<{
   targetId: string;
   draftId: string;
   version: number;
-  requestId: string;
   purpose: typeof LINKEDIN_CONNECTION_REQUEST_PURPOSE;
   text: string;
   evidenceIds: readonly string[];
@@ -83,6 +84,7 @@ type ValidatedEntry = FounderOutreachBatchEntry & Readonly<{
     text: string;
     evidenceIds: readonly string[];
   }>[];
+  reviewState: "READY_TO_REVIEW" | "NEEDS_REVIEW";
 }>;
 
 function validationError(field: string, reason: string, maximum?: number): DomainError {
@@ -197,6 +199,10 @@ function validatedEntry(value: unknown, index: number): ValidatedEntry {
       evidenceIds: claimEvidenceIds
     };
   });
+  const reviewState = entry.reviewState ?? "READY_TO_REVIEW";
+  if (reviewState !== "READY_TO_REVIEW" && reviewState !== "NEEDS_REVIEW") {
+    throw validationError(`entries[${index}].reviewState`, "unsupported_value");
+  }
   return {
     personId: normalizedId(`entries[${index}].personId`, entry.personId),
     pmmOpportunity: entry.pmmOpportunity as number,
@@ -208,6 +214,7 @@ function validatedEntry(value: unknown, index: number): ValidatedEntry {
     missingEvidence: entry.missingEvidence ?? [],
     evidenceIds,
     personalizationClaims: claims,
+    reviewState,
     text: normalizedText(
       `entries[${index}].text`,
       entry.text,
@@ -216,12 +223,55 @@ function validatedEntry(value: unknown, index: number): ValidatedEntry {
   };
 }
 
+function canonicalSha256(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(value), "utf8").digest("hex");
+}
+
+function scopedRequestId(
+  subject: string,
+  personId: string,
+  targetId: string,
+  requestId: string
+): string {
+  return canonicalSha256({
+    contract: "founder-outreach.request-identity.v1",
+    subject,
+    personId,
+    targetId,
+    requestId
+  });
+}
+
+function payloadHash(runId: string, entry: ValidatedEntry): string {
+  const personalizationClaims = entry.personalizationClaims.map(({ text, evidenceIds }) => ({
+    text,
+    evidenceIds: [...evidenceIds].sort()
+  })).sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
+  return canonicalSha256({
+    contract: "founder-outreach.entry-payload.v1",
+    runId,
+    personId: entry.personId,
+    purpose: LINKEDIN_CONNECTION_REQUEST_PURPOSE,
+    pmmOpportunity: entry.pmmOpportunity,
+    referralPotential: entry.referralPotential,
+    networkValue: entry.networkValue,
+    total: entry.total,
+    confidence: entry.confidence,
+    reasons: [...entry.reasons],
+    missingEvidence: [...entry.missingEvidence],
+    evidenceIds: [...entry.evidenceIds].sort(),
+    personalizationClaims,
+    text: entry.text,
+    reviewState: entry.reviewState
+  });
+}
+
 function publicDraft(
   personId: string,
   target: Pick<PipelineTarget, "id">,
   draft: OutreachDraft
 ): SavedFounderOutreachDraft {
-  if (draft.requestId === null) {
+  if (draft.requestId === null || draft.requestPayloadHash === null) {
     throw new DomainError("DATA_INTEGRITY", "Saved founder outreach draft is missing request identity", {
       entity: "outreach_draft"
     });
@@ -231,7 +281,6 @@ function publicDraft(
     targetId: target.id,
     draftId: draft.id,
     version: draft.version,
-    requestId: draft.requestId,
     purpose: LINKEDIN_CONNECTION_REQUEST_PURPOSE,
     text: draft.text,
     evidenceIds: Object.freeze([...draft.evidenceIds])
@@ -306,6 +355,25 @@ export function createFounderOutreachService(
           const company = await database.companies.get(person.companyId);
           if (company === undefined) throw notFound("founder_research_person");
 
+          const entryPayloadHash = payloadHash(runId, entry);
+          const existingTarget = await database.targets.getByPerson(person.id);
+          if (existingTarget !== undefined) {
+            const existing = await database.outreachDrafts.getByRequest(
+              existingTarget.id,
+              LINKEDIN_CONNECTION_REQUEST_PURPOSE,
+              scopedRequestId(subject, person.id, existingTarget.id, requestId)
+            );
+            if (existing !== undefined) {
+              if (existing.requestPayloadHash !== entryPayloadHash) {
+                throw new DomainError("CONFLICT", "Outreach request ID conflicts with saved content", {
+                  entity: "outreach_draft"
+                });
+              }
+              drafts.push(publicDraft(person.id, existingTarget, existing));
+              continue;
+            }
+          }
+
           const evidence = await Promise.all(entry.evidenceIds.map(async (evidenceId) => {
             const row = await database.evidence.get(evidenceId);
             if (row === undefined || row.personId !== person.id) {
@@ -335,7 +403,6 @@ export function createFounderOutreachService(
             throw evidenceMismatch(`entries[${index}].text`);
           }
 
-          const existingTarget = await database.targets.getByPerson(person.id);
           const target = existingTarget ?? await pipeline.saveTarget({
             personId: person.id,
             companyId: company.id,
@@ -354,7 +421,8 @@ export function createFounderOutreachService(
             purpose: LINKEDIN_CONNECTION_REQUEST_PURPOSE,
             text: entry.text,
             evidenceIds: [...entry.evidenceIds],
-            requestId
+            requestId: scopedRequestId(subject, person.id, target.id, requestId),
+            requestPayloadHash: entryPayloadHash
           });
           drafts.push(publicDraft(person.id, target, draft));
       }

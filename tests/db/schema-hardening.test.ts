@@ -1198,13 +1198,14 @@ describe("database domain constraints", () => {
     const requestId = "same-request";
     await queryTestDatabase(db, `
       insert into career_mcp.outreach_drafts (
-        id, target_id, purpose, text, request_id, version, evidence_ids_json, created_at, updated_at
+        id, target_id, purpose, text, request_id, request_payload_hash, version, evidence_ids_json, created_at, updated_at
       ) values (
         '${randomUUID()}',
         '${target.id}',
         'connection_note',
         'First request-backed note',
         '${requestId}',
+        '${"a".repeat(64)}',
         2,
         '[]'::jsonb,
         '2026-07-18T00:00:00.000Z',
@@ -1213,19 +1214,40 @@ describe("database domain constraints", () => {
     `);
     await expect(queryTestDatabase(db, `
       insert into career_mcp.outreach_drafts (
-        id, target_id, purpose, text, request_id, version, evidence_ids_json, created_at, updated_at
+        id, target_id, purpose, text, request_id, request_payload_hash, version, evidence_ids_json, created_at, updated_at
       ) values (
         '${randomUUID()}',
         '${target.id}',
         'connection_note',
         'Conflicting request-backed note',
         '${requestId}',
+        '${"a".repeat(64)}',
         3,
         '[]'::jsonb,
         '2026-07-18T00:00:00.000Z',
         '2026-07-18T00:00:00.000Z'
       )
     `)).rejects.toBeInstanceOf(Error);
+  });
+
+  it("requires request-backed outreach drafts to carry a SHA-256 payload hash", async () => {
+    const { target } = await seedConstraintGraph();
+    await expectCheckViolation(`
+      insert into career_mcp.outreach_drafts (
+        id, target_id, purpose, text, request_id, request_payload_hash, version, evidence_ids_json, created_at, updated_at
+      ) values (
+        '${randomUUID()}',
+        '${target.id}',
+        'connection_note',
+        'Invalid request hash',
+        'request-without-valid-hash',
+        'not-a-sha256',
+        1,
+        '[]'::jsonb,
+        '2026-07-18T00:00:00.000Z',
+        '2026-07-18T00:00:00.000Z'
+      )
+    `);
   });
 
   it("rejects shortlist positions below zero", async () => {

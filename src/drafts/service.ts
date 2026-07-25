@@ -38,7 +38,7 @@ export type CreateOutreachInput = {
   evidenceIds: readonly string[];
 };
 
-export type LegacyOutreachDraft = Omit<OutreachDraft, "requestId">;
+export type LegacyOutreachDraft = Omit<OutreachDraft, "requestId" | "requestPayloadHash">;
 
 export type CreatePostInput = {
   text: string;
@@ -144,7 +144,7 @@ function publicPostDraft(
 }
 
 function legacyOutreachDraft(row: OutreachDraft): LegacyOutreachDraft {
-  const { requestId: _requestId, ...draft } = row;
+  const { requestId: _requestId, requestPayloadHash: _requestPayloadHash, ...draft } = row;
   return draft;
 }
 

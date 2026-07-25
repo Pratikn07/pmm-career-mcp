@@ -117,6 +117,37 @@ async function addRunPerson(options: {
   return { company, person, evidence, run, runPerson, ownerSubject };
 }
 
+async function addVerifiedRunForPerson(
+  context: Awaited<ReturnType<typeof addRunPerson>>
+) {
+  const { run, items } = await db.founderResearchRuns.create({
+    ownerSubject: context.ownerSubject,
+    queryJson: { source: "second-test-run" },
+    requestedLimit: 1,
+    companyIds: [context.company.id]
+  });
+  const runPerson = await db.founderResearchPeople.saveOfficial({
+    runItemId: items[0]!.id,
+    ownerSubject: context.ownerSubject,
+    personId: context.person.id,
+    founderRoleMatch: "Co-Founder",
+    confidence: 0.95
+  });
+  await db.founderProfileCandidates.recordOfficial({
+    runPersonId: runPerson.id,
+    ownerSubject: context.ownerSubject,
+    profileUrl: "https://www.linkedin.com/in/ada-lovelace",
+    evidenceUrl: "https://evidence.example/second-official-profile",
+    evidenceTitle: "Leadership",
+    evidenceSnippet: "Ada Lovelace, Co-Founder",
+    evidenceMetadataJson: { source: "official" },
+    checkedAt: CHECKED_AT,
+    confidence: 0.95,
+    sourceKind: "OFFICIAL_COMPANY"
+  });
+  return { run, runPerson };
+}
+
 function entryFor(
   context: Awaited<ReturnType<typeof addRunPerson>>,
   overrides: Partial<SaveFounderOutreachBatchInput["entries"][number]> = {}
@@ -477,8 +508,8 @@ describe("founder outreach batches", () => {
     });
     const retriedA = await service().saveBatch(structuredClone(requestA));
 
-    expect(first.drafts[0]).toMatchObject({ version: 1, requestId: "request-a" });
-    expect(second.drafts[0]).toMatchObject({ version: 2, requestId: "request-b" });
+    expect(first.drafts[0]).toMatchObject({ version: 1 });
+    expect(second.drafts[0]).toMatchObject({ version: 2 });
     expect(retriedA).toEqual(first);
     await expectDomainError(
       () => service().saveBatch({
@@ -489,6 +520,142 @@ describe("founder outreach batches", () => {
       }),
       "CONFLICT"
     );
+  });
+
+  it.each([
+    {
+      label: "target score",
+      change: async (context: Awaited<ReturnType<typeof addRunPerson>>) => entryFor(context, {
+        pmmOpportunity: 31,
+        total: 76
+      })
+    },
+    {
+      label: "reasons",
+      change: async (context: Awaited<ReturnType<typeof addRunPerson>>) => entryFor(context, {
+        reasons: ["A different verified reason"]
+      })
+    },
+    {
+      label: "missing evidence",
+      change: async (context: Awaited<ReturnType<typeof addRunPerson>>) => entryFor(context, {
+        missingEvidence: ["Recent funding evidence"]
+      })
+    },
+    {
+      label: "personalization claims",
+      change: async (context: Awaited<ReturnType<typeof addRunPerson>>) => entryFor(context, {
+        personalizationClaims: [{
+          text: "Atlas launch",
+          evidenceIds: [context.evidence.id]
+        }]
+      })
+    },
+    {
+      label: "evidence ordering and content",
+      change: async (context: Awaited<ReturnType<typeof addRunPerson>>) => {
+        const extra = await db.evidence.add({
+          personId: context.person.id,
+          sourceUrl: "https://evidence.example/extra",
+          fact: "Extra evidence",
+          checkedAt: CHECKED_AT,
+          confidence: 0.95
+        });
+        return entryFor(context, {
+          evidenceIds: [extra.id, context.evidence.id]
+        });
+      }
+    },
+    {
+      label: "review state",
+      change: async (context: Awaited<ReturnType<typeof addRunPerson>>) => entryFor(context, {
+        reviewState: "NEEDS_REVIEW" as never
+      })
+    },
+    {
+      label: "note text",
+      change: async (context: Awaited<ReturnType<typeof addRunPerson>>) => entryFor(context, {
+        text: "Hi Ada Lovelace — I’m interested in Atlas launch at Evidence Labs and would value connecting."
+      })
+    }
+  ])("rejects a changed $label payload without mutating the original target or draft", async ({ change }) => {
+    const context = await addRunPerson();
+    const request = {
+      runId: context.run.id,
+      requestId: "full-payload-request",
+      entries: [entryFor(context)]
+    };
+    const original = await service().saveBatch(request);
+    const target = await db.targets.get(original.drafts[0]!.targetId);
+    const drafts = await db.outreachDrafts.listForTarget(original.drafts[0]!.targetId);
+
+    await expectDomainError(
+      async () => service().saveBatch({ ...request, entries: [await change(context)] }),
+      "CONFLICT"
+    );
+
+    expect(await db.targets.get(original.drafts[0]!.targetId)).toEqual(target);
+    expect(await db.outreachDrafts.listForTarget(original.drafts[0]!.targetId)).toEqual(drafts);
+  });
+
+  it("canonicalizes evidence and claim ID ordering for an identical retry", async () => {
+    const context = await addRunPerson();
+    const additionalEvidence = await db.evidence.add({
+      personId: context.person.id,
+      sourceUrl: "https://evidence.example/ordering",
+      fact: "Atlas launch received customer praise.",
+      checkedAt: CHECKED_AT,
+      confidence: 0.95
+    });
+    const request = {
+      runId: context.run.id,
+      requestId: "canonical-evidence-order",
+      entries: [entryFor(context, {
+        evidenceIds: [context.evidence.id, additionalEvidence.id],
+        personalizationClaims: [{
+          text: "Atlas launch at Evidence Labs",
+          evidenceIds: [context.evidence.id, additionalEvidence.id]
+        }]
+      })]
+    };
+    const first = await service().saveBatch(request);
+    const reordered = await service().saveBatch({
+      ...request,
+      entries: [entryFor(context, {
+        evidenceIds: [additionalEvidence.id, context.evidence.id],
+        personalizationClaims: [{
+          text: "Atlas launch at Evidence Labs",
+          evidenceIds: [additionalEvidence.id, context.evidence.id]
+        }]
+      })]
+    });
+
+    expect(reordered).toEqual(first);
+    expect(await db.outreachDrafts.listForTarget(first.drafts[0]!.targetId)).toHaveLength(1);
+  });
+
+  it("rejects a same request ID from a changed run before mutating its saved target or draft", async () => {
+    const context = await addRunPerson();
+    const first = await service().saveBatch({
+      runId: context.run.id,
+      requestId: "run-is-part-of-payload",
+      entries: [entryFor(context)]
+    });
+    const target = await db.targets.get(first.drafts[0]!.targetId);
+    const drafts = await db.outreachDrafts.listForTarget(first.drafts[0]!.targetId);
+    const secondRun = await addVerifiedRunForPerson(context);
+
+    await expectDomainError(
+      () => service().saveBatch({
+        runId: secondRun.run.id,
+        requestId: "run-is-part-of-payload",
+        entries: [entryFor(context)]
+      }),
+      "CONFLICT"
+    );
+
+    expect(await db.targets.get(first.drafts[0]!.targetId)).toEqual(target);
+    expect(await db.outreachDrafts.listForTarget(first.drafts[0]!.targetId)).toEqual(drafts);
   });
 
   it("uses the authenticated owner and rejects missing or foreign run people", async () => {

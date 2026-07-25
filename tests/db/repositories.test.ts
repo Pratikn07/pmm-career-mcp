@@ -3395,7 +3395,8 @@ it("durably reuses outreach request IDs and versions changed requests", async ()
     purpose: "connection_note",
     text: "Hello Ada",
     evidenceIds: [source.id],
-    requestId: "request-a"
+    requestId: "request-a",
+    requestPayloadHash: "a".repeat(64)
   };
 
   const [first, duplicate] = await Promise.all([
@@ -3405,6 +3406,7 @@ it("durably reuses outreach request IDs and versions changed requests", async ()
   const changed = await db.outreachDrafts.createOrReuseVersion({
     ...input,
     requestId: "request-b",
+    requestPayloadHash: "b".repeat(64),
     text: "Hello Ada — revised"
   });
   const retriedFirst = await db.outreachDrafts.createOrReuseVersion(input);
@@ -3414,8 +3416,10 @@ it("durably reuses outreach request IDs and versions changed requests", async ()
   expect(changed.version).toBe(2);
   expect(retriedFirst).toEqual(first);
   expect(first.requestId).toBe("request-a");
+  expect(first.requestPayloadHash).toBe("a".repeat(64));
   await expect(db.outreachDrafts.createOrReuseVersion({
     ...input,
+    requestPayloadHash: "c".repeat(64),
     text: "Hello Ada — conflicting retry"
   })).rejects.toMatchObject({ code: "CONFLICT" });
   expect(await db.outreachDrafts.listForTarget(target.id)).toHaveLength(2);

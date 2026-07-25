@@ -162,6 +162,7 @@ export const outreachDrafts = careerMcp.table("outreach_drafts", {
   purpose: text("purpose").notNull(),
   text: text("text").notNull(),
   requestId: text("request_id"),
+  requestPayloadHash: text("request_payload_hash"),
   version: integer("version").notNull(),
   evidenceIdsJson: jsonb("evidence_ids_json").$type<string[]>().notNull(),
   createdAt: timestamptz("created_at").notNull(),
@@ -177,7 +178,14 @@ export const outreachDrafts = careerMcp.table("outreach_drafts", {
     table.purpose,
     table.requestId
   ),
-  check("outreach_drafts_version_check", sql`${table.version} >= 1`)
+  check("outreach_drafts_version_check", sql`${table.version} >= 1`),
+  check(
+    "outreach_drafts_request_identity_check",
+    sql`(
+      (${table.requestId} is null and ${table.requestPayloadHash} is null)
+      or (${table.requestId} is not null and ${table.requestPayloadHash} ~ '^[0-9a-f]{64}$')
+    )`
+  )
 ]);
 
 export const shortlists = careerMcp.table("shortlists", {
