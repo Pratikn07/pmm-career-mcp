@@ -430,6 +430,65 @@ describe("Founder candidate service", () => {
     expect(resolved.requiresManualReview).toBe(false);
   });
 
+  it("derives canonical state and ambiguity from exactly one owner-scoped candidate snapshot", async () => {
+    const context = await addCandidateContext();
+    const listSpy = vi.spyOn(db.founderProfileCandidates, "listForPerson");
+    const canonicalSpy = vi.spyOn(
+      db.founderProfileCandidates,
+      "getCanonicalForPerson"
+    );
+
+    const saved = await service().saveCandidate(candidateInput(context));
+
+    expect(saved.canonical).toBeUndefined();
+    expect(saved.requiresManualReview).toBe(true);
+    expect(listSpy).toHaveBeenCalledTimes(1);
+    expect(listSpy).toHaveBeenCalledWith(context.runPerson.id, OWNER);
+    expect(canonicalSpy).not.toHaveBeenCalled();
+  });
+
+  it("cannot combine canonical state from a later mutation with an earlier candidate snapshot", async () => {
+    const context = await addCandidateContext();
+    const originalList = db.founderProfileCandidates.listForPerson.bind(
+      db.founderProfileCandidates
+    );
+    let snapshotRead!: () => void;
+    const snapshotWasRead = new Promise<void>((resolve) => {
+      snapshotRead = resolve;
+    });
+    const listSpy = vi.spyOn(db.founderProfileCandidates, "listForPerson")
+      .mockImplementationOnce(async (runPersonId, ownerSubject) => {
+        const snapshot = await originalList(runPersonId, ownerSubject);
+        snapshotRead();
+        return snapshot;
+      });
+    const canonicalSpy = vi.spyOn(
+      db.founderProfileCandidates,
+      "getCanonicalForPerson"
+    ).mockImplementationOnce(async () => {
+      await snapshotWasRead;
+      return await db.founderProfileCandidates.recordOfficial({
+        runPersonId: context.runPerson.id,
+        ownerSubject: OWNER,
+        profileUrl: "https://www.linkedin.com/in/ada-later-official",
+        sourceKind: "OFFICIAL_COMPANY",
+        evidenceUrl: "https://candidate.example/team",
+        evidenceTitle: "Candidate Labs team",
+        evidenceSnippet: "Ada Lovelace, Co-Founder",
+        evidenceMetadataJson: {},
+        checkedAt: CHECKED_AT,
+        confidence: 0.99
+      });
+    });
+
+    const saved = await service().saveCandidate(candidateInput(context));
+
+    expect(saved.canonical).toBeUndefined();
+    expect(saved.requiresManualReview).toBe(true);
+    expect(listSpy).toHaveBeenCalledTimes(1);
+    expect(canonicalSpy).not.toHaveBeenCalled();
+  });
+
   it("does not replace a VERIFIED canonical profile when saving a public-search candidate", async () => {
     const context = await addCandidateContext();
     const verified = await db.founderProfileCandidates.recordOfficial({
@@ -620,6 +679,39 @@ describe("Founder candidate service", () => {
     });
   });
 
+  it("never combines founder-name fragments split across different people or result fields", async () => {
+    const context = await addCandidateContext();
+    await expectDomainError(
+      () => service().saveCandidate(candidateInput(context, {
+        resultTitle: "Ada Smith - Founder at Candidate Labs",
+        resultSnippet: "Jane Lovelace - Advisor at Candidate Labs"
+      })),
+      "EVIDENCE_MISMATCH"
+    );
+  });
+
+  it("rejects founder tokens scattered through one result field", async () => {
+    const context = await addCandidateContext();
+    await expectDomainError(
+      () => service().saveCandidate(candidateInput(context, {
+        resultTitle: "Ada, alongside Grace, Lovelace - Founder at Candidate Labs",
+        resultSnippet: "Candidate Labs leadership profile."
+      })),
+      "EVIDENCE_MISMATCH"
+    );
+  });
+
+  it("does not join founder tokens across result-title clause boundaries", async () => {
+    const context = await addCandidateContext();
+    await expectDomainError(
+      () => service().saveCandidate(candidateInput(context, {
+        resultTitle: "Ada | Lovelace - Founder at Candidate Labs",
+        resultSnippet: "Candidate Labs leadership profile."
+      })),
+      "EVIDENCE_MISMATCH"
+    );
+  });
+
   it("requires the complete persisted founder name in actual result evidence", async () => {
     const context = await addCandidateContext();
     const error = await expectDomainError(
@@ -649,6 +741,65 @@ describe("Founder candidate service", () => {
       field: "resultEvidence",
       reason: "company_context_mismatch"
     });
+  });
+
+  it.each([
+    ["inserted company token", "Acme Advanced Labs"],
+    ["longer company entity", "Acme Labs International"]
+  ])("rejects an expected Acme Labs identity embedded in a %s", async (
+    _label,
+    resultCompany
+  ) => {
+    const context = await addCandidateContext({ companyName: "Acme Labs" });
+    await expectDomainError(
+      () => service().saveCandidate(candidateInput(context, {
+        resultTitle: `Ada Lovelace - Founder at ${resultCompany}`,
+        resultSnippet: `${resultCompany} leadership profile.`
+      })),
+      "EVIDENCE_MISMATCH"
+    );
+  });
+
+  it("requires founder and company identities to occur together in one actual result field", async () => {
+    const context = await addCandidateContext();
+    const error = await expectDomainError(
+      () => service().saveCandidate(candidateInput(context, {
+        resultTitle: "Ada Lovelace - Co-Founder | LinkedIn",
+        resultSnippet: "Official leadership profile for Candidate Labs."
+      })),
+      "EVIDENCE_MISMATCH"
+    );
+    expect(error.details).toMatchObject({
+      field: "resultEvidence",
+      reason: "entity_binding_mismatch"
+    });
+  });
+
+  it.each([
+    {
+      label: "standard LinkedIn title",
+      resultTitle: "Ada Lovelace - Co-Founder at Candidate Labs | LinkedIn",
+      resultSnippet: "View Ada's professional profile."
+    },
+    {
+      label: "descriptive search snippet",
+      resultTitle: "Ada Lovelace | LinkedIn",
+      resultSnippet: "Ada Lovelace is the Co-Founder of Candidate Labs."
+    },
+    {
+      label: "reordered full-name title",
+      resultTitle: "Lovelace Ada — Co-Founder at Candidate Labs · LinkedIn",
+      resultSnippet: "Professional profile."
+    }
+  ])("accepts a realistic $label format", async ({
+    resultTitle,
+    resultSnippet
+  }) => {
+    const context = await addCandidateContext();
+    await expect(service().saveCandidate(candidateInput(context, {
+      resultTitle,
+      resultSnippet
+    }))).resolves.toMatchObject({ requiresManualReview: true });
   });
 
   it("accepts reordered complete founder tokens and ignores a company legal suffix", async () => {
@@ -741,16 +892,15 @@ describe("Founder candidate service", () => {
     expect(`${error.message}${JSON.stringify(error.details)}`).not.toContain(sentinel);
   });
 
-  it("maps canonical candidate database failures without exposing raw adapter details", async () => {
+  it("does not perform a separate canonical-candidate database read", async () => {
     const context = await addCandidateContext();
-    const sentinel = `RAW-CANONICAL-${randomUUID()}`;
-    vi.spyOn(db.founderProfileCandidates, "getCanonicalForPerson")
-      .mockRejectedValueOnce(new Error(sentinel));
+    const canonicalSpy = vi.spyOn(
+      db.founderProfileCandidates,
+      "getCanonicalForPerson"
+    ).mockRejectedValueOnce(new Error("must not be called"));
 
-    const error = await expectDomainError(
-      () => service().saveCandidate(candidateInput(context)),
-      "DATA_INTEGRITY"
-    );
-    expect(`${error.message}${JSON.stringify(error.details)}`).not.toContain(sentinel);
+    await expect(service().saveCandidate(candidateInput(context)))
+      .resolves.toMatchObject({ requiresManualReview: true });
+    expect(canonicalSpy).not.toHaveBeenCalled();
   });
 });

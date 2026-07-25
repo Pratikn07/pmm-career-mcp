@@ -20,6 +20,8 @@ const UUID_PATTERN =
 const UNSAFE_CONTROL = /[\p{Cc}\p{Cf}]/u;
 const NAME_TOKEN = /[\p{L}\p{N}][\p{L}\p{N}\p{M}'’\p{Pd}-]*/gu;
 const WHITESPACE = /\s+/gu;
+const EVIDENCE_CLAUSE_BOUNDARY =
+  /(?:\s+[|·•-]\s+)|[|·•—–,;:!?()[\]{}]|\.(?:\s+|$)/gu;
 const COMPANY_LEGAL_SUFFIXES = new Set([
   "co",
   "company",
@@ -31,6 +33,16 @@ const COMPANY_LEGAL_SUFFIXES = new Set([
   "llc",
   "ltd",
   "plc"
+]);
+const COMPANY_INTRODUCERS = new Set([
+  "at",
+  "for",
+  "from",
+  "of",
+  "organization",
+  "startup",
+  "team",
+  "with"
 ]);
 
 export const CANDIDATE_FIELD_LIMITS = Object.freeze({
@@ -186,22 +198,28 @@ function comparableTokens(value: string): string[] {
   return normalized === "" ? [] : normalized.split(" ");
 }
 
-function containsAllTokens(
+function containsContiguousTokenPermutation(
   actualTokens: readonly string[],
   expectedTokens: readonly string[]
 ): boolean {
-  const remaining = new Map<string, number>();
-  for (const token of actualTokens) {
-    remaining.set(token, (remaining.get(token) ?? 0) + 1);
+  if (expectedTokens.length === 0 || actualTokens.length < expectedTokens.length) {
+    return false;
   }
-  for (const token of expectedTokens) {
-    const count = remaining.get(token) ?? 0;
-    if (count === 0) {
-      return false;
+  const expectedSignature = [...expectedTokens].sort().join("\u0000");
+  for (
+    let start = 0;
+    start <= actualTokens.length - expectedTokens.length;
+    start += 1
+  ) {
+    const windowSignature = actualTokens
+      .slice(start, start + expectedTokens.length)
+      .sort()
+      .join("\u0000");
+    if (windowSignature === expectedSignature) {
+      return true;
     }
-    remaining.set(token, count - 1);
   }
-  return expectedTokens.length > 0;
+  return false;
 }
 
 function companyIdentityTokens(value: string): string[] {
@@ -214,6 +232,99 @@ function companyIdentityTokens(value: string): string[] {
     identityTokens.pop();
   }
   return identityTokens.length === 0 ? allTokens : identityTokens;
+}
+
+function evidenceTokenClauses(field: string): string[][] {
+  return field.normalize("NFC")
+    .split(EVIDENCE_CLAUSE_BOUNDARY)
+    .map(comparableTokens)
+    .filter(({ length }) => length > 0);
+}
+
+function containsBoundedCompanyIdentity(
+  field: string,
+  expectedTokens: readonly string[]
+): boolean {
+  if (expectedTokens.length === 0) {
+    return false;
+  }
+  return evidenceTokenClauses(field).some((tokens) => {
+    for (
+      let start = 0;
+      start <= tokens.length - expectedTokens.length;
+      start += 1
+    ) {
+      if (
+        expectedTokens.some(
+          (expected, offset) => tokens[start + offset] !== expected
+        )
+      ) {
+        continue;
+      }
+      if (
+        start > 0
+        && !COMPANY_INTRODUCERS.has(tokens[start - 1]!)
+      ) {
+        continue;
+      }
+      const remaining = tokens.slice(start + expectedTokens.length);
+      if (remaining.every((token) => COMPANY_LEGAL_SUFFIXES.has(token))) {
+        return true;
+      }
+    }
+    return false;
+  });
+}
+
+function matchResultField(
+  field: string | undefined,
+  founderTokens: readonly string[],
+  companyTokens: readonly string[]
+): {
+  founder: boolean;
+  company: boolean;
+  bound: boolean;
+} {
+  if (field === undefined) {
+    return { founder: false, company: false, bound: false };
+  }
+  const founder = evidenceTokenClauses(field).some(
+    (clause) => containsContiguousTokenPermutation(clause, founderTokens)
+  );
+  const company = containsBoundedCompanyIdentity(field, companyTokens);
+  return { founder, company, bound: founder && company };
+}
+
+function canonicalStatusRank(status: FounderProfileCandidate["status"]): number {
+  switch (status) {
+    case "CONFIRMED":
+      return 0;
+    case "VERIFIED":
+      return 1;
+    default:
+      return 2;
+  }
+}
+
+function deriveCandidateState(
+  candidates: readonly FounderProfileCandidate[]
+): {
+  canonical: FounderProfileCandidate | undefined;
+  requiresManualReview: boolean;
+} {
+  const canonical = candidates
+    .filter(({ status }) => status === "CONFIRMED" || status === "VERIFIED")
+    .sort((left, right) => (
+      canonicalStatusRank(left.status) - canonicalStatusRank(right.status)
+      || right.checkedAt.localeCompare(left.checkedAt)
+      || left.id.localeCompare(right.id)
+    ))[0];
+  return {
+    canonical,
+    requiresManualReview: candidates.some(
+      ({ status }) => status === "CANDIDATE"
+    )
+  };
 }
 
 function validateUuid(field: string, value: unknown): string {
@@ -479,19 +590,11 @@ export function createFounderCandidateService(
     requiresManualReview: boolean;
   }> {
     return await withPersistenceMapping("read", async () => {
-      const [canonical, candidates] = await Promise.all([
-        database.founderProfileCandidates.getCanonicalForPerson(
-          runPersonId,
-          subject
-        ),
-        database.founderProfileCandidates.listForPerson(runPersonId, subject)
-      ]);
-      return {
-        canonical,
-        requiresManualReview: candidates.some(
-          ({ status }) => status === "CANDIDATE"
-        )
-      };
+      const candidates = await database.founderProfileCandidates.listForPerson(
+        runPersonId,
+        subject
+      );
+      return deriveCandidateState(candidates);
     });
   }
 
@@ -582,15 +685,28 @@ export function createFounderCandidateService(
       ) {
         throw evidenceMismatch("founderRole", "persisted_role_mismatch");
       }
-      const evidenceTokens = comparableTokens([
-        resultTitle ?? "",
-        resultSnippet ?? ""
-      ].join(" "));
-      if (!containsAllTokens(evidenceTokens, comparableTokens(person.name))) {
+      const founderEvidenceTokens = comparableTokens(person.name);
+      const companyEvidenceTokens = companyIdentityTokens(company.name);
+      const fieldMatches = [
+        matchResultField(
+          resultTitle,
+          founderEvidenceTokens,
+          companyEvidenceTokens
+        ),
+        matchResultField(
+          resultSnippet,
+          founderEvidenceTokens,
+          companyEvidenceTokens
+        )
+      ];
+      if (!fieldMatches.some(({ founder }) => founder)) {
         throw evidenceMismatch("resultEvidence", "founder_identity_mismatch");
       }
-      if (!containsAllTokens(evidenceTokens, companyIdentityTokens(company.name))) {
+      if (!fieldMatches.some(({ company: matched }) => matched)) {
         throw evidenceMismatch("resultEvidence", "company_context_mismatch");
+      }
+      if (!fieldMatches.some(({ bound }) => bound)) {
+        throw evidenceMismatch("resultEvidence", "entity_binding_mismatch");
       }
 
       const candidate = await withPersistenceMapping(
