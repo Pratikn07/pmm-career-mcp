@@ -307,8 +307,14 @@ export function createPeopleDiscovery(
 
   const runDiscovery = async (
     companyId: string,
-    persist: boolean
+    options: Readonly<{
+      persist: boolean;
+      allowSearchExtension: boolean;
+    }>
   ): Promise<DiscoveryResult | OfficialPeopleProjection> => {
+    const coverage = options.allowSearchExtension
+      ? searchProvider.coverage
+      : "authoritative-pages-only";
     const company = await dependencies.repositories.companies.get(companyId);
     if (company === undefined) {
       throw new Error(`Company ${companyId} was not found`);
@@ -391,7 +397,7 @@ export function createPeopleDiscovery(
           people: [],
           evidence: [],
           checkedAt: now().toISOString(),
-          coverage: searchProvider.coverage,
+          coverage,
           warnings
         };
       }
@@ -493,7 +499,11 @@ export function createPeopleDiscovery(
       }
     }
 
-    if (searchProvider.coverage === "search-extended" && addElapsedWarning()) {
+    if (
+      options.allowSearchExtension
+      && searchProvider.coverage === "search-extended"
+      && addElapsedWarning()
+    ) {
       try {
         if (!beginRequest()) {
           refreshCoverageComplete = false;
@@ -634,7 +644,7 @@ export function createPeopleDiscovery(
     const sortedWarnings = warnings.sort(
       (left, right) => left.sourceUrl.localeCompare(right.sourceUrl, "en")
     );
-    if (!persist) {
+    if (!options.persist) {
       const projectedPeople = sortedPeople
         .filter(({ sourceKind }) => sourceKind === "OFFICIAL_COMPANY")
         .map((person) => ({
@@ -659,7 +669,7 @@ export function createPeopleDiscovery(
         people: projectedPeople,
         evidence: projectedPeople.flatMap(({ evidence }) => evidence),
         checkedAt,
-        coverage: searchProvider.coverage,
+        coverage,
         warnings: sortedWarnings
       };
     }
@@ -702,17 +712,23 @@ export function createPeopleDiscovery(
       people,
       evidence: allEvidence,
       checkedAt,
-      coverage: searchProvider.coverage,
+      coverage,
       warnings: sortedWarnings
     };
   };
 
   return {
     async projectOfficialPeople(companyId) {
-      return await runDiscovery(companyId, false) as OfficialPeopleProjection;
+      return await runDiscovery(companyId, {
+        persist: false,
+        allowSearchExtension: false
+      }) as OfficialPeopleProjection;
     },
     async discoverPublicPeople(companyId) {
-      return await runDiscovery(companyId, true) as DiscoveryResult;
+      return await runDiscovery(companyId, {
+        persist: true,
+        allowSearchExtension: true
+      }) as DiscoveryResult;
     }
   };
 }

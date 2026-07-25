@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { afterAll, afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { createTestDatabase, type TestCareerDatabase } from "../support/database.js";
 import { postgresErrorKind } from "../../src/domain/errors.js";
 import type { FetchedPage } from "../../src/research/fetch-page.js";
@@ -297,45 +297,48 @@ describe("public people discovery", () => {
       websiteUrl: HOME_URL
     }));
     const events: string[] = [];
+    const search = vi.fn<SearchProvider["search"]>(async () => {
+      events.push("search");
+      return [{
+        title: "Acme leadership interview",
+        url: "https://press.example/acme-team",
+        snippet: "Public interview",
+        checkedAt: CHECKED_AT
+      }];
+    });
     const searchProvider: SearchProvider = {
       coverage: "search-extended",
-      search: async () => {
-        events.push("search");
-        return [{
-          title: "Acme leadership interview",
-          url: "https://press.example/acme-team",
-          snippet: "Public interview",
-          checkedAt: CHECKED_AT
-        }];
-      }
+      search
     };
+    const fetchPage = vi.fn(async (url: string) => {
+      events.push(`fetch:${url}`);
+      if (url === HOME_URL) {
+        return fetchedPage(url, "<main><h1>Acme AI</h1></main>", "Acme AI");
+      }
+      return fetchedPage(url, `
+        <article data-team-member>
+          <h2 data-person-name>External Example</h2>
+          <p data-person-role>Advisor</p>
+          <a href="https://www.linkedin.com/in/external-example">LinkedIn</a>
+        </article>
+      `, "Acme leadership interview");
+    });
     const service = createPeopleDiscovery({
       repositories: database,
       searchProvider,
-      fetchPage: async (url) => {
-        events.push(`fetch:${url}`);
-        if (url === HOME_URL) {
-          return fetchedPage(url, "<main><h1>Acme AI</h1></main>", "Acme AI");
-        }
-        return fetchedPage(url, `
-          <article data-team-member>
-            <h2 data-person-name>External Example</h2>
-            <p data-person-role>Advisor</p>
-            <a href="https://www.linkedin.com/in/external-example">LinkedIn</a>
-          </article>
-        `, "Acme leadership interview");
-      }
+      fetchPage
     });
 
     const projection = await service.projectOfficialPeople(company.id);
 
     expect(projection.people).toEqual([]);
     expect(await database.people.listByCompany(company.id)).toEqual([]);
-    expect(events).toEqual([
-      `fetch:${HOME_URL}`,
-      "search",
-      "fetch:https://press.example/acme-team"
-    ]);
+    expect(events).toEqual([`fetch:${HOME_URL}`]);
+    expect(search).not.toHaveBeenCalled();
+    expect(fetchPage).not.toHaveBeenCalledWith(
+      "https://press.example/acme-team",
+      expect.anything()
+    );
     events.length = 0;
 
     const result = await service.discoverPublicPeople(company.id);
@@ -343,6 +346,7 @@ describe("public people discovery", () => {
     expect(result.coverage).toBe("search-extended");
     expect(result.people[0]).toMatchObject({ name: "External Example", role: "Advisor" });
     expect(result.people[0]?.publicProfileUrl).toBeUndefined();
+    expect(search).toHaveBeenCalledTimes(1);
     expect(events).toEqual([
       `fetch:${HOME_URL}`,
       "search",

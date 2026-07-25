@@ -15,6 +15,11 @@ import type {
   OfficialEvidenceProjection,
   OfficialPersonProjection
 } from "../research/types.js";
+import {
+  containsUntrustedInstruction,
+  isSafeUntrustedEntityLabel,
+  type UntrustedEntityLabelKind
+} from "../security/untrusted-text.js";
 import { validateFounderRole } from "./founder-role.js";
 import { validateNonFetchingLinkedInProfileUrl } from "./profile-url.js";
 
@@ -22,8 +27,6 @@ const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 const UNSAFE_CONTROL = /[\p{Cc}\p{Cf}]/u;
 const WHITESPACE = /\s+/gu;
-const PROMPT_INJECTION_PATTERN =
-  /\b(?:ignore|disregard|override)\b.{0,40}\b(?:instructions?|rules?|prompt)\b|\b(?:system|developer)\s+prompt\b|\btool\s+call\b/iu;
 const FRESH_EVIDENCE_MS = 30 * 24 * 60 * 60 * 1_000;
 const LEASE_DURATION_MS = 2 * 60 * 1_000;
 const MAX_COMPANIES_PER_CALL = 5;
@@ -240,7 +243,7 @@ function safeCompanyResult(result: CompanyResult): boolean {
     && Array.from(result.name).length <= PUBLIC_TASK_LIMITS.companyName
     && Buffer.byteLength(result.name, "utf8") <= PUBLIC_TASK_LIMITS.companyName * 4
     && !UNSAFE_CONTROL.test(result.name)
-    && !PROMPT_INJECTION_PATTERN.test(result.name);
+    && isSafeUntrustedEntityLabel(result.name, "company");
 }
 
 function selectCompanies(
@@ -275,8 +278,19 @@ function selectCompanies(
   return selected;
 }
 
-function safeTaskText(value: string, maximum: number): string | undefined {
-  if (UNSAFE_CONTROL.test(value) || PROMPT_INJECTION_PATTERN.test(value)) {
+function safeTaskText(
+  value: string,
+  maximum: number,
+  labelKind?: UntrustedEntityLabelKind
+): string | undefined {
+  if (
+    UNSAFE_CONTROL.test(value)
+    || containsUntrustedInstruction(value)
+    || (
+      labelKind !== undefined
+      && !isSafeUntrustedEntityLabel(value, labelKind)
+    )
+  ) {
     return undefined;
   }
   const normalized = value.normalize("NFC").replace(WHITESPACE, " ").trim();
@@ -363,11 +377,12 @@ function publicSearchQueries(input: {
 }): string[] {
   const companyName = safeTaskText(
     input.companyName,
-    PUBLIC_TASK_LIMITS.companyName
+    PUBLIC_TASK_LIMITS.companyName,
+    "company"
   );
   const founderName = input.founderName === undefined
     ? undefined
-    : safeTaskText(input.founderName, PUBLIC_TASK_LIMITS.personName);
+    : safeTaskText(input.founderName, PUBLIC_TASK_LIMITS.personName, "person");
   if (
     companyName === undefined
     || (input.founderName !== undefined && founderName === undefined)
@@ -394,19 +409,22 @@ function createPublicTask(input: {
 }): FounderPublicSearchTask | undefined {
   const companyName = safeTaskText(
     input.company.name,
-    PUBLIC_TASK_LIMITS.companyName
+    PUBLIC_TASK_LIMITS.companyName,
+    "company"
   );
   const knownFounderName = input.founder === undefined
     ? undefined
     : safeTaskText(
         input.founder.name,
-        PUBLIC_TASK_LIMITS.personName
+        PUBLIC_TASK_LIMITS.personName,
+        "person"
       );
   const knownFounderRole = input.founder === undefined
     ? undefined
     : safeTaskText(
         input.founder.normalizedRole,
-        PUBLIC_TASK_LIMITS.role
+        PUBLIC_TASK_LIMITS.role,
+        "role"
       );
   const officialWebsiteUrl = safeWebsiteUrl(input.company.websiteUrl);
   if (
@@ -517,8 +535,16 @@ export function createFounderResearchRunService(
       ) {
         continue;
       }
-      const name = safeTaskText(person.name, PUBLIC_TASK_LIMITS.personName);
-      const safeRole = safeTaskText(normalizedRole, PUBLIC_TASK_LIMITS.role);
+      const name = safeTaskText(
+        person.name,
+        PUBLIC_TASK_LIMITS.personName,
+        "person"
+      );
+      const safeRole = safeTaskText(
+        normalizedRole,
+        PUBLIC_TASK_LIMITS.role,
+        "role"
+      );
       if (name === undefined || safeRole === undefined) {
         continue;
       }

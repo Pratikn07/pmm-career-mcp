@@ -2150,37 +2150,6 @@ export function createRepositories(database: Database) {
           )).limit(1).for("update");
           const person = requiredRow(personRow, "candidate founder person");
 
-          const [existingEvidence] = await transaction.select().from(
-            evidence
-          ).where(and(
-            eq(evidence.personId, person.id),
-            eq(evidence.sourceUrl, input.evidenceUrl),
-            eq(evidence.factType, "candidate_public_role")
-          )).limit(1).for("update");
-          const fact = input.evidenceSnippet
-            ?? input.evidenceTitle
-            ?? `${input.founderName} — ${input.founderRole}`;
-          if (existingEvidence === undefined) {
-            await transaction.insert(evidence).values({
-              id: randomUUID(),
-              personId: person.id,
-              sourceUrl: input.evidenceUrl,
-              title: input.evidenceTitle ?? null,
-              factType: "candidate_public_role",
-              fact,
-              checkedAt: input.checkedAt,
-              confidence: input.confidence,
-              createdAt: operationAt
-            });
-          } else {
-            await transaction.update(evidence).set({
-              title: input.evidenceTitle ?? null,
-              fact,
-              checkedAt: input.checkedAt,
-              confidence: input.confidence
-            }).where(eq(evidence.id, existingEvidence.id));
-          }
-
           const [existingRunPerson] = await transaction.select().from(
             founderResearchRunPeople
           ).where(and(

@@ -8,6 +8,11 @@ import { setTimeout as wait } from "node:timers/promises";
 import { createBrotliDecompress, createGunzip, createInflate } from "node:zlib";
 import { load } from "cheerio";
 import {
+  containsSensitiveDisclosureRequest,
+  containsUntrustedInstruction,
+  hasUntrustedMetaInstruction
+} from "../security/untrusted-text.js";
+import {
   asNonFetchingLinkedInProfileUrl,
   type NonFetchingLinkedInProfileUrl
 } from "./non-fetching-profile-url.js";
@@ -230,28 +235,6 @@ function normalizedText(value: string): string {
   return value.replace(/\s+/g, " ").trim();
 }
 
-const META_INSTRUCTION_PATTERNS = [
-  /\b(?:ignore|disregard|forget|override)\b.{0,80}\b(?:instructions?|rules?|prompts?|messages?)\b/i,
-  /\b(?:ignore|disregard|forget|override)\b.{0,80}\b(?:above|previous|prior|everything|all)\b/i
-];
-const SENSITIVE_ACTION_PATTERN = /\b(?:return|reveal|expose|print|send)\b.{0,80}\b(?:private|personal|sensitive|system|developer|secret|credentials?|data)\b/i;
-
-function hasMetaInstructionContext(value: string): boolean {
-  const normalized = normalizedText(value);
-  return META_INSTRUCTION_PATTERNS.some((pattern) => pattern.test(normalized));
-}
-
-function containsInstructionLikeText(value: string): boolean {
-  const normalized = normalizedText(value);
-  return [
-    ...META_INSTRUCTION_PATTERNS,
-    /\b(?:reveal|expose|print|send)\b.{0,80}\b(?:private|personal|sensitive|system|developer|secret|credentials?|data)\b/i,
-    /\b(?:system|developer|assistant)\s*:\s*/i,
-    /\b(?:system|developer)\s+(?:prompt|message|instructions?)\b/i,
-    /\b(?:you are|act as)\s+(?:chatgpt|an?\s+(?:ai|language model))/i
-  ].some((pattern) => pattern.test(normalized));
-}
-
 function sanitizedExtractedText(value: string): string {
   const lines = value
     .split(/\r?\n/)
@@ -260,24 +243,27 @@ function sanitizedExtractedText(value: string): string {
   const retainedLines: string[] = [];
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index]!;
-    if (/^(?:ignore|disregard|forget|override)\b/i.test(line)) {
+    if (/^(?:ignore|disregard|forget|override|bypass|follow|obey|execute|apply)\b/i.test(line)) {
       let sequence = line;
       let sequenceEnd = index;
       while (sequenceEnd + 1 < lines.length && sequenceEnd - index < 2) {
         const nextLine = lines[sequenceEnd + 1]!;
         const currentLineEndsSentence = /[.!?]["')\]]*$/.test(lines[sequenceEnd]!);
-        if (currentLineEndsSentence && !SENSITIVE_ACTION_PATTERN.test(nextLine)) {
+        if (
+          currentLineEndsSentence
+          && !containsSensitiveDisclosureRequest(nextLine)
+        ) {
           break;
         }
         sequence = `${sequence} ${nextLine}`;
         sequenceEnd += 1;
       }
-      if (hasMetaInstructionContext(sequence)) {
+      if (hasUntrustedMetaInstruction(sequence)) {
         index = sequenceEnd;
         continue;
       }
     }
-    if (!containsInstructionLikeText(line)) {
+    if (!containsUntrustedInstruction(line)) {
       retainedLines.push(line);
     }
   }
@@ -714,7 +700,7 @@ function removeAdjacentInstructionBlocks($: ReturnType<typeof load>): void {
   const blocksToRemove = new Set<InstructionBlock>();
   let scanWork = 0;
   for (const block of blocks) {
-    if (!hasMetaInstructionContext($(block).text())) {
+    if (!hasUntrustedMetaInstruction($(block).text())) {
       continue;
     }
     let nextBlock = $(block).next().get(0);
@@ -727,7 +713,7 @@ function removeAdjacentInstructionBlocks($: ReturnType<typeof load>): void {
     }
     if (
       nextBlock !== undefined
-      && SENSITIVE_ACTION_PATTERN.test(normalizedText($(nextBlock).text()))
+      && containsSensitiveDisclosureRequest($(nextBlock).text())
     ) {
       blocksToRemove.add(block);
       blocksToRemove.add(nextBlock);
@@ -766,12 +752,12 @@ function normalizedStructuralHref(value: string, baseUrl: URL): StructuralHref |
 
 function removeInstructionSubtrees($: ReturnType<typeof load>): void {
   for (const element of $("body *").toArray().reverse()) {
-    if (containsInstructionLikeText($(element).text())) {
+    if (containsUntrustedInstruction($(element).text())) {
       $(element).remove();
     }
   }
   for (const node of $("body").contents().toArray()) {
-    if (node.type === "text" && containsInstructionLikeText(node.data)) {
+    if (node.type === "text" && containsUntrustedInstruction(node.data)) {
       $(node).remove();
     }
   }
@@ -810,7 +796,7 @@ function sanitizeStructuralHtml($: ReturnType<typeof load>, baseUrl: URL): void 
       const value = normalizedText(rawValue);
       if (
         value.length <= MAX_STRUCTURAL_ATTRIBUTE_CHARS
-        && !containsInstructionLikeText(value)
+        && !containsUntrustedInstruction(value)
       ) {
         retainedAttributes.push([name, value]);
       }

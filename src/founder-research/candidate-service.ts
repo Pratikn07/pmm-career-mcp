@@ -14,12 +14,15 @@ import {
 } from "./founder-role.js";
 import { validateNonFetchingLinkedInProfileUrl } from "./profile-url.js";
 import type { FounderRoleValidationContext } from "./types.js";
+import {
+  containsUntrustedInstruction,
+  isSafeUntrustedEntityLabel,
+  type UntrustedEntityLabelKind
+} from "../security/untrusted-text.js";
 
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 const UNSAFE_CONTROL = /[\p{Cc}\p{Cf}]/u;
-const PROMPT_INJECTION_PATTERN =
-  /\b(?:ignore|disregard|override)\b.{0,40}\b(?:instructions?|rules?|prompt)\b|\b(?:system|developer)\s+prompt\b|\btool\s+call\b/iu;
 const NAME_TOKEN = /[\p{L}\p{N}][\p{L}\p{N}\p{M}'’\p{Pd}-]*/gu;
 const WHITESPACE = /\s+/gu;
 const EVIDENCE_CLAUSE_BOUNDARY =
@@ -151,7 +154,11 @@ function validateBoundedString(
   field: string,
   value: unknown,
   limits: StringLimits,
-  options: { optional?: boolean; rejectPromptInjection?: boolean } = {}
+  options: {
+    optional?: boolean;
+    rejectPromptInjection?: boolean;
+    labelKind?: UntrustedEntityLabelKind;
+  } = {}
 ): string | undefined {
   if (value === undefined && options.optional === true) {
     return undefined;
@@ -168,9 +175,15 @@ function validateBoundedString(
   }
   if (
     options.rejectPromptInjection === true
-    && PROMPT_INJECTION_PATTERN.test(value)
+    && containsUntrustedInstruction(value)
   ) {
     throw validationError(field, "unsafe_prompt_text", limits);
+  }
+  if (
+    options.labelKind !== undefined
+    && !isSafeUntrustedEntityLabel(value, options.labelKind)
+  ) {
+    throw validationError(field, "unsafe_entity_label", limits);
   }
   if (countCodePoints(value) > limits.characters) {
     throw validationError(field, "character_count", limits);
@@ -628,7 +641,7 @@ export function createFounderCandidateService(
         "founderName",
         input.founderName,
         CANDIDATE_FIELD_LIMITS.founderName,
-        { rejectPromptInjection: true }
+        { rejectPromptInjection: true, labelKind: "person" }
       )!;
       const founderSignature = normalizedNameSignature(founderName);
       if (founderSignature === undefined) {
@@ -636,7 +649,7 @@ export function createFounderCandidateService(
       }
       if (
         typeof input.founderRole !== "string"
-        || PROMPT_INJECTION_PATTERN.test(input.founderRole)
+        || !isSafeUntrustedEntityLabel(input.founderRole, "role")
       ) {
         throw validationError(
           "founderRole",
@@ -765,7 +778,7 @@ export function createFounderCandidateService(
         "founderName",
         input.founderName,
         CANDIDATE_FIELD_LIMITS.founderName,
-        { rejectPromptInjection: true }
+        { rejectPromptInjection: true, labelKind: "person" }
       )!;
       const searchQuery = validateBoundedString(
         "searchQuery",
@@ -777,13 +790,13 @@ export function createFounderCandidateService(
         "resultTitle",
         input.resultTitle,
         CANDIDATE_FIELD_LIMITS.resultTitle,
-        { optional: true }
+        { optional: true, rejectPromptInjection: true }
       );
       const resultSnippet = validateBoundedString(
         "resultSnippet",
         input.resultSnippet,
         CANDIDATE_FIELD_LIMITS.resultSnippet,
-        { optional: true }
+        { optional: true, rejectPromptInjection: true }
       );
       if (resultTitle === undefined && resultSnippet === undefined) {
         throw validationError("resultEvidence", "title_or_snippet_required");
@@ -808,7 +821,7 @@ export function createFounderCandidateService(
       }
       if (
         typeof input.founderRole !== "string"
-        || PROMPT_INJECTION_PATTERN.test(input.founderRole)
+        || !isSafeUntrustedEntityLabel(input.founderRole, "role")
       ) {
         throw validationError(
           "founderRole",
