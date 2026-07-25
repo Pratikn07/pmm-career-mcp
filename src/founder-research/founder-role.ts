@@ -21,6 +21,8 @@ const QUALIFIED_COMPANY_LIMITS = Object.freeze({
 
 const UNICODE_WHITESPACE = /\s+/gu;
 const UNSAFE_UNICODE_CONTROL = /[\p{Cc}\p{Cf}]/u;
+const SEMANTIC_SEPARATOR = /[\p{P}\p{S}]+/gu;
+const SEMANTIC_COMPONENT_WORD_SEPARATOR = /\band\b/giu;
 const STABLE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 const NAME_TOKEN = /[\p{L}\p{N}][\p{L}\p{N}\p{M}'’\p{Pd}-]*/gu;
 const ROLE_COMPONENT_SEPARATOR = /\s*(?:[&+|,;·]|\band\b)\s*|\s+\/\s+/iu;
@@ -46,6 +48,15 @@ const NEGATED_FOUNDER_REFERENCE = new RegExp(
   String.raw`(?:\bnot\s+(?:an?\s+)?(?:co[\s\p{Pd}]*)?founder\b|\bnon[\s\p{Pd}]*(?:co[\s\p{Pd}]*)?founder\b)`,
   "iu"
 );
+const SEMANTIC_FOUNDER_REFERENCE = String.raw`(?:founder|cofounder|co\s+founder)`;
+const SEMANTIC_NEGATED_FOUNDER_REFERENCE = new RegExp(
+  String.raw`\b(?:not\s+(?:(?:a|the)\s+)?|non\s+)${SEMANTIC_FOUNDER_REFERENCE}\b`,
+  "u"
+);
+const SEMANTIC_RELATIONAL_FOUNDER_REFERENCE = new RegExp(
+  String.raw`\b(?:(?:(?:executive|personal|senior|junior)\s+)?(?:advisor|adviser|assistant|associate|manager|liaison|support|representative)|relations?(?:\s+manager)?|chief\s+of\s+staff|founder\s+relations(?:\s+manager)?)\s+to\s+(?:(?:a|the)\s+)?${SEMANTIC_FOUNDER_REFERENCE}\b`,
+  "u"
+);
 const CEO_COMPONENT = new RegExp(`^${CEO_TITLE}$`, "iu");
 
 function characterCount(value: string): number {
@@ -54,6 +65,14 @@ function characterCount(value: string): number {
 
 function normalizeWhitespace(value: string): string {
   return value.normalize("NFC").replace(UNICODE_WHITESPACE, " ").trim();
+}
+
+function semanticRoleScan(value: string): string {
+  return normalizeWhitespace(
+    value
+      .replace(SEMANTIC_SEPARATOR, " ")
+      .replace(SEMANTIC_COMPONENT_WORD_SEPARATOR, " ")
+  ).toLocaleLowerCase("en-US");
 }
 
 function isBoundedStableId(value: unknown): value is string {
@@ -202,7 +221,12 @@ export function validateFounderRole(
   }
 
   const components = splitRoleComponents(normalizedRole);
-  if (NEGATED_FOUNDER_REFERENCE.test(normalizedRole)) {
+  const semanticScan = semanticRoleScan(normalizedRole);
+  if (
+    NEGATED_FOUNDER_REFERENCE.test(normalizedRole)
+    || SEMANTIC_NEGATED_FOUNDER_REFERENCE.test(semanticScan)
+    || SEMANTIC_RELATIONAL_FOUNDER_REFERENCE.test(semanticScan)
+  ) {
     return {
       ok: false,
       normalizedRole,

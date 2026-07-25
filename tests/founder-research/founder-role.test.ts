@@ -336,6 +336,46 @@ describe("validateFounderRole", () => {
   });
 
   it.each([
+    "Not / a / Founder & Founder at Acme",
+    "Not—the—Co-Founder & Founder",
+    "Not...Founder | CEO & Founder at Acme",
+    "Not and a and Founder & Founder",
+    "Non / Founder & Founder",
+    "Non—Co—Founder + Founder/CEO",
+    "Advisor / to / the / Founder & Founder",
+    "Advisor and to and the and Founder & Founder",
+    "Adviser—to—a—Co-Founder & Founder at Acme",
+    "Assistant...to...Founder | Co-Founder",
+    "Associate + to + the + Co-Founder & Founder",
+    "Manager; to; a; Founder & CEO & Founder at Acme",
+    "Relations Manager / to / the / Founder & Founder",
+    "Founder Relations / to / Founder & Founder",
+    "Chief of Staff—to—the—Co-Founder & Founder"
+  ])("rejects founder negation and relational phrases across separators: %j", (role) => {
+    expect(validateFounderRole(role, evidenceContext())).toEqual({
+      ok: false,
+      normalizedRole: role,
+      reason: "NOT_FOUNDER_ROLE"
+    });
+  });
+
+  it.each([
+    "Advisor & Founder",
+    "Adviser / Co-Founder",
+    "Assistant | Founder at Acme",
+    "Associate + CEO & Founder at Acme",
+    "Manager; Founder/CEO",
+    "Founder Relations Manager & Founder",
+    "Chief of Staff & Co-Founder"
+  ])("accepts genuinely separate explicit founder roles: %j", (role) => {
+    expect(validateFounderRole(role)).toMatchObject({
+      ok: true,
+      basis: "EXPLICIT_FOUNDER_ROLE",
+      normalizedRole: role
+    });
+  });
+
+  it.each([
     ["Cyrillic confusable", "Fоunder", "NOT_FOUNDER_ROLE"],
     ["full-width confusable", "Ｆｏｕｎｄｅｒ", "NOT_FOUNDER_ROLE"],
     ["zero-width insertion", "Fo\u200bunder", "UNSAFE_ROLE_CHARACTERS"]
