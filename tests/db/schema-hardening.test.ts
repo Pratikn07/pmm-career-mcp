@@ -1193,6 +1193,41 @@ describe("database domain constraints", () => {
     `);
   });
 
+  it("enforces one request identity for each target and outreach purpose", async () => {
+    const { target } = await seedConstraintGraph();
+    const requestId = "same-request";
+    await queryTestDatabase(db, `
+      insert into career_mcp.outreach_drafts (
+        id, target_id, purpose, text, request_id, version, evidence_ids_json, created_at, updated_at
+      ) values (
+        '${randomUUID()}',
+        '${target.id}',
+        'connection_note',
+        'First request-backed note',
+        '${requestId}',
+        2,
+        '[]'::jsonb,
+        '2026-07-18T00:00:00.000Z',
+        '2026-07-18T00:00:00.000Z'
+      )
+    `);
+    await expect(queryTestDatabase(db, `
+      insert into career_mcp.outreach_drafts (
+        id, target_id, purpose, text, request_id, version, evidence_ids_json, created_at, updated_at
+      ) values (
+        '${randomUUID()}',
+        '${target.id}',
+        'connection_note',
+        'Conflicting request-backed note',
+        '${requestId}',
+        3,
+        '[]'::jsonb,
+        '2026-07-18T00:00:00.000Z',
+        '2026-07-18T00:00:00.000Z'
+      )
+    `)).rejects.toBeInstanceOf(Error);
+  });
+
   it("rejects shortlist positions below zero", async () => {
     const { target } = await seedConstraintGraph();
     const shortlist = await db.shortlists.create({

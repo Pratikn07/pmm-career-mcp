@@ -10,16 +10,21 @@ const MAX_REQUEST_ID_LENGTH = 200;
 const MAX_CLAIM_LENGTH = 500;
 const MAX_CLAIMS_PER_ENTRY = 25;
 const MAX_EVIDENCE_IDS = 25;
-const ALPHANUMERIC_TOKENS = /[\p{L}\p{N}]+/gu;
-const GENERIC_INVITATION_TOKENS: ReadonlySet<string> = new Set([
-  "a", "about", "an", "and", "appreciate", "appreciated", "are", "best",
-  "chat", "connect", "connecting", "connection", "congrats", "congratulations",
-  "d", "dear", "exchange", "forward", "from", "great", "hello", "hey", "hi",
-  "hope", "i", "ideas", "idea", "in", "interested", "interest", "it", "learn",
-  "like", "looking", "love", "marketing", "me", "my", "on", "opportunity", "out",
-  "product", "reach", "regards", "share", "stay", "talk", "thank", "thanks", "the",
-  "thoughts", "time", "to", "touch", "us", "value", "we", "well", "with", "work",
-  "would", "you", "your"
+const PERSON_MARKER = "[[person]]";
+const CLAIM_MARKER = "[[claim]]";
+const APPROVED_INVITATION_TEMPLATES: ReadonlySet<string> = new Set([
+  `hi ${PERSON_MARKER} — i would value connecting.`,
+  `hello ${PERSON_MARKER} — i would value connecting.`,
+  `hi ${PERSON_MARKER} — i'd love to connect.`,
+  `hello ${PERSON_MARKER} — i'd love to connect.`,
+  `hi ${PERSON_MARKER} — i work in product marketing and would value connecting.`,
+  `hello ${PERSON_MARKER} — i work in product marketing and would value connecting.`,
+  `hi ${PERSON_MARKER} — i appreciated ${CLAIM_MARKER}. i'd value connecting.`,
+  `hello ${PERSON_MARKER} — i appreciated ${CLAIM_MARKER}. i'd value connecting.`,
+  `hi ${PERSON_MARKER} — congratulations on ${CLAIM_MARKER}. i'd value connecting.`,
+  `hello ${PERSON_MARKER} — congratulations on ${CLAIM_MARKER}. i'd value connecting.`,
+  `hi ${PERSON_MARKER} — i'm interested in ${CLAIM_MARKER} and would value connecting.`,
+  `hello ${PERSON_MARKER} — i'm interested in ${CLAIM_MARKER} and would value connecting.`
 ]);
 
 export const LINKEDIN_CONNECTION_NOTE_MAX_CODE_POINTS = 200;
@@ -55,6 +60,7 @@ export type SavedFounderOutreachDraft = Readonly<{
   targetId: string;
   draftId: string;
   version: number;
+  requestId: string;
   purpose: typeof LINKEDIN_CONNECTION_REQUEST_PURPOSE;
   text: string;
   evidenceIds: readonly string[];
@@ -136,20 +142,25 @@ function comparable(value: string): string {
   return value.normalize("NFC").replace(/\s+/gu, " ").trim().toLocaleLowerCase("en-US");
 }
 
-function isGenericInvitation(
+function templateText(value: string): string {
+  return comparable(value).replace(/[’‘]/gu, "'");
+}
+
+function matchesApprovedInvitationTemplate(
   text: string,
   personName: string,
   claims: readonly Readonly<{ text: string }> []
 ): boolean {
-  let remaining = comparable(text);
+  let remaining = templateText(text);
+  const person = templateText(personName);
+  if (!remaining.includes(person)) return false;
+  remaining = remaining.replaceAll(person, PERSON_MARKER);
   for (const claim of claims) {
-    remaining = remaining.replaceAll(comparable(claim.text), " ");
+    const claimText = templateText(claim.text);
+    if (!remaining.includes(claimText)) return false;
+    remaining = remaining.replaceAll(claimText, CLAIM_MARKER);
   }
-  const permitted = new Set(GENERIC_INVITATION_TOKENS);
-  for (const token of comparable(personName).match(ALPHANUMERIC_TOKENS) ?? []) {
-    permitted.add(token);
-  }
-  return (remaining.match(ALPHANUMERIC_TOKENS) ?? []).every((token) => permitted.has(token));
+  return APPROVED_INVITATION_TEMPLATES.has(remaining);
 }
 
 function validatedEntry(value: unknown, index: number): ValidatedEntry {
@@ -210,11 +221,17 @@ function publicDraft(
   target: Pick<PipelineTarget, "id">,
   draft: OutreachDraft
 ): SavedFounderOutreachDraft {
+  if (draft.requestId === null) {
+    throw new DomainError("DATA_INTEGRITY", "Saved founder outreach draft is missing request identity", {
+      entity: "outreach_draft"
+    });
+  }
   return Object.freeze({
     personId,
     targetId: target.id,
     draftId: draft.id,
     version: draft.version,
+    requestId: draft.requestId,
     purpose: LINKEDIN_CONNECTION_REQUEST_PURPOSE,
     text: draft.text,
     evidenceIds: Object.freeze([...draft.evidenceIds])
@@ -249,7 +266,7 @@ export function createFounderOutreachService(
         throw validationError("input", "must_be_object");
       }
       const runId = normalizedId("runId", input.runId);
-      normalizedText("requestId", input.requestId, MAX_REQUEST_ID_LENGTH);
+      const requestId = normalizedText("requestId", input.requestId, MAX_REQUEST_ID_LENGTH);
       if (!Array.isArray(input.entries) || input.entries.length === 0 || input.entries.length > MAX_BATCH_ENTRIES) {
         throw validationError("entries", "invalid_collection", MAX_BATCH_ENTRIES);
       }
@@ -310,7 +327,11 @@ export function createFounderOutreachService(
               throw evidenceMismatch(`entries[${index}].personalizationClaims`);
             }
           }
-          if (!isGenericInvitation(entry.text, person.name, entry.personalizationClaims)) {
+          if (!matchesApprovedInvitationTemplate(
+            entry.text,
+            person.name,
+            entry.personalizationClaims
+          )) {
             throw evidenceMismatch(`entries[${index}].text`);
           }
 
@@ -332,7 +353,8 @@ export function createFounderOutreachService(
             targetId: target.id,
             purpose: LINKEDIN_CONNECTION_REQUEST_PURPOSE,
             text: entry.text,
-            evidenceIds: [...entry.evidenceIds]
+            evidenceIds: [...entry.evidenceIds],
+            requestId
           });
           drafts.push(publicDraft(person.id, target, draft));
       }

@@ -161,6 +161,7 @@ export const outreachDrafts = careerMcp.table("outreach_drafts", {
   targetId: uuid("target_id").notNull().references(() => targets.id),
   purpose: text("purpose").notNull(),
   text: text("text").notNull(),
+  requestId: text("request_id"),
   version: integer("version").notNull(),
   evidenceIdsJson: jsonb("evidence_ids_json").$type<string[]>().notNull(),
   createdAt: timestamptz("created_at").notNull(),
@@ -170,6 +171,11 @@ export const outreachDrafts = careerMcp.table("outreach_drafts", {
     table.targetId,
     table.purpose,
     table.version
+  ),
+  uniqueIndex("outreach_target_purpose_request_id_unique").on(
+    table.targetId,
+    table.purpose,
+    table.requestId
   ),
   check("outreach_drafts_version_check", sql`${table.version} >= 1`)
 ]);

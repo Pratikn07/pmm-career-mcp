@@ -339,6 +339,10 @@ export type OutreachDraftVersionInput = {
   evidenceIds: string[];
 };
 
+export type IdempotentOutreachDraftVersionInput = OutreachDraftVersionInput & {
+  requestId: string;
+};
+
 export type PostDraftVersionInput = {
   draftId?: string;
   ownerSubject: string;
@@ -2833,6 +2837,7 @@ export function createRepositories(database: Database) {
             targetId: input.targetId,
             purpose: input.purpose,
             text: input.text,
+            requestId: null,
             version: (latest?.version ?? 0) + 1,
             evidenceIdsJson: input.evidenceIds,
             createdAt: now,
@@ -2841,28 +2846,40 @@ export function createRepositories(database: Database) {
           return decodeOutreachDraft(requiredRow(row, "outreach draft"));
         }, "outreach_target_purpose_version_unique");
       },
-      async createOrReuseVersion(input: OutreachDraftVersionInput): Promise<OutreachDraft> {
+      async createOrReuseVersion(
+        input: IdempotentOutreachDraftVersionInput
+      ): Promise<OutreachDraft> {
         return serializableTransaction(database, async (transaction) => {
           await transaction.select({ id: targets.id }).from(targets).where(
             eq(targets.id, input.targetId)
           ).for("update");
+          const [existing] = await transaction.select().from(outreachDrafts).where(and(
+            eq(outreachDrafts.targetId, input.targetId),
+            eq(outreachDrafts.purpose, input.purpose),
+            eq(outreachDrafts.requestId, input.requestId)
+          )).limit(1).for("update");
+          if (existing !== undefined) {
+            if (
+              existing.text === input.text
+              && isDeepStrictEqual(existing.evidenceIdsJson, input.evidenceIds)
+            ) {
+              return decodeOutreachDraft(existing);
+            }
+            throw new DomainError("CONFLICT", "Outreach request ID conflicts with saved content", {
+              entity: "outreach_draft"
+            });
+          }
           const [latest] = await transaction.select().from(outreachDrafts).where(and(
             eq(outreachDrafts.targetId, input.targetId),
             eq(outreachDrafts.purpose, input.purpose)
           )).orderBy(desc(outreachDrafts.version)).limit(1).for("update");
-          if (
-            latest !== undefined
-            && latest.text === input.text
-            && isDeepStrictEqual(latest.evidenceIdsJson, input.evidenceIds)
-          ) {
-            return decodeOutreachDraft(latest);
-          }
           const now = nowIso();
           const [row] = await transaction.insert(outreachDrafts).values({
             id: randomUUID(),
             targetId: input.targetId,
             purpose: input.purpose,
             text: input.text,
+            requestId: input.requestId,
             version: (latest?.version ?? 0) + 1,
             evidenceIdsJson: input.evidenceIds,
             createdAt: now,

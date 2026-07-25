@@ -38,6 +38,8 @@ export type CreateOutreachInput = {
   evidenceIds: readonly string[];
 };
 
+export type LegacyOutreachDraft = Omit<OutreachDraft, "requestId">;
+
 export type CreatePostInput = {
   text: string;
   visibility: PostVisibility;
@@ -141,6 +143,11 @@ function publicPostDraft(
   return { ...version, id, versionId, visibility, media: media.map(publicPostMedia) };
 }
 
+function legacyOutreachDraft(row: OutreachDraft): LegacyOutreachDraft {
+  const { requestId: _requestId, ...draft } = row;
+  return draft;
+}
+
 function mapDraftPersistenceError(error: unknown, entity: "outreach_draft" | "post_draft"): never {
   const constraint = postgresErrorKind(error);
   if (constraint === "foreign_key") {
@@ -186,7 +193,7 @@ export function createDraftService(
   }
   const subject = dependencies.subject.toLowerCase();
   return {
-    async createOutreach(input: CreateOutreachInput): Promise<OutreachDraft> {
+    async createOutreach(input: CreateOutreachInput): Promise<LegacyOutreachDraft> {
       if (typeof input !== "object" || input === null) {
         throw validationError("outreach", "must_be_object");
       }
@@ -227,12 +234,12 @@ export function createDraftService(
       }
 
       try {
-        return await database.outreachDrafts.createVersion({
+        return legacyOutreachDraft(await database.outreachDrafts.createVersion({
           targetId,
           purpose,
           text,
           evidenceIds: [...evidenceIds]
-        });
+        }));
       } catch (error) {
         return mapDraftPersistenceError(error, "outreach_draft");
       }

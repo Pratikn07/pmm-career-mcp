@@ -135,7 +135,7 @@ function entryFor(
       text: "Atlas launch at Evidence Labs",
       evidenceIds: [context.evidence.id]
     }],
-    text: "Hi Ada — I appreciated the Atlas launch at Evidence Labs. I’d value connecting.",
+    text: "Hi Ada Lovelace — I appreciated Atlas launch at Evidence Labs. I’d value connecting.",
     ...overrides
   };
 }
@@ -196,7 +196,6 @@ describe("founder outreach batches", () => {
   it("normalizes NFC and enforces the 200 Unicode code-point connection-note limit", async () => {
     const context = await addRunPerson();
     const decomposed = "Cafe\u0301";
-    const atLimit = "🙂".repeat(LINKEDIN_CONNECTION_NOTE_MAX_CODE_POINTS);
     const caféEvidence = await db.evidence.add({
       personId: context.person.id,
       sourceUrl: "https://evidence.example/cafe",
@@ -205,27 +204,43 @@ describe("founder outreach batches", () => {
       checkedAt: CHECKED_AT,
       confidence: 0.95
     });
+    const prefix = "Hi Ada Lovelace — I appreciated ";
+    const suffix = ". I’d value connecting.";
+    const emojiClaim = "🙂".repeat(
+      LINKEDIN_CONNECTION_NOTE_MAX_CODE_POINTS - Array.from(prefix + suffix).length
+    );
+    const emojiEvidence = await db.evidence.add({
+      personId: context.person.id,
+      sourceUrl: "https://evidence.example/emoji",
+      factType: "public_role",
+      fact: emojiClaim,
+      checkedAt: CHECKED_AT,
+      confidence: 0.95
+    });
+    const atLimit = `${prefix}${emojiClaim}${suffix}`;
     const saved = await service().saveBatch({
       runId: context.run.id,
       requestId: "unicode-at-limit",
       entries: [entryFor(context, {
         text: atLimit,
-        evidenceIds: [],
-        personalizationClaims: []
+        evidenceIds: [emojiEvidence.id],
+        personalizationClaims: [{ text: emojiClaim, evidenceIds: [emojiEvidence.id] }]
       })]
     });
     const normalized = await service().saveBatch({
       runId: context.run.id,
       requestId: "unicode-normalization",
       entries: [entryFor(context, {
-        text: `Hi ${decomposed}`,
+        text: `Hi Ada Lovelace — I appreciated ${decomposed}. I’d value connecting.`,
         evidenceIds: [caféEvidence.id],
         personalizationClaims: [{ text: "Café", evidenceIds: [caféEvidence.id] }]
       })]
     });
 
     expect(saved.drafts[0]?.text).toBe(atLimit);
-    expect(normalized.drafts[0]?.text).toBe("Hi Café");
+    expect(normalized.drafts[0]?.text).toBe(
+      "Hi Ada Lovelace — I appreciated Café. I’d value connecting."
+    );
     await expectDomainError(
       () => service().saveBatch({
         runId: context.run.id,
@@ -273,7 +288,7 @@ describe("founder outreach batches", () => {
       runId: context.run.id,
       requestId: "generic-note",
       entries: [entryFor(context, {
-        text: "Hi Ada — I work in product marketing and would value connecting.",
+        text: "Hi Ada Lovelace — I work in product marketing and would value connecting.",
         evidenceIds: [],
         personalizationClaims: []
       })]
@@ -291,6 +306,30 @@ describe("founder outreach batches", () => {
         requestId: "unclaimed-series-b",
         entries: [entryFor(context, {
           text: "Congrats on your Series B — I’d value connecting.",
+          evidenceIds: [],
+          personalizationClaims: []
+        })]
+      }),
+      "EVIDENCE_MISMATCH"
+    );
+    await expectDomainError(
+      () => service().saveBatch({
+        runId: context.run.id,
+        requestId: "unclaimed-great-product",
+        entries: [entryFor(context, {
+          text: "Hi Ada Lovelace — great product; I’d love to connect.",
+          evidenceIds: [],
+          personalizationClaims: []
+        })]
+      }),
+      "EVIDENCE_MISMATCH"
+    );
+    await expectDomainError(
+      () => service().saveBatch({
+        runId: context.run.id,
+        requestId: "unclaimed-impressive-work",
+        entries: [entryFor(context, {
+          text: "Hi Ada Lovelace — impressive work; I’d love to connect.",
           evidenceIds: [],
           personalizationClaims: []
         })]
@@ -392,7 +431,7 @@ describe("founder outreach batches", () => {
       runId: context.run.id,
       requestId: "changed-note",
       entries: [entryFor(context, {
-        text: "Hi Ada — I appreciated the Atlas launch at Evidence Labs and would value connecting."
+        text: "Hi Ada Lovelace — I’m interested in Atlas launch at Evidence Labs and would value connecting."
       })]
     });
 
@@ -419,6 +458,37 @@ describe("founder outreach batches", () => {
     expect(second).toEqual(first);
     expect(first.drafts[0]).toMatchObject({ version: 1 });
     expect(await db.outreachDrafts.listForTarget(target!.id)).toHaveLength(1);
+  });
+
+  it("durably reuses request A after request B and rejects a changed request-A payload", async () => {
+    const context = await addRunPerson();
+    const requestA = {
+      runId: context.run.id,
+      requestId: "request-a",
+      entries: [entryFor(context)]
+    };
+    const first = await service().saveBatch(requestA);
+    const second = await service().saveBatch({
+      runId: context.run.id,
+      requestId: "request-b",
+      entries: [entryFor(context, {
+        text: "Hi Ada Lovelace — I’m interested in Atlas launch at Evidence Labs and would value connecting."
+      })]
+    });
+    const retriedA = await service().saveBatch(structuredClone(requestA));
+
+    expect(first.drafts[0]).toMatchObject({ version: 1, requestId: "request-a" });
+    expect(second.drafts[0]).toMatchObject({ version: 2, requestId: "request-b" });
+    expect(retriedA).toEqual(first);
+    await expectDomainError(
+      () => service().saveBatch({
+        ...requestA,
+        entries: [entryFor(context, {
+          text: "Hi Ada Lovelace — I’m interested in Atlas launch at Evidence Labs and would value connecting."
+        })]
+      }),
+      "CONFLICT"
+    );
   });
 
   it("uses the authenticated owner and rejects missing or foreign run people", async () => {

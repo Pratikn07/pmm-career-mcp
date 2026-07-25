@@ -1,0 +1,2 @@
+ALTER TABLE "career_mcp"."outreach_drafts" ADD COLUMN "request_id" text;--> statement-breakpoint
+CREATE UNIQUE INDEX "outreach_target_purpose_request_id_unique" ON "career_mcp"."outreach_drafts" USING btree ("target_id","purpose","request_id");

@@ -223,7 +223,7 @@ describe("database lifecycle", () => {
       from information_schema.columns
       where table_schema = 'career_mcp'
         and (column_name = 'id' or column_name like '%\\_id' escape '\\')
-        and column_name not in ('yc_id', 'template_id')
+        and column_name not in ('yc_id', 'template_id', 'request_id')
         and data_type <> 'uuid'
       order by table_name, column_name
     `);
@@ -3381,7 +3381,7 @@ it("creates immutable outreach draft versions with evidence IDs", async () => {
   expect((await db.outreachDrafts.listForTarget(target.id))).toHaveLength(2);
 });
 
-it("serializes identical outreach draft retries and versions changed content", async () => {
+it("durably reuses outreach request IDs and versions changed requests", async () => {
   const { person, target } = await addTarget("Idempotent outreach");
   const source = await db.evidence.add({
     personId: person.id,
@@ -3394,7 +3394,8 @@ it("serializes identical outreach draft retries and versions changed content", a
     targetId: target.id,
     purpose: "connection_note",
     text: "Hello Ada",
-    evidenceIds: [source.id]
+    evidenceIds: [source.id],
+    requestId: "request-a"
   };
 
   const [first, duplicate] = await Promise.all([
@@ -3403,12 +3404,20 @@ it("serializes identical outreach draft retries and versions changed content", a
   ]);
   const changed = await db.outreachDrafts.createOrReuseVersion({
     ...input,
+    requestId: "request-b",
     text: "Hello Ada — revised"
   });
+  const retriedFirst = await db.outreachDrafts.createOrReuseVersion(input);
 
   expect(duplicate).toEqual(first);
   expect(first.version).toBe(1);
   expect(changed.version).toBe(2);
+  expect(retriedFirst).toEqual(first);
+  expect(first.requestId).toBe("request-a");
+  await expect(db.outreachDrafts.createOrReuseVersion({
+    ...input,
+    text: "Hello Ada — conflicting retry"
+  })).rejects.toMatchObject({ code: "CONFLICT" });
   expect(await db.outreachDrafts.listForTarget(target.id)).toHaveLength(2);
 });
 
