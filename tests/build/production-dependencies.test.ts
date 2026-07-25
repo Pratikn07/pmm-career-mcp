@@ -2,6 +2,18 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { expect, it } from "vitest";
 
+it("pins JSZip as a production dependency", async () => {
+  const packageSource = await readFile(resolve(process.cwd(), "package.json"), "utf8");
+  const packageJson = JSON.parse(packageSource) as {
+    dependencies?: Record<string, string>;
+    devDependencies?: Record<string, string>;
+  };
+
+  expect(packageJson.dependencies?.jszip).toBe("3.10.1");
+  expect(packageJson.devDependencies?.jszip).toBeUndefined();
+  expect(packageJson.dependencies?.exceljs).toBeUndefined();
+});
+
 it("locks the MCP runtime onto reviewed patched transitive dependencies", async () => {
   const [packageSource, lockSource, dockerfile] = await Promise.all([
     readFile(resolve(process.cwd(), "package.json"), "utf8"),
