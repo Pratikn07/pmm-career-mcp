@@ -551,7 +551,7 @@ it("completes the two-company founder workflow with an exact private workbook an
   expect(summaryXml).toContain("Selected Companies</t>");
   expect(summaryXml).toContain('<c r="B8"><v>2</v></c>');
   expect(summaryXml).toContain("Processed Companies</t>");
-  expect(summaryXml).toContain('<c r="B9"><v>2</v></c>');
+  expect(summaryXml).toContain('<c r="B9"><v>1</v></c>');
   expect(summaryXml).toContain("Confirmed</t>");
   expect(summaryXml).toContain('<c r="B10"><v>1</v></c>');
   expect(summaryXml).toContain("Verified</t>");

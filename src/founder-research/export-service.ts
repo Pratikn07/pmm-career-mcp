@@ -241,6 +241,8 @@ function workbookInput(snapshot: FounderResearchExportSnapshot): FounderResearch
       state: snapshot.run.state as FounderResearchWorkbookInput["run"]["state"],
       filters: safeFilters(snapshot.run.queryJson),
       requestedLimit: snapshot.run.requestedLimit,
+      selectedCount: snapshot.run.selectedCount,
+      processedCount: snapshot.run.processedCount,
       createdAt: snapshot.run.createdAt,
       ...(snapshot.run.startedAt === null ? {} : { startedAt: snapshot.run.startedAt }),
       ...(snapshot.run.completedAt === null ? {} : { completedAt: snapshot.run.completedAt })

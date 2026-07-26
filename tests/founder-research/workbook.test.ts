@@ -22,6 +22,8 @@ const workbookInput: FounderResearchWorkbookInput = {
     state: "PARTIAL",
     filters: { batch: "S24", hiring: true },
     requestedLimit: 6,
+    selectedCount: 6,
+    processedCount: 5,
     createdAt: "2026-07-25T10:00:00.000Z",
     startedAt: "2026-07-25T10:01:00.000Z",
     completedAt: "2026-07-25T10:05:00.000Z"
@@ -218,7 +220,7 @@ describe("buildFounderResearchWorkbook", () => {
     expect(failures).not.toContain("https://www.linkedin.com/in/bea-candidate</t>");
   });
 
-  it("derives run summary counters from source rows and neutralizes formula-like text", async () => {
+  it("uses validated persisted run counters in the summary and neutralizes formula-like text", async () => {
     const dangerousInput: FounderResearchWorkbookInput = {
       ...workbookInput,
       rows: workbookInput.rows.map((row, index) => index === 0 ? {
@@ -239,6 +241,8 @@ describe("buildFounderResearchWorkbook", () => {
     expect(ready).toContain("&apos;@mention</t>");
     expect(summary).toContain("Selected Companies</t>");
     expect(summary).toContain('<c r="B8"><v>6</v></c>');
+    expect(summary).toContain("Processed Companies</t>");
+    expect(summary).toContain('<c r="B9"><v>5</v></c>');
     expect(summary).toContain("Confirmed</t>");
     expect(summary).toContain("Verified</t>");
     expect(summary).toContain("Candidate</t>");
@@ -246,6 +250,17 @@ describe("buildFounderResearchWorkbook", () => {
     expect(summary).toContain("Not Found</t>");
     expect(summary).toContain("Failed</t>");
     expect(summary).toContain("Connection requests must be reviewed and sent manually on LinkedIn.</t>");
+  });
+
+  it("rejects impossible persisted run counters", async () => {
+    await expect(build({
+      ...workbookInput,
+      run: { ...workbookInput.run, selectedCount: 7 }
+    })).rejects.toThrow("selectedCount");
+    await expect(build({
+      ...workbookInput,
+      run: { ...workbookInput.run, processedCount: 7 }
+    })).rejects.toThrow("processedCount");
   });
 
   it("creates a CRC-valid in-memory buffer with only safe OOXML parts", async () => {
@@ -278,7 +293,12 @@ describe("buildFounderResearchWorkbook", () => {
     }));
     const input: FounderResearchWorkbookInput = {
       ...workbookInput,
-      run: { ...workbookInput.run, requestedLimit: 50 },
+      run: {
+        ...workbookInput.run,
+        requestedLimit: 50,
+        selectedCount: 50,
+        processedCount: 50
+      },
       rows
     };
 
@@ -411,7 +431,12 @@ describe("buildFounderResearchWorkbook", () => {
     }));
     const nearBudget: FounderResearchWorkbookInput = {
       ...workbookInput,
-      run: { ...workbookInput.run, requestedLimit: 50 },
+      run: {
+        ...workbookInput.run,
+        requestedLimit: 50,
+        selectedCount: 50,
+        processedCount: 50
+      },
       rows
     };
     const overBudget: FounderResearchWorkbookInput = {

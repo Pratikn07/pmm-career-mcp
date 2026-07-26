@@ -115,6 +115,8 @@ export type FounderResearchWorkbookRun = Readonly<{
   state: WorkbookRunState;
   filters: Readonly<Record<string, boolean | number | string>>;
   requestedLimit: number;
+  selectedCount: number;
+  processedCount: number;
   createdAt: string;
   startedAt?: string;
   completedAt?: string;
@@ -324,6 +326,20 @@ function validateInput(input: FounderResearchWorkbookInput): Readonly<{
   if (!Number.isInteger(run.requestedLimit) || run.requestedLimit < 1 || run.requestedLimit > MAX_COMPANIES) {
     invalidInput("run.requestedLimit must be between 1 and 50");
   }
+  if (
+    !Number.isInteger(run.selectedCount)
+    || run.selectedCount < 0
+    || run.selectedCount > run.requestedLimit
+  ) {
+    invalidInput("run.selectedCount must be between 0 and run.requestedLimit");
+  }
+  if (
+    !Number.isInteger(run.processedCount)
+    || run.processedCount < 0
+    || run.processedCount > run.selectedCount
+  ) {
+    invalidInput("run.processedCount must be between 0 and run.selectedCount");
+  }
   if (!Array.isArray(input.rows) || input.rows.length > run.requestedLimit) {
     invalidInput("rows must not exceed run.requestedLimit");
   }
@@ -407,6 +423,8 @@ function validateInput(input: FounderResearchWorkbookInput): Readonly<{
     state: state as WorkbookRunState,
     filters: stableFilters(run.filters),
     requestedLimit: run.requestedLimit,
+    selectedCount: run.selectedCount,
+    processedCount: run.processedCount,
     createdAt: createdAt.canonical,
     ...(startedAt === undefined ? {} : { startedAt: startedAt.canonical }),
     ...(completedAt === undefined ? {} : { completedAt: completedAt.canonical })
@@ -528,7 +546,6 @@ function booleanCell(value: boolean | undefined): Cell | undefined {
 
 function summaryRows(run: FounderResearchWorkbookRun, rows: readonly PreparedRow[]): readonly (readonly (Cell | undefined)[])[] {
   const count = (state: WorkbookRowState) => rows.filter((row) => row.state === state).length;
-  const processed = rows.filter((row) => row.state !== "AMBIGUOUS" || row.checkedDate !== undefined).length;
   const contentChecksum = createHash("sha256")
     .update(JSON.stringify({ run, rows: rows.map(({ checkedDate: _checkedDate, ...row }) => row) }))
     .digest("hex");
@@ -539,8 +556,8 @@ function summaryRows(run: FounderResearchWorkbookRun, rows: readonly PreparedRow
     [{ value: "Created At" }, { value: timestamp("run.createdAt", run.createdAt).instant, style: 2 }],
     [{ value: "Started At" }, run.startedAt === undefined ? undefined : { value: timestamp("run.startedAt", run.startedAt).instant, style: 2 }],
     [{ value: "Completed At" }, run.completedAt === undefined ? undefined : { value: timestamp("run.completedAt", run.completedAt).instant, style: 2 }],
-    [{ value: "Selected Companies" }, { value: rows.length }],
-    [{ value: "Processed Companies" }, { value: processed }],
+    [{ value: "Selected Companies" }, { value: run.selectedCount }],
+    [{ value: "Processed Companies" }, { value: run.processedCount }],
     [{ value: "Confirmed" }, { value: count("CONFIRMED") }],
     [{ value: "Verified" }, { value: count("VERIFIED") }],
     [{ value: "Candidate" }, { value: count("CANDIDATE") }],
