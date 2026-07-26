@@ -3,9 +3,15 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import JSZip from "jszip";
+import nock from "nock";
 import type { Response as SuperAgentResponse } from "superagent";
 import request from "supertest";
 import { afterEach, expect, it, vi } from "vitest";
+import {
+  createFounderExportCardController,
+  type FounderExportCardSummary,
+  type FounderExportOpenExternalRequest
+} from "../../src/founder-export-card/controller.js";
 import { FOUNDER_EXPORT_CARD_URI } from "../../src/founder-export-card/resource.js";
 import { createCareerApplication } from "../../src/index.js";
 import type { LinkedInPublishingClient } from "../../src/linkedin/publishing-client.js";
@@ -28,11 +34,44 @@ type ConnectedClient = {
   close(): Promise<void>;
 };
 
-const cleanups: Array<() => Promise<void>> = [];
+type Cleanup = Readonly<{
+  phase: "connection" | "database";
+  close(): Promise<void>;
+}>;
+
+const cleanups: Cleanup[] = [];
+
+async function closeDeterministically(): Promise<void> {
+  const pending = cleanups.splice(0);
+  const failures: unknown[] = [];
+  for (const phase of ["connection", "database"] as const) {
+    const phaseCleanups = pending.filter((cleanup) => cleanup.phase === phase).reverse();
+    for (const cleanup of phaseCleanups) {
+      try {
+        await cleanup.close();
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+  }
+  if (failures.length > 0) {
+    throw new AggregateError(failures, "Founder E2E teardown failed");
+  }
+}
 
 afterEach(async () => {
-  await Promise.all(cleanups.splice(0).map(async (cleanup) => await cleanup()));
-  vi.restoreAllMocks();
+  let cleanupFailure: unknown;
+  try {
+    await closeDeterministically();
+  } catch (error) {
+    cleanupFailure = error;
+  } finally {
+    nock.cleanAll();
+    nock.enableNetConnect();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  }
+  if (cleanupFailure !== undefined) throw cleanupFailure;
 });
 
 function data(result: unknown): Record<string, unknown> {
@@ -84,10 +123,23 @@ async function connect(
     client,
     server,
     async close() {
-      await Promise.all([client.close(), server.close()]);
+      const failures: unknown[] = [];
+      for (const close of [
+        async () => await client.close(),
+        async () => await server.close()
+      ]) {
+        try {
+          await close();
+        } catch (error) {
+          failures.push(error);
+        }
+      }
+      if (failures.length > 0) {
+        throw new AggregateError(failures, "Founder E2E MCP connection teardown failed");
+      }
     }
   };
-  cleanups.push(connected.close);
+  cleanups.push({ phase: "connection", close: connected.close });
   return connected;
 }
 
@@ -122,7 +174,7 @@ async function createStack(): Promise<{
   };
 }> {
   const database = await createTestDatabase();
-  cleanups.push(async () => await database.close());
+  cleanups.push({ phase: "database", close: async () => await database.close() });
   const requestedUrls: string[] = [];
   const linkedinWrites = {
     initializeImage: vi.fn(async () => ({ uploadUrl: "https://unused.invalid", imageUrn: "urn:li:image:unused" })),
@@ -155,6 +207,16 @@ async function createStack(): Promise<{
 }
 
 it("completes the two-company founder workflow with an exact private workbook and no LinkedIn action", async () => {
+  nock.disableNetConnect();
+  nock.enableNetConnect((host) => (
+    /^127\.0\.0\.1(?::[0-9]+)?$/u.test(host)
+    || /^localhost(?::[0-9]+)?$/u.test(host)
+    || /^\[::1\](?::[0-9]+)?$/u.test(host)
+  ));
+  const outboundFetch = vi.fn<typeof globalThis.fetch>(async () => {
+    throw new Error("Unexpected outbound fetch in founder E2E");
+  });
+  vi.stubGlobal("fetch", outboundFetch);
   const {
     database,
     runtime,
@@ -164,6 +226,45 @@ it("completes the two-company founder workflow with an exact private workbook an
     requestedUrls,
     linkedinWrites
   } = await createStack();
+  const callToolSpies = [
+    vi.spyOn(owner.client, "callTool"),
+    vi.spyOn(otherOwner.client, "callTool"),
+    vi.spyOn(unauthenticated.client, "callTool")
+  ];
+
+  const registeredTools = (await owner.client.listTools()).tools;
+  const toolNames = registeredTools.map(({ name }) => name);
+  expect(toolNames.filter((name) => /(?:send|invite|invitation|message)/iu.test(name))).toEqual([]);
+  expect(toolNames.filter((name) => (
+    /(?:^|_)connect(?:_|$)/iu.test(name)
+    || /(?:^|_)connection_request(?:_|$)/iu.test(name)
+  ))).toEqual([]);
+  const linkedinExternalWrites = registeredTools.filter(({ description }) => (
+    description?.startsWith("App-only external write:") ?? false
+  ));
+  expect(linkedinExternalWrites).toEqual([
+    expect.objectContaining({
+      name: "publish_exact_linkedin_post",
+      annotations: {
+        readOnlyHint: false,
+        openWorldHint: true,
+        destructiveHint: false
+      },
+      _meta: expect.objectContaining({
+        ui: { visibility: ["app"] },
+        "openai/widgetAccessible": true
+      })
+    })
+  ]);
+  expect(registeredTools.find(({ name }) => name === "save_founder_outreach_batch"))
+    .toMatchObject({
+      description: expect.stringMatching(/never sends a LinkedIn message or connection request/iu),
+      annotations: {
+        readOnlyHint: false,
+        openWorldHint: false,
+        destructiveHint: false
+      }
+    });
 
   const unauthenticatedStart = await unauthenticated.client.callTool({
     name: "start_yc_founder_research",
@@ -339,7 +440,9 @@ it("completes the two-company founder workflow with an exact private workbook an
   });
   const exportId = string(exportProjection.id);
   const privateMetadata = exported._meta as Record<string, unknown>;
+  expect(Object.keys(privateMetadata).sort()).toEqual(["downloadUrl", "expiresAt"]);
   const downloadUrl = new URL(string(privateMetadata.downloadUrl));
+  const capturedOpenExternalRequests: FounderExportOpenExternalRequest[] = [];
   expect(downloadUrl.origin).toBe("https://career.example");
   expect(JSON.stringify(exported.structuredContent)).not.toContain("capability");
   expect(JSON.stringify(exported.content)).not.toContain("/download?");
@@ -350,8 +453,71 @@ it("completes the two-company founder workflow with an exact private workbook an
   expect(cardHtml).toContain('data-application-origin="https://career.example"');
   expect(cardHtml).not.toContain(downloadUrl.searchParams.get("capability"));
 
+  const toolOutput = exported.structuredContent;
+  expect(toolOutput).toBeDefined();
+  const mcpToolResult = {
+    structuredContent: toolOutput,
+    _meta: privateMetadata,
+    ...(exported.isError === undefined ? {} : { isError: exported.isError })
+  };
+  const toolResponseMetadata = {
+    status: "complete",
+    call_tool_result: toolOutput,
+    mcp_tool_result: mcpToolResult
+  };
+  expect(Object.keys(toolResponseMetadata).sort()).toEqual([
+    "call_tool_result",
+    "mcp_tool_result",
+    "status"
+  ]);
+  expect(toolResponseMetadata.call_tool_result).toBe(toolOutput);
+  expect(toolResponseMetadata.mcp_tool_result.structuredContent).toBe(toolOutput);
+  expect(toolResponseMetadata.mcp_tool_result._meta).toBe(privateMetadata);
+
+  const renderedSummaries: FounderExportCardSummary[] = [];
+  const downloadAvailability: boolean[] = [];
+  const unavailableMessages: string[] = [];
+  const controller = createFounderExportCardController({
+    applicationOrigin: "https://career.example",
+    globals: {
+      snapshot: () => ({ toolOutput, toolResponseMetadata }),
+      subscribe: () => () => undefined
+    },
+    ui: {
+      render: (summary) => { renderedSummaries.push(summary); },
+      setDownloadAvailable: (available) => { downloadAvailability.push(available); },
+      showUnavailable: (message) => { unavailableMessages.push(message); }
+    },
+    openExternal: async (externalRequest) => {
+      capturedOpenExternalRequests.push(externalRequest);
+    },
+    now: () => new Date(FOUNDER_E2E_NOW),
+    scheduleExpiry: (_callback, delayMs) => {
+      expect(delayMs).toBeGreaterThan(0);
+      return () => undefined;
+    }
+  });
+  controller.start();
+  expect(renderedSummaries).toEqual([{
+    exportId,
+    runId,
+    createdAt: string(exportProjection.createdAt),
+    expiresAt: string(exportProjection.expiresAt),
+    rowCount: 2,
+    sheetCount: 4,
+    checksumPrefix: string(exportProjection.checksumSha256).slice(0, 12)
+  }]);
+  expect(downloadAvailability).toEqual([true]);
+  expect(unavailableMessages).toEqual([]);
+  await controller.download();
+  expect(capturedOpenExternalRequests).toEqual([{
+    href: downloadUrl.href,
+    redirectUrl: false
+  }]);
+  const capturedDownloadUrl = new URL(capturedOpenExternalRequests[0]!.href);
+
   const downloaded = await request(runtime.app)
-    .get(`${downloadUrl.pathname}${downloadUrl.search}`)
+    .get(`${capturedDownloadUrl.pathname}${capturedDownloadUrl.search}`)
     .buffer(true)
     .parse(collectBinary);
   expect(downloaded.status).toBe(200);
@@ -384,8 +550,20 @@ it("completes the two-company founder workflow with an exact private workbook an
   expect(failedXml).not.toContain("Beacon Search</t>");
   expect(summaryXml).toContain("Selected Companies</t>");
   expect(summaryXml).toContain('<c r="B8"><v>2</v></c>');
-  expect(summaryXml).toContain("Verified</t>");
+  expect(summaryXml).toContain("Processed Companies</t>");
+  expect(summaryXml).toContain('<c r="B9"><v>2</v></c>');
   expect(summaryXml).toContain("Confirmed</t>");
+  expect(summaryXml).toContain('<c r="B10"><v>1</v></c>');
+  expect(summaryXml).toContain("Verified</t>");
+  expect(summaryXml).toContain('<c r="B11"><v>1</v></c>');
+  expect(summaryXml).toContain("Candidate</t>");
+  expect(summaryXml).toContain('<c r="B12"><v>0</v></c>');
+  expect(summaryXml).toContain("Ambiguous</t>");
+  expect(summaryXml).toContain('<c r="B13"><v>0</v></c>');
+  expect(summaryXml).toContain("Not Found</t>");
+  expect(summaryXml).toContain('<c r="B14"><v>0</v></c>');
+  expect(summaryXml).toContain("Failed</t>");
+  expect(summaryXml).toContain('<c r="B15"><v>0</v></c>');
   expect(summaryXml).toContain(
     "Connection requests must be reviewed and sent manually on LinkedIn.</t>"
   );
@@ -411,7 +589,22 @@ it("completes the two-company founder workflow with an exact private workbook an
     otherDownloadUrl.searchParams.get("capability")
   );
 
-  expect(requestedUrls.some((url) => url.toLowerCase().includes("linkedin"))).toBe(false);
+  expect(requestedUrls.every((url) => {
+    const hostname = new URL(url).hostname.toLowerCase();
+    return hostname !== "linkedin.com"
+      && !hostname.endsWith(".linkedin.com")
+      && hostname !== "licdn.com"
+      && !hostname.endsWith(".licdn.com");
+  })).toBe(true);
+  expect(outboundFetch).not.toHaveBeenCalled();
+  expect(nock.pendingMocks()).toEqual([]);
+  expect(nock.isDone()).toBe(true);
+  const invokedToolNames = callToolSpies.flatMap((spy) => spy.mock.calls.map(
+    ([toolRequest]) => toolRequest.name
+  ));
+  expect(invokedToolNames.filter((name) => (
+    linkedinExternalWrites.some((tool) => tool.name === name)
+  ))).toEqual([]);
   expect(linkedinWrites.initializeImage).not.toHaveBeenCalled();
   expect(linkedinWrites.uploadImage).not.toHaveBeenCalled();
   expect(linkedinWrites.createPost).not.toHaveBeenCalled();

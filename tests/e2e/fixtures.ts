@@ -4,7 +4,7 @@ import type { RequestAuthContext } from "../../src/auth/request-context.js";
 
 export const E2E_NOW = "2026-07-17T12:00:00.000Z";
 export const E2E_SUBJECT = "123e4567-e89b-42d3-a456-426614174000";
-export const FOUNDER_E2E_NOW = "2026-07-26T06:00:00.000Z";
+export const FOUNDER_E2E_NOW = new Date(Date.now() + 5 * 60_000).toISOString();
 export const FOUNDER_E2E_OTHER_SUBJECT = "223e4567-e89b-42d3-a456-426614174000";
 export const E2E_AUTH_CONTEXT: RequestAuthContext = Object.freeze({
   subject: E2E_SUBJECT,

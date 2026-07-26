@@ -271,3 +271,126 @@ requires an intentional test update. It must:
    baseline separately from Task 14 documentation results;
 9. perform no live pilot, migration, deployment, or LinkedIn action—those
    remain Task 15 activities.
+
+## Review-fix wave — card boundary, network proof, summaries, and teardown
+
+### Findings addressed
+
+The Task 13 E2E was strengthened without changing production code:
+
+- The actual `export_founder_research_workbook` `CallToolResult` now enters the
+  production `createFounderExportCardController` module used by the shipped
+  card bundle through the exact ChatGPT host envelope:
+  `toolOutput=structuredContent` and
+  `toolResponseMetadata={status,call_tool_result,mcp_tool_result}`.
+- The test asserts that the actual private result `_meta` contains exactly
+  `downloadUrl` and `expiresAt`, both visible envelope copies reference the
+  exact actual `structuredContent`, the controller renders only the safe
+  summary, and the download becomes available.
+- The controller is invoked through `download()`. The test captures exactly
+  `openExternal({href,redirectUrl:false})` and gives only that captured URL to
+  the HTTP capability route. It no longer downloads directly from the raw MCP
+  result.
+- The static MCP resource read remains in the scenario and confirms the exact
+  canonical application origin while excluding the capability.
+- A global network tripwire disables all non-loopback Node HTTP traffic with
+  Nock and replaces global `fetch` with a failing spy. The official-site
+  adapter remains a three-URL allowlist. The test asserts zero global fetches,
+  no pending network mocks, no LinkedIn or `licdn.com` URL reaching the
+  official fetch adapter, and zero publishing-client initialize/upload/post
+  calls.
+- The complete registered tool list is checked: it contains no invitation,
+  message, or Connect action name; the sole tool described as a LinkedIn
+  external write is `publish_exact_linkedin_post`, and it remains app-only.
+  The scenario records all three clients' tool calls and proves that this
+  external-write tool was never invoked. The founder outreach tool remains a
+  private, non-open-world draft save whose description explicitly prohibits
+  sending.
+- `Run Summary` now has exact numeric cell assertions:
+  `B9=2` processed, `B10=1` confirmed, `B11=1` verified, and
+  `B12=B13=B14=B15=0` for candidate, ambiguous, not found, and failed.
+- Teardown is phased and deterministic. MCP connections close in LIFO order
+  before the database. Each cleanup failure is retained and reported through
+  an `AggregateError`; later cleanups still run. Nock and Vitest mocks/globals
+  are restored in `finally`, even when cleanup fails.
+- The E2E clock is captured once at module load five minutes ahead of the real
+  test database clock. The application clock, controller clock, official
+  fixtures, and candidate `checkedAt` all receive that same captured instant.
+  This avoids the already documented fixed-clock drift without weakening any
+  timestamp validation.
+
+### Review-fix RED
+
+The first review-fix run revealed that the prior fixed
+`2026-07-26T06:00:00.000Z` test instant had itself fallen behind new PGlite
+rows. The failure was the documented test-clock problem, not the intended card
+boundary regression. Only the E2E fixture clock was changed to the single
+runtime-captured instant described above.
+
+The intended RED was then run:
+
+```text
+npx vitest run tests/e2e/founder-research-flow.test.ts
+```
+
+Result:
+
+```text
+Test Files  1 failed (1)
+Tests       1 failed (1)
+```
+
+The exact failure was that `capturedOpenExternalRequests` was `[]` instead of
+the required single `{href, redirectUrl:false}` request. This proved that the
+old E2E read the resource shell but never passed the actual export result
+through the card controller.
+
+### Review-fix GREEN and verification
+
+Focused card/composition/E2E command:
+
+```text
+npx vitest run tests/runtime/async-composition.test.ts tests/e2e/founder-research-flow.test.ts tests/e2e/career-flow.test.ts tests/founder-export-card
+```
+
+Result:
+
+```text
+Test Files  5 passed (5)
+Tests       35 passed (35)
+```
+
+Expanded unaffected founder/MCP/HTTP command:
+
+```text
+npx vitest run tests/founder-research/download-capability.test.ts tests/founder-research/export-service.test.ts tests/founder-research/founder-role.test.ts tests/founder-research/profile-url.test.ts tests/founder-research/run-service.test.ts tests/founder-research/workbook.test.ts tests/founder-export-card tests/mcp/tools.test.ts tests/mcp/annotations.test.ts tests/mcp/http-safety.test.ts tests/http/founder-export-download.test.ts tests/http/founder-export-card-client.test.ts tests/http/mcp-lifecycle.test.ts tests/runtime/async-composition.test.ts tests/e2e/founder-research-flow.test.ts tests/e2e/career-flow.test.ts
+```
+
+Result:
+
+```text
+Test Files  17 passed (17)
+Tests       266 passed (266)
+```
+
+`npm run typecheck`, `npm run build`, `npm audit --omit=dev`, `git diff
+--check`, and `git show --check --oneline --stat HEAD` all passed. The
+production audit again reported `found 0 vulnerabilities`.
+
+After the final literal `send_*` registry guard was added, a fresh
+`npx vitest run tests/e2e/founder-research-flow.test.ts` passed: 1 file and
+1 test.
+
+### Review-fix files and commit
+
+- Modified `tests/e2e/founder-research-flow.test.ts`
+- Modified `tests/e2e/fixtures.ts`
+- Modified `.superpowers/sdd/task-13-report.md`
+
+No production file changed in this review-fix wave. The review fix will be
+committed separately from `ee949cb`; its final content-addressed SHA is supplied
+in the handoff rather than self-referenced here.
+
+The pre-existing `.superpowers/sdd/progress.md` remains untouched and unstaged.
+No live call, LinkedIn action, migration, push, pilot, connector action, or
+deployment was performed.
