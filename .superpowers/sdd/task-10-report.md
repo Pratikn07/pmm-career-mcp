@@ -71,3 +71,34 @@ Additional verification:
 Application-level composition of the injected verifier remains intentionally
 deferred to Task 13, as specified by the implementation plan. The pre-existing
 `.superpowers/sdd/progress.md` modification was not touched.
+
+## Review fix: malformed JSON GET ordering
+
+Review identified that the global JSON parser ran before the founder download
+route. A rejected download carrying `Content-Type: application/json` and a
+malformed body therefore returned Express's parser error before the
+capability-safe handler.
+
+RED:
+
+```text
+npx vitest run tests/http/founder-export-download.test.ts tests/mcp/http-safety.test.ts
+```
+
+Result before the fix: 1 expected failure; the malformed-body download returned
+400 instead of the uniform safe 404, while the other 14 tests passed.
+
+Fix: moved the existing founder download route ahead of `express.json()`. The
+path-scoped MCP request-ID and OAuth authentication middleware remain ahead of
+both the parser and generic MCP handler.
+
+GREEN:
+
+```text
+npx vitest run tests/http/founder-export-download.test.ts tests/mcp/http-safety.test.ts
+```
+
+Result after the fix: 2 files passed, 15 tests passed. The regression also
+asserts that the verifier receives the capability, no raw capability or
+syntax/path diagnostic appears in the response, and no console method is
+called.

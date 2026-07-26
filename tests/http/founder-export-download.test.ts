@@ -106,6 +106,40 @@ describe("founder export download HTTP route", () => {
     }
   });
 
+  it("keeps malformed JSON bodies behind the same safe capability failure surface", async () => {
+    const downloadFounderExport = vi.fn(async () => {
+      throw new DomainError("NOT_FOUND", `private failure for ${CAPABILITY}`);
+    });
+    const app = createHttpApp({
+      mcpHandler: (_request, response) => response.sendStatus(501),
+      downloadFounderExport
+    });
+    const consoleSpies = [
+      vi.spyOn(console, "debug").mockImplementation(() => undefined),
+      vi.spyOn(console, "info").mockImplementation(() => undefined),
+      vi.spyOn(console, "warn").mockImplementation(() => undefined),
+      vi.spyOn(console, "error").mockImplementation(() => undefined),
+      vi.spyOn(console, "log").mockImplementation(() => undefined)
+    ];
+
+    try {
+      const response = await request(app)
+        .get(`/research-exports/${EXPORT_ID}/download`)
+        .query({ capability: CAPABILITY })
+        .set("content-type", "application/json")
+        .send('{"incomplete":');
+
+      expect(response.status).toBe(404);
+      expect(response.body).toEqual({ error: "Founder research export is unavailable" });
+      expect(downloadFounderExport).toHaveBeenCalledWith(EXPORT_ID, CAPABILITY);
+      expect(response.text).not.toContain(CAPABILITY);
+      expect(response.text).not.toMatch(/syntax|unexpected|\/Users\//iu);
+      expect(consoleSpies.every((spy) => spy.mock.calls.length === 0)).toBe(true);
+    } finally {
+      for (const spy of consoleSpies) spy.mockRestore();
+    }
+  });
+
   it.each(["head", "post", "put", "patch", "delete"] as const)(
     "does not expose or load workbook bytes for %s",
     async (method) => {
