@@ -70,6 +70,27 @@ it("builds and packages the review-card client bundle in Docker", async () => {
   expect(dockerfile).toContain("COPY --from=build --chown=node:node /app/dist ./dist");
 });
 
+it("builds and packages the founder export-card client bundle in Docker", async () => {
+  const [dockerfile, packageJson] = await Promise.all([
+    readFile(resolve(process.cwd(), "Dockerfile"), "utf8"),
+    readFile(resolve(process.cwd(), "package.json"), "utf8")
+  ]);
+  const scriptsCopy = dockerfile.indexOf("COPY scripts ./scripts");
+  const sourceCopy = dockerfile.indexOf("COPY src ./src");
+  const build = dockerfile.indexOf("RUN npm run build");
+
+  expect(scriptsCopy).toBeGreaterThan(-1);
+  expect(sourceCopy).toBeGreaterThan(-1);
+  expect(build).toBeGreaterThan(scriptsCopy);
+  expect(build).toBeGreaterThan(sourceCopy);
+  expect(JSON.parse(packageJson).scripts).toMatchObject({
+    "build:founder-export-card": "node scripts/build-founder-export-card.mjs"
+  });
+  expect(JSON.parse(packageJson).scripts.build).toContain("npm run build:founder-export-card");
+  expect(dockerfile).toContain("test -f dist/public/founder-export-card-client.js");
+  expect(dockerfile).toContain("COPY --from=build --chown=node:node /app/dist ./dist");
+});
+
 it("ships Postgres migrations and uses the readiness endpoint for Docker deployment health", async () => {
   const dockerfile = await readFile(resolve(process.cwd(), "Dockerfile"), "utf8");
 

@@ -191,6 +191,19 @@ export function createHttpApp(deps: HttpDependencies): Express {
       dotfiles: "allow"
     });
   });
+  app.get("/founder-export-card-client.js", (_request, response) => {
+    const publicDirectory = resolve(process.cwd(), "dist/public");
+    if (!existsSync(resolve(publicDirectory, "founder-export-card-client.js"))) {
+      response.status(404).end();
+      return;
+    }
+    response.setHeader("Cache-Control", "no-cache");
+    response.setHeader("X-Content-Type-Options", "nosniff");
+    response.type("application/javascript").sendFile("founder-export-card-client.js", {
+      root: publicDirectory,
+      dotfiles: "allow"
+    });
+  });
   const consentConfig = deps.config;
   if (consentConfig !== undefined && hasConsentPageConfiguration(consentConfig)) {
     app.get("/oauth/consent", (request, response) => {

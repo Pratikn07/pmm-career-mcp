@@ -8,7 +8,7 @@ COPY assets ./assets
 COPY drizzle ./drizzle
 COPY scripts ./scripts
 COPY src ./src
-RUN npm run build && test -f dist/public/review-card-client.js && npm prune --omit=dev && node -e "import('sharp')" && node -e "import('@resvg/resvg-js')"
+RUN npm run build && test -f dist/public/review-card-client.js && test -f dist/public/founder-export-card-client.js && npm prune --omit=dev && node -e "import('sharp')" && node -e "import('@resvg/resvg-js')"
 
 FROM node:22-bookworm-slim AS runtime
 
