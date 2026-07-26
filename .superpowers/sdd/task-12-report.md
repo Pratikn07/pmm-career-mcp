@@ -189,3 +189,24 @@ Passed: 6 files, 58 tests.
 
 `npm run typecheck`, `npm run build`, `npm audit --omit=dev`, and `git diff
 --check` all passed; the audit reported zero vulnerabilities.
+
+### Independent re-review and final verification
+
+The original independent reviewer re-reviewed both the review-fix patch and the
+complete Task 12 range. Final verdict: **spec compliant** and **approved**, with
+no Critical or Important findings. The only remaining Minor note is that the
+handler currently accumulates candidate outcomes as
+`Array<Record<string, unknown>>`; a shared inferred discriminated-union type
+would add compile-time drift protection without changing the strict runtime
+contract.
+
+A fresh controller verification from the committed implementation passed:
+
+```text
+npx vitest run tests/mcp/tools.test.ts tests/mcp/annotations.test.ts tests/founder-research/export-service.test.ts tests/founder-research/run-service.test.ts tests/founder-research/workbook.test.ts tests/founder-research/download-capability.test.ts tests/founder-research/profile-url.test.ts tests/founder-research/founder-role.test.ts tests/founder-export-card tests/http/founder-export-card-client.test.ts tests/http/founder-export-download.test.ts tests/http/mcp-lifecycle.test.ts
+```
+
+Passed: 13 files, 249 tests. `npm run typecheck`, `npm run build`, `npm audit
+--omit=dev`, `git diff --check fb46b7c..HEAD`, and `git show --check` all passed;
+the production audit again reported zero vulnerabilities. No live call or
+deployment was performed.
