@@ -42,6 +42,29 @@ Repository changes do not create or configure a Supabase project, Railway servic
 
 Use Supabase managed backups for the production database and treat them as private career data because they can contain encrypted LinkedIn tokens. Follow the provider's restore procedure in a controlled environment.
 
+## YC founder research and manual outreach
+
+Founder research is a private, resumable research ledger—not a complete founder directory or an automated outreach system. The MCP uses YC and allowed official company sources. When it cannot resolve a person or profile, ChatGPT may search the public web, but it must treat every result as a **CANDIDATE**, not verified evidence.
+
+Use this safe daily ChatGPT prompt verbatim. It contains no credentials and is intentionally conservative:
+
+> Start or advance a private YC founder-research run in PMM Career MCP. Process it with repeated `process_yc_founder_research` calls of at most 5 companies each, continuing only while the result says to continue. If a result instructs public search, use public-web results only as CANDIDATE evidence; do not open or fetch LinkedIn. Save the exact query, public result URL, title or snippet, check time, and candidate details with `save_founder_profile_candidates`. Then stop for my review of every candidate decision. I will manually inspect candidates and choose CONFIRM or REJECT; do not decide for me. Save only evidence-backed private connection-note drafts of at most 200 Unicode code points with `save_founder_outreach_batch`. When the run reaches a terminal or export state, create the workbook with `export_founder_research_workbook`, open its private export card, and use its Download Excel control. Stop without any LinkedIn interaction: do not fetch LinkedIn URLs, scrape LinkedIn, use browser automation, click Connect, send invitations or connection requests, or send messages.
+
+The normal sequence is `start_yc_founder_research`, then repeated bounded `process_yc_founder_research` calls. A processing response tells ChatGPT whether to continue, perform public search, or export. Do not continue processing past a public-search or terminal/export instruction; save public-search candidates first, then stop for the user's review.
+
+Candidate decisions are deliberately manual:
+
+- `VERIFIED` means an official YC or company source explicitly linked the profile for that person.
+- `CANDIDATE` means public-search evidence makes a profile plausible. It is not verified, is never automatically canonical, and must not be presented as founder coverage.
+- `CONFIRMED` is the user's decision after manually inspecting the candidate; it is not an MCP or ChatGPT verification action.
+- `REJECT` records a rejected candidate as audit history. It remains unresolved history rather than becoming a usable profile or being silently erased.
+
+After user review, use `confirm_founder_profile_candidate` to record each `CONFIRM` or `REJECT`. Use `save_founder_outreach_batch` only for private drafts grounded in saved evidence; every note is limited to 200 Unicode code points. `export_founder_research_workbook` creates a private Excel snapshot with exactly four sheets—`Ready to Review`, `Needs Verification`, `Not Found - Failed`, and `Run Summary`—and opens the private export card. The card's **Download Excel** control is the only place to use the short-lived download capability; do not copy, share, or log it.
+
+Structured research, evidence, decisions, and drafts are the canonical database history and are retained until the user requests deletion. Public evidence is fresh for 30 days; older evidence remains historical and should be refreshed. Workbook artifacts expire after 7 days and private download capabilities after 15 minutes. After either expiry, regenerate a workbook from the canonical database state and open a new private card; do not try to revive an expired link.
+
+Manual LinkedIn work starts only after the user has reviewed the workbook. The user manually opens and reviews a profile in LinkedIn, then later manually clicks **Connect** and personally sends any invitation. MCP and ChatGPT must never fetch a LinkedIn URL, scrape LinkedIn, automate a browser, click **Connect**, send an invitation or connection request, or send a LinkedIn message. This workflow does not imply complete founder coverage, verified public-search candidates, or automated outreach.
+
 ## Guarded LinkedIn workflow
 
 Both publishing switches default to `false` and stay false through local verification, deployment, connector refresh, the scheduled-flow smoke, and the disabled-publish smoke:

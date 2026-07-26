@@ -48,6 +48,29 @@ The browser consent page uses `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY` only
 
 Give the deployed service both secret database URLs and the non-secret `DATABASE_CA_CERT`; do not put either URL in a command line, chat, or checked-in file. The application uses `MIGRATION_DATABASE_URL` only while holding a transaction-scoped advisory migration lock, closes that pool, and then serves all repository and readiness queries through the least-privilege `DATABASE_URL` pool.
 
+### Founder-research migration journal and release boundary
+
+For the founder-research release, deploy only the Git branch `codex/founder-research-export`; never deploy `main`. Do not request, initiate, or approve a paid plan or upgrade as part of this release.
+
+Apply the existing committed Drizzle migrations through the application's normal migration path, in the exact order recorded by `drizzle/meta/_journal.json`:
+
+```text
+0000_initial
+0001_schema_hardening
+0002_linkedin_media_review
+0003_linkedin_preview_snapshot
+0004_pmm_brand_studio
+0005_brand_source_media_exclusive
+0006_brand_brief_source_claims
+0007_yc_founder_research_export
+0008_outreach_request_id
+0009_outreach_request_payload_hash
+0010_outreach_request_identity_null_pair
+0011_founder_export_idempotency
+```
+
+These correspond to the committed `drizzle/0000_initial.sql` through `drizzle/0011_founder_export_idempotency.sql` files. Do not invent, rename, reorder, or hand-edit a migration filename. The separately committed provider-side SQL files are `supabase/migrations/20260717000000_mcp_audience_hook.sql` and `supabase/migrations/20260719000000_linkedin_media_storage_rls.sql`; follow their existing reviewed runbook steps in sections 2 and 4. Use the existing private migration path only. If it prompts for a password or other secret, pause and let the authorized operator enter it privately; never paste, echo, or record it.
+
 After confirming the target is the intended production Supabase project, run the opt-in smoke command in a trusted shell that already has the secret environment variable:
 
 ```bash
@@ -76,7 +99,7 @@ Before enabling image workflows, use that same validated OAuth user access token
 
 ## 5. Deploy one Railway service
 
-1. Grant the Railway GitHub App access to only this repository, not an organization-wide or unrelated repository scope.
+1. Grant the Railway GitHub App access to only this repository, not an organization-wide or unrelated repository scope. For the founder-research release, select only `codex/founder-research-export`; never select or deploy `main`, and do not request a paid plan or upgrade.
 2. Create one service from this repository and use the committed Dockerfile. Do not add persistent storage; the service is stateless and Supabase owns the durable database.
 3. Add the environment variables from the split above. Configure secret values in Railway's secret store. Never place them in GitHub configuration or the image build context.
 4. Set the service's public domain and make it the exact `BASE_URL`; then revisit the matching Supabase Site URL and OAuth audience values.
@@ -111,6 +134,27 @@ The launcher may render a selected immutable draft and short-lived private image
 Supabase advertises the `refresh_token` grant and issues rotating refresh tokens, but its OAuth discovery does not currently advertise the standard `offline_access` scope that ChatGPT recommends for long-lived OIDC connections. Confirm in the live flow that ChatGPT remains connected after an access-token renewal without inspecting or logging token values. If renewal is not available, document that the private app requires reauthentication after expiry; do not broaden the accepted scopes or expose a refresh token to work around it.
 
 ChatGPT keeps an approved snapshot of tool definitions. If this branch's tool schemas change after the app is created, refresh the app's actions or recreate the draft before testing; do not assume server changes are picked up automatically.
+
+### Founder-research connector and export-card check
+
+After deploying `codex/founder-research-export`, refresh or rescan the private PMM Career MCP connector. Confirm exactly these six founder tools are discovered:
+
+```text
+start_yc_founder_research
+process_yc_founder_research
+save_founder_profile_candidates
+confirm_founder_profile_candidate
+save_founder_outreach_batch
+export_founder_research_workbook
+```
+
+Also confirm the private founder-research export card renders its run summary and **Download Excel** control. Do not expose, copy, log, screenshot, or paste a download capability while checking it. The card receives that capability privately; it is not part of model-visible output. The check is incomplete if a founder tool is missing, an unexpected founder tool appears, or the card/control is absent.
+
+### Founder-research retention cleanup and rollback
+
+Expired workbook artifacts and their download capabilities are invalid by design. Do not attempt to reuse an expired download URL, and do not delete private database rows manually. Creating a fresh export for the same owner and snapshot safely removes expired matching workbook/capability records transactionally; otherwise, use only the existing owner-scoped application maintenance path. Preserve the structured run, evidence, candidate-decision, and outreach history.
+
+If a deployment must be rolled back, first take the service back to the last known-good service commit on the feature-release path and recheck `/health` and `/ready`. Do not roll back `main`. Only consider a database reversal after the service rollback has been reviewed and only through a separately reviewed, reversible migration plan; do not improvise SQL or erase structured history. Keep secrets out of logs and support material throughout rollback and cleanup.
 
 This release requires encrypted, versioned LinkedIn scope evidence. After deployment, any existing connection without that scope evidence will intentionally show as invalid and must be re-authorized through the normal LinkedIn consent flow. Do not preserve, backfill, or fabricate scope evidence for a legacy credential; the provider must grant it again.
 
