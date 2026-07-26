@@ -554,7 +554,7 @@ const founderResearchItemState = z.enum([
   "COMPLETE", "PARTIAL", "NOT_FOUND", "AMBIGUOUS", "NEEDS_PUBLIC_SEARCH", "FAILED", "STALE_ATTEMPT"
 ]);
 const founderProfileStatus = z.enum(["VERIFIED", "CANDIDATE", "CONFIRMED", "REJECTED"]);
-const founderCandidateProfileUrl = z.string().superRefine((value, context) => {
+const founderCandidateProfileUrl = z.string().url().max(4_096).superRefine((value, context) => {
   if (!validateNonFetchingLinkedInProfileUrl(value).ok) {
     context.addIssue({ code: "custom", message: "must be a safe non-fetching LinkedIn profile URL" });
   }
@@ -563,6 +563,12 @@ const founderCandidateProfileUrl = z.string().superRefine((value, context) => {
 function unicodeText(maximum: number) {
   return z.string().trim().min(1).refine((value) => [...value.normalize("NFC")].length <= maximum, {
     message: `must contain at most ${maximum} Unicode characters`
+  });
+}
+
+function boundedUnicodeText(maximum: number, maximumBytes: number) {
+  return unicodeText(maximum).refine((value) => Buffer.byteLength(value, "utf8") <= maximumBytes, {
+    message: `must contain at most ${maximumBytes} UTF-8 bytes`
   });
 }
 const founderRunSchema = z.object({
@@ -618,13 +624,13 @@ export const processYcFounderResearchInput = z.object({
 const founderProfileCandidateInput = z.object({
   runItemId: founderResearchId,
   runPersonId: founderResearchId.optional(),
-  founderName: z.string().trim().min(1).max(200),
-  founderRole: z.string().trim().min(1).max(128),
+  founderName: boundedUnicodeText(200, 512),
+  founderRole: boundedUnicodeText(160, 512),
   candidateProfileUrl: founderCandidateProfileUrl,
-  searchQuery: z.string().trim().min(1).max(500),
+  searchQuery: boundedUnicodeText(500, 2_000),
   resultUrl: founderCandidateProfileUrl,
-  resultTitle: z.string().trim().min(1).max(512).optional(),
-  resultSnippet: z.string().trim().min(1).max(2_000).optional(),
+  resultTitle: boundedUnicodeText(512, 1_024).optional(),
+  resultSnippet: boundedUnicodeText(2_000, 4_000).optional(),
   checkedAt: timestamp,
   confidence,
   linkedInNotFetched: z.literal(true)
@@ -644,7 +650,7 @@ export const saveFounderProfileCandidatesInput = z.object({
 export const confirmFounderProfileCandidateInput = z.object({
   candidateId: founderResearchId,
   decision: z.enum(["CONFIRM", "REJECT"]),
-  note: z.string().trim().min(1).max(1_000).optional()
+  note: boundedUnicodeText(1_000, 2_000).optional()
 }).strict();
 const founderOutreachEntryInput = z.object({
   personId: founderResearchId,
@@ -705,10 +711,29 @@ export const processYcFounderResearchOutput = outputSchema(z.object({
   items: z.array(founderProcessedItemSchema).max(5),
   publicSearchTasks: z.array(founderPublicSearchTaskSchema).max(25),
   shouldContinue: z.boolean(),
-  nextAction: z.enum(["PROCESS", "PUBLIC_SEARCH", "EXPORT", "COMPLETE"])
+  nextAction: z.enum(["PROCESS", "PUBLIC_SEARCH", "EXPORT"])
 }).strict());
+const founderCandidateFailureSchema = z.object({
+  index: z.number().int().min(0).max(24),
+  runItemId: founderResearchId,
+  state: z.literal("FAILED"),
+  error: z.object({
+    code: z.enum([
+      "VALIDATION_ERROR", "NOT_FOUND", "CONFLICT", "EVIDENCE_MISMATCH",
+      "AUTH_REQUIRED", "DATA_INTEGRITY"
+    ])
+  }).strict()
+}).strict();
+const founderCandidateSavedSchema = founderCandidateResultSchema.extend({
+  index: z.number().int().min(0).max(24),
+  runItemId: founderResearchId,
+  state: z.literal("SAVED")
+});
 export const saveFounderProfileCandidatesOutput = outputSchema(z.object({
-  results: z.array(founderCandidateResultSchema).max(25)
+  results: z.array(z.discriminatedUnion("state", [
+    founderCandidateSavedSchema,
+    founderCandidateFailureSchema
+  ])).max(25)
 }).strict());
 export const confirmFounderProfileCandidateOutput = outputSchema(founderCandidateResultSchema);
 const founderOutreachDraftSchema = z.object({

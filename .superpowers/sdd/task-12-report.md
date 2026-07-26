@@ -140,3 +140,52 @@ owner input field or compose a LinkedIn fetch/write dependency.
 Commit SHA: supplied in the final handoff. This report is included in that
 content-addressed commit and therefore cannot safely self-reference its own
 final SHA.
+
+## Review-fix wave
+
+### Corrections
+
+- Candidate batches now process deterministically in input order and return one
+  stable `index`/`runItemId` outcome per input: `SAVED` with the safe candidate
+  projection or `FAILED` with only a stable DomainError code. A failed item no
+  longer hides earlier/later writes; unknown failures map to `DATA_INTEGRITY`.
+- Instructions now explicitly allow scheduled/model founder research, evidence
+  saves, private draft saves, and private export-card use, while retaining the
+  absolute prohibition on LinkedIn fetching, browser automation, Connect,
+  sends, and messages. The post-workflow stopping rule is scoped to posts.
+- Connection-note input is NFC-normalized at the MCP tool boundary before the
+  owner-scoped outreach service is called; output notes are normalized before
+  projection. A Zod transform cannot be used here because the MCP SDK rejects
+  transforms while publishing JSON Schema (`Transforms cannot be represented in
+  JSON Schema`). The published schema remains declarative and validation stays
+  strict.
+- LinkedIn profile fields now publish `string`/`uri`/`maxLength: 4096` and then
+  invoke the shared exact non-fetching profile validator. Candidate/result URL
+  correlation uses the validator's normalized value. Candidate role bounds now
+  match the service's 160 Unicode-character/512-byte contract.
+- Process next actions are now exactly `PROCESS`, `PUBLIC_SEARCH`, or `EXPORT`;
+  unreachable `COMPLETE` was removed.
+- Tests assert a single bounded, safe text summary for all six founder tools,
+  including export privacy and candidate-batch partial outcome behavior.
+
+### Review-fix RED
+
+```text
+npx vitest run tests/mcp/tools.test.ts tests/mcp/annotations.test.ts
+```
+
+Result: 2 files failed, 3 tests failed. The expected failures were the old
+128-character founder-role cap, the custom-only profile URL JSON Schema lacking
+`uri`/`maxLength`, and a mixed candidate batch returning a whole-tool error
+instead of deterministic per-item outcomes.
+
+### Review-fix GREEN
+
+```text
+npx vitest run tests/mcp/tools.test.ts tests/mcp/annotations.test.ts tests/founder-research/export-service.test.ts tests/founder-export-card tests/http/founder-export-card-client.test.ts
+```
+
+Passed: 6 files, 58 tests.
+
+`npm run typecheck`, `npm run build`, `npm audit --omit=dev`, and `git diff
+--check` all passed; the audit reported zero vulnerabilities.

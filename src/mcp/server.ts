@@ -101,7 +101,7 @@ import {
   startYcFounderResearchOutput
 } from "./schemas.js";
 
-export const CAREER_MCP_INSTRUCTIONS = "Never fetch LinkedIn for research. Never claim complete employee coverage. Never claim complete YC-company coverage. Scheduled and model-driven flows must stop after saving private drafts and may only open the non-writing review card. Exact preview and publish actions are app-only, never model-callable, and available only after the current user explicitly asks to publish the exact preview. Never batch or retry publishing. Founder research fetches only YC and official company sources; it never opens a LinkedIn URL. For unresolved candidates, ChatGPT may use public search without opening LinkedIn, save exact evidence-backed candidates, and require the user to manually confirm or reject them. Founder workbook exports support manual LinkedIn review and manual connection work only: no connection request or message is ever sent. Research is restricted to YC companies and allowed public sources. Drafts and pipeline data stay private. Branded visuals are curiosity covers, not post summaries; source art must contain no text.";
+export const CAREER_MCP_INSTRUCTIONS = "Never fetch LinkedIn for research. Never claim complete employee coverage. Never claim complete YC-company coverage. Exact post preview and publish actions are app-only, never model-callable, and available only after the current user explicitly asks to publish the exact preview. Never batch or retry publishing in post workflows. Scheduled and model-driven founder flows may research, save candidates, save evidence-backed outreach drafts, and create or open a private founder export card using allowed YC and official company sources. LinkedIn fetching, Connect, sending, messages, and browser automation remain forbidden; workbook exports support manual LinkedIn review only. For unresolved candidates, ChatGPT may use public search without opening LinkedIn, then require the user to manually confirm or reject candidates. The old stop-after-private-drafts rule applies only to the LinkedIn post/publish workflow: scheduled and model-driven post flows stop after saving private drafts and may only open the non-writing review card. Research is restricted to YC companies and allowed public sources. Drafts and pipeline data stay private. Branded visuals are curiosity covers, not post summaries; source art must contain no text.";
 
 type YcProvider = { searchYcCompanies(query: CompanySearchQuery): Promise<CompanyResult[]> };
 type ConnectionStatus = {
@@ -344,10 +344,42 @@ function modelSafeFounderCandidate(
 function founderNextAction(input: {
   shouldContinue: boolean;
   publicSearchTasks: readonly unknown[];
-}): "PROCESS" | "PUBLIC_SEARCH" | "EXPORT" | "COMPLETE" {
+}): "PROCESS" | "PUBLIC_SEARCH" | "EXPORT" {
   if (input.shouldContinue) return "PROCESS";
   if (input.publicSearchTasks.length > 0) return "PUBLIC_SEARCH";
   return "EXPORT";
+}
+
+function candidateBatchError(error: unknown): "VALIDATION_ERROR" | "NOT_FOUND" | "CONFLICT" | "EVIDENCE_MISMATCH" | "AUTH_REQUIRED" | "DATA_INTEGRITY" {
+  if (error instanceof DomainError) {
+    switch (error.code) {
+      case "VALIDATION_ERROR":
+      case "NOT_FOUND":
+      case "CONFLICT":
+      case "EVIDENCE_MISMATCH":
+      case "AUTH_REQUIRED":
+      case "DATA_INTEGRITY":
+        return error.code;
+      default:
+        return "DATA_INTEGRITY";
+    }
+  }
+  return "DATA_INTEGRITY";
+}
+
+function normalizedConnectionNote(value: string): string {
+  return value.normalize("NFC").trim();
+}
+
+function normalizedFounderOutreachInput(input: SaveFounderOutreachBatchInput): SaveFounderOutreachBatchInput {
+  return {
+    runId: input.runId,
+    requestId: input.requestId,
+    entries: input.entries.map((entry) => ({
+      ...entry,
+      text: normalizedConnectionNote(entry.text)
+    }))
+  };
 }
 
 function canonicalApplicationOrigin(value: string): string {
@@ -510,9 +542,11 @@ export function createCareerMcpServer(
     _meta: oauthToolMetadata
   }, async ({ runId, candidates }) => guarded(async () => {
     const service = authenticatedFounderResearch().candidates;
-    const results = await Promise.all(candidates.map(async (candidate) => {
-      const result = candidate.runPersonId === undefined
-        ? await service.saveCandidateForRunItem({
+    const results: Array<Record<string, unknown>> = [];
+    for (const [index, candidate] of candidates.entries()) {
+      try {
+        const result = candidate.runPersonId === undefined
+          ? await service.saveCandidateForRunItem({
             runId,
             runItemId: candidate.runItemId,
             founderName: candidate.founderName,
@@ -540,15 +574,29 @@ export function createCareerMcpServer(
             checkedAt: candidate.checkedAt,
             confidence: candidate.confidence,
             linkedInNotFetched: candidate.linkedInNotFetched
-          } as SaveFounderProfileCandidateInput);
-      return {
-        candidate: modelSafeFounderCandidate(result.candidate),
-        ...(result.canonical === undefined ? {} : { canonical: modelSafeFounderCandidate(result.canonical) }),
-        requiresManualReview: result.requiresManualReview
-      };
-    }));
+            } as SaveFounderProfileCandidateInput);
+        results.push({
+          index,
+          runItemId: candidate.runItemId,
+          state: "SAVED",
+          candidate: modelSafeFounderCandidate(result.candidate),
+          ...(result.canonical === undefined ? {} : { canonical: modelSafeFounderCandidate(result.canonical) }),
+          requiresManualReview: result.requiresManualReview
+        });
+      } catch (error) {
+        results.push({
+          index,
+          runItemId: candidate.runItemId,
+          state: "FAILED",
+          error: { code: candidateBatchError(error) }
+        });
+      }
+    }
     return { results };
-  }, ({ results }) => `Saved ${results.length} private founder profile candidates without fetching LinkedIn; manual confirmation is required.`)());
+  }, ({ results }) => {
+    const saved = results.filter(({ state }) => state === "SAVED").length;
+    return `Saved ${saved} and recorded ${results.length - saved} failed private candidate outcomes without fetching LinkedIn; manual confirmation is required.`;
+  })());
 
   server.registerTool("confirm_founder_profile_candidate", {
     title: "Confirm founder profile candidate",
@@ -578,7 +626,9 @@ export function createCareerMcpServer(
     annotations: privateWrite,
     _meta: oauthToolMetadata
   }, async (input) => guarded(async () => {
-    const result = await authenticatedFounderResearch().outreach.saveBatch(input as SaveFounderOutreachBatchInput);
+    const result = await authenticatedFounderResearch().outreach.saveBatch(
+      normalizedFounderOutreachInput(input as SaveFounderOutreachBatchInput)
+    );
     return {
       drafts: result.drafts.slice(0, 25).map((draft) => ({
         personId: draft.personId,
@@ -586,7 +636,7 @@ export function createCareerMcpServer(
         draftId: draft.draftId,
         version: draft.version,
         purpose: draft.purpose,
-        text: draft.text,
+        text: normalizedConnectionNote(draft.text),
         evidenceIds: [...draft.evidenceIds].slice(0, 25)
       })),
       needsVerification: result.needsVerification.slice(0, 25).map((entry) => ({

@@ -2,7 +2,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { expect, it, vi } from "vitest";
-import { createCareerMcpServer, type CareerMcpDependencies } from "../../src/mcp/server.js";
+import { CAREER_MCP_INSTRUCTIONS, createCareerMcpServer, type CareerMcpDependencies } from "../../src/mcp/server.js";
 import { createHttpApp } from "../../src/http/app.js";
 import {
   attachLinkedInPostImagesInput,
@@ -536,6 +536,8 @@ it("publishes strict bounded founder-research inputs", () => {
   expect(saveFounderProfileCandidatesInput.safeParse({ runId, candidates: Array.from({ length: 26 }, () => candidate) }).success).toBe(false);
   expect(saveFounderProfileCandidatesInput.safeParse({ runId, candidates: [{ ...candidate, linkedInNotFetched: false }] }).success).toBe(false);
   expect(saveFounderProfileCandidatesInput.safeParse({ runId, candidates: [{ ...candidate, resultUrl: "https://www.linkedin.com/in/ada-lovelace?unsafe=value" }] }).success).toBe(false);
+  expect(saveFounderProfileCandidatesInput.safeParse({ runId, candidates: [{ ...candidate, candidateProfileUrl: `https://www.linkedin.com/in/${"a".repeat(2_049)}`, resultUrl: `https://www.linkedin.com/in/${"a".repeat(2_049)}` }] }).success).toBe(false);
+  expect(saveFounderProfileCandidatesInput.safeParse({ runId, candidates: [{ ...candidate, founderRole: "r".repeat(160) }] }).success).toBe(true);
   expect(saveFounderProfileCandidatesInput.safeParse({ runId, candidates: [{ ...candidate, candidateProfileUrl: "https://www.linkedin.com/in/Ada-Lovelace", resultUrl: "https://www.linkedin.com/in/ada-lovelace" }] }).success).toBe(false);
   expect(confirmFounderProfileCandidateInput.parse({ candidateId, decision: "CONFIRM" })).toEqual({ candidateId, decision: "CONFIRM" });
   expect(confirmFounderProfileCandidateInput.safeParse({ candidateId, decision: "DELETE" }).success).toBe(false);
@@ -555,6 +557,8 @@ it("publishes strict bounded founder-research inputs", () => {
     reviewState: "READY_TO_REVIEW"
   };
   expect(saveFounderOutreachBatchInput.safeParse({ runId, requestId: "request-1", entries: [outreach] }).success).toBe(true);
+  const decomposedNote = "Cafe\u0301 — I'd value connecting.";
+  expect(saveFounderOutreachBatchInput.parse({ runId, requestId: "request-1", entries: [{ ...outreach, text: `  ${decomposedNote}  ` }] }).entries[0]?.text).toBe(decomposedNote);
   expect(saveFounderOutreachBatchInput.safeParse({
     runId,
     requestId: "request-1",
@@ -581,6 +585,8 @@ it("publishes strict bounded founder-research inputs", () => {
   expect(exportFounderResearchWorkbookInput.parse({ runId })).toEqual({ runId, includeCandidateUrls: true });
   expect(exportFounderResearchWorkbookInput.safeParse({ runId, includeCandidateUrls: false }).success).toBe(false);
   expect(exportFounderResearchWorkbookInput.safeParse({ runId, extra: true }).success).toBe(false);
+  expect(CAREER_MCP_INSTRUCTIONS).toContain("may research, save candidates, save evidence-backed outreach drafts, and create or open a private founder export card");
+  expect(CAREER_MCP_INSTRUCTIONS).toContain("LinkedIn fetching, Connect, sending, messages, and browser automation remain forbidden");
 });
 
 it("uses owner-scoped founder services and keeps export capabilities widget-private", async () => {
@@ -635,7 +641,7 @@ it("uses owner-scoped founder services and keeps export capabilities widget-priv
   const saveCandidateForRunItem = vi.fn(async () => ({ candidate, canonical: undefined, requiresManualReview: true }));
   const decideCandidate = vi.fn(async () => ({ candidate: { ...candidate, status: "CONFIRMED" }, canonical: { ...candidate, status: "CONFIRMED" }, requiresManualReview: false }));
   const saveBatch = vi.fn(async () => ({
-    drafts: [{ personId, targetId: "123e4567-e89b-12d3-a456-426614174018", draftId: "123e4567-e89b-12d3-a456-426614174019", version: 1, purpose: "linkedin_connection_request", text: "Hi Ada — I'd value connecting.", evidenceIds: [] }],
+    drafts: [{ personId, targetId: "123e4567-e89b-12d3-a456-426614174018", draftId: "123e4567-e89b-12d3-a456-426614174019", version: 1, purpose: "linkedin_connection_request", text: "Hi Ada — Cafe\u0301. I'd value connecting.", evidenceIds: [] }],
     needsVerification: []
   }));
   const createExport = vi.fn(async (_input: unknown, privateMetadata: (value: { capability: string; expiresAt: string }) => void) => {
@@ -667,6 +673,11 @@ it("uses owner-scoped founder services and keeps export capabilities widget-priv
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "test", version: "1.0.0" });
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  const listedTools = await client.listTools();
+  const candidateTool = listedTools.tools.find((tool) => tool.name === "save_founder_profile_candidates");
+  const candidateProperties = (candidateTool?.inputSchema.properties?.candidates as { items?: { properties?: Record<string, unknown> } } | undefined)?.items?.properties;
+  expect(candidateProperties?.candidateProfileUrl).toMatchObject({ type: "string", format: "uri", maxLength: 4096 });
+  expect(candidateProperties?.resultUrl).toMatchObject({ type: "string", format: "uri", maxLength: 4096 });
 
   const start = await client.callTool({ name: "start_yc_founder_research", arguments: { limit: 1 } });
   expect(start.structuredContent).toMatchObject({ data: { run: { id: runId }, selectedCompanyIds: ["123e4567-e89b-12d3-a456-426614174017"] } });
@@ -677,13 +688,15 @@ it("uses owner-scoped founder services and keeps export capabilities widget-priv
   expect((processed.structuredContent as { data: { items: unknown[]; publicSearchTasks: unknown[] } }).data.publicSearchTasks).toHaveLength(25);
   expect((processed.structuredContent as { data: { items: unknown[] } }).data.items[0]).toMatchObject({ errorCode: "OFFICIAL_SOURCE_UNAVAILABLE", errorSummary: "Official source unavailable" });
   expect(processRun).toHaveBeenCalledWith(runId, 5);
-  await client.callTool({ name: "save_founder_profile_candidates", arguments: { runId, candidates: [{ runItemId, founderName: "Ada Lovelace", founderRole: "Co-founder", candidateProfileUrl: candidate.profileUrl, searchQuery: candidate.searchQuery, resultUrl: candidate.evidenceUrl, resultTitle: candidate.evidenceTitle, checkedAt: candidate.checkedAt, confidence: candidate.confidence, linkedInNotFetched: true }] } });
+  const candidatesSaved = await client.callTool({ name: "save_founder_profile_candidates", arguments: { runId, candidates: [{ runItemId, founderName: "Ada Lovelace", founderRole: "Co-founder", candidateProfileUrl: candidate.profileUrl, searchQuery: candidate.searchQuery, resultUrl: candidate.evidenceUrl, resultTitle: candidate.evidenceTitle, checkedAt: candidate.checkedAt, confidence: candidate.confidence, linkedInNotFetched: true }] } });
   expect(saveCandidateForRunItem).toHaveBeenCalledOnce();
   expect(saveCandidate).not.toHaveBeenCalled();
-  await client.callTool({ name: "confirm_founder_profile_candidate", arguments: { candidateId, decision: "CONFIRM" } });
+  const confirmed = await client.callTool({ name: "confirm_founder_profile_candidate", arguments: { candidateId, decision: "CONFIRM" } });
   expect(decideCandidate).toHaveBeenCalledWith({ candidateId, decision: "CONFIRM" });
-  await client.callTool({ name: "save_founder_outreach_batch", arguments: { runId, requestId: "request-1", entries: [{ personId, pmmOpportunity: 50, referralPotential: 50, networkValue: 50, total: 50, confidence: 0.8, reasons: ["Evidence-backed"], missingEvidence: [], evidenceIds: [], personalizationClaims: [], text: "Hi Ada — I'd value connecting.", reviewState: "READY_TO_REVIEW" }] } });
+  const outreachSaved = await client.callTool({ name: "save_founder_outreach_batch", arguments: { runId, requestId: "request-1", entries: [{ personId, pmmOpportunity: 50, referralPotential: 50, networkValue: 50, total: 50, confidence: 0.8, reasons: ["Evidence-backed"], missingEvidence: [], evidenceIds: [], personalizationClaims: [], text: "Hi Ada — I appreciated Cafe\u0301. I'd value connecting.", reviewState: "READY_TO_REVIEW" }] } });
   expect(saveBatch).toHaveBeenCalledOnce();
+  expect(saveBatch).toHaveBeenCalledWith(expect.objectContaining({ entries: [expect.objectContaining({ text: "Hi Ada — I appreciated Café. I'd value connecting." })] }));
+  expect(outreachSaved.structuredContent).toMatchObject({ data: { drafts: [{ text: "Hi Ada — Café. I'd value connecting." }] } });
   const exported = await client.callTool({ name: "export_founder_research_workbook", arguments: { runId } });
   const resources = await client.listResources();
   await Promise.all([client.close(), server.close()]);
@@ -696,6 +709,13 @@ it("uses owner-scoped founder services and keeps export capabilities widget-priv
   expect(JSON.stringify(exported.content)).not.toContain("/download?");
   expect(JSON.stringify(exported.structuredContent)).not.toContain("/download?");
   expect(resources.resources.map((resource) => resource.uri)).toContain("ui://pmm-career-mcp/founder-export-card.html");
+  for (const result of [start, processed, candidatesSaved, confirmed, outreachSaved, exported]) {
+    const textItems = (result.content as Array<{ type: string; text?: string }>).filter((item) => item.type === "text");
+    expect(textItems).toHaveLength(1);
+    expect([...(textItems[0]?.text ?? "")].length).toBeLessThanOrEqual(240);
+    expect(textItems[0]?.text).toMatch(/private|manual|nothing|LinkedIn/i);
+    expect(JSON.stringify(textItems)).not.toMatch(/owner_subject|request-token|capability=|\/download\?/i);
+  }
 });
 
 it("requires authenticated owner-scoped founder services and maps only stable errors", async () => {
@@ -729,6 +749,70 @@ it("requires authenticated owner-scoped founder services and maps only stable er
   expect(result.structuredContent).toEqual({ data: { error: { code: "EVIDENCE_MISMATCH" } } });
   expect(JSON.stringify(result)).not.toContain("internal candidate detail");
   expect(JSON.stringify(result)).not.toContain(runId);
+});
+
+it("reports deterministic per-candidate outcomes without hiding partial saves", async () => {
+  const runId = "123e4567-e89b-12d3-a456-426614174010";
+  const runPersonId = "123e4567-e89b-12d3-a456-426614174012";
+  const candidate = (index: number) => ({
+    runItemId: `123e4567-e89b-12d3-a456-4266141740${20 + index}`,
+    runPersonId,
+    founderName: "Ada Lovelace",
+    founderRole: "Co-founder",
+    candidateProfileUrl: "https://www.linkedin.com/in/ada-lovelace",
+    searchQuery: "Ada Lovelace Acme LinkedIn",
+    resultUrl: "https://www.linkedin.com/in/ada-lovelace?trk=public_profile",
+    resultTitle: "Ada Lovelace at Acme",
+    checkedAt: FIXED_NOW.toISOString(),
+    confidence: 0.8,
+    linkedInNotFetched: true as const
+  });
+  const savedCandidate = {
+    id: "123e4567-e89b-12d3-a456-426614174030",
+    runPersonId,
+    profileUrl: "https://www.linkedin.com/in/ada-lovelace",
+    status: "CANDIDATE",
+    sourceKind: "PUBLIC_SEARCH",
+    searchQuery: "Ada Lovelace Acme LinkedIn",
+    evidenceUrl: "https://www.linkedin.com/in/ada-lovelace?trk=public_profile",
+    evidenceTitle: "Ada Lovelace at Acme",
+    evidenceSnippet: null,
+    checkedAt: FIXED_NOW.toISOString(),
+    confidence: 0.8,
+    createdAt: FIXED_NOW.toISOString(),
+    updatedAt: FIXED_NOW.toISOString()
+  };
+  const saveCandidate = vi.fn(async (input: { runItemId: string }) => {
+    if (input.runItemId.endsWith("21")) throw new DomainError("EVIDENCE_MISMATCH", "private mismatch");
+    if (input.runItemId.endsWith("22")) throw new Error("database-secret");
+    return { candidate: savedCandidate, canonical: undefined, requiresManualReview: true };
+  });
+  const deps = dependencies() as CareerMcpDependencies & { founderResearch: unknown };
+  deps.founderResearch = {
+    applicationUrl: "https://career.example",
+    runs: { startRun: vi.fn() as never, processRun: vi.fn() as never },
+    candidates: { saveCandidate: saveCandidate as never, saveCandidateForRunItem: vi.fn() as never, decideCandidate: vi.fn() as never },
+    outreach: { saveBatch: vi.fn() as never },
+    exports: { createExport: vi.fn() as never }
+  };
+  const server = createCareerMcpServer(deps, {
+    requestAuthContext: { subject: "123e4567-e89b-12d3-a456-426614174000", accessToken: "request-token" }
+  });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "test", version: "1.0.0" });
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  const result = await client.callTool({ name: "save_founder_profile_candidates", arguments: { runId, candidates: [candidate(0), candidate(1), candidate(2)] } });
+  await Promise.all([client.close(), server.close()]);
+
+  expect(result.isError).not.toBe(true);
+  expect(result.structuredContent).toEqual({ data: { results: [
+    expect.objectContaining({ index: 0, runItemId: candidate(0).runItemId, state: "SAVED" }),
+    { index: 1, runItemId: candidate(1).runItemId, state: "FAILED", error: { code: "EVIDENCE_MISMATCH" } },
+    { index: 2, runItemId: candidate(2).runItemId, state: "FAILED", error: { code: "DATA_INTEGRITY" } }
+  ] } });
+  expect(saveCandidate).toHaveBeenCalledTimes(3);
+  expect(JSON.stringify(result)).not.toContain("private mismatch");
+  expect(JSON.stringify(result)).not.toContain("database-secret");
 });
 
 it("keeps exact publishing app-only with capability-only input and secret-free output", async () => {
