@@ -68,7 +68,10 @@ class Globals implements FounderExportCardGlobalSource {
 function harness(initial: FounderExportCardGlobals = {
   toolOutput: structuredOutput,
   toolResponseMetadata: privateMetadata()
-}, options: Readonly<{ scheduleExpiry?: (callback: () => void, delayMs: number) => () => void }> = {}) {
+}, options: Readonly<{
+  scheduleExpiry?: (callback: () => void, delayMs: number) => () => void;
+  openExternal?: ((request: { href: string; redirectUrl: false }) => void | Promise<void>) | null;
+}> = {}) {
   const summaries: FounderExportCardSummary[] = [];
   const availability: boolean[] = [];
   const unavailable: string[] = [];
@@ -79,24 +82,43 @@ function harness(initial: FounderExportCardGlobals = {
     setDownloadAvailable(value) { availability.push(value); },
     showUnavailable(message) { unavailable.push(message); }
   };
-  const openUrl = vi.fn((url: string) => { opened.push(url); });
-  const controller = createFounderExportCardController({
+  const legacyOpenUrl = vi.fn((url: string) => { opened.push(url); });
+  const defaultOpenExternal = vi.fn(async (request: { href: string; redirectUrl: false }) => {
+    opened.push(request.href);
+  });
+  const openExternal = options.openExternal === null
+    ? undefined
+    : options.openExternal ?? defaultOpenExternal;
+  const dependencies = {
     applicationOrigin,
     globals,
     ui,
-    openUrl,
+    openUrl: legacyOpenUrl,
+    ...(openExternal === undefined ? {} : { openExternal }),
     ...(options.scheduleExpiry === undefined ? {} : { scheduleExpiry: options.scheduleExpiry }),
     now: () => new Date("2026-07-25T12:05:00.000Z")
-  });
-  return { controller, globals, summaries, availability, unavailable, openUrl, opened };
+  } as Parameters<typeof createFounderExportCardController>[0] & {
+    openUrl(url: string): void;
+  };
+  const controller = createFounderExportCardController(dependencies);
+  return {
+    controller,
+    globals,
+    summaries,
+    availability,
+    unavailable,
+    openExternal: openExternal ?? defaultOpenExternal,
+    legacyOpenUrl,
+    opened
+  };
 }
 
 describe("founder export card controller", () => {
-  it("renders only the safe export summary and opens the matching private download URL", () => {
+  it("renders only the safe export summary and opens the matching private download URL", async () => {
     const result = harness();
 
     result.controller.start();
-    result.controller.download();
+    await result.controller.download();
 
     expect(result.summaries).toEqual([{
       exportId,
@@ -109,11 +131,12 @@ describe("founder export card controller", () => {
     }]);
     expect(result.availability.at(-1)).toBe(true);
     expect(result.opened).toEqual([downloadUrl]);
-    expect(result.openUrl).toHaveBeenCalledTimes(1);
+    expect(result.openExternal).toHaveBeenCalledWith({ href: downloadUrl, redirectUrl: false });
+    expect(result.legacyOpenUrl).not.toHaveBeenCalled();
     expect(JSON.stringify(result.summaries)).not.toContain(capability);
   });
 
-  it("never accepts a capability URL from tool output or structured content", () => {
+  it("never accepts a capability URL from tool output or structured content", async () => {
     const unsafeUrl = "https://attacker.example/research-exports/anything/download?capability=" + capability;
     const result = harness({
       toolOutput: {
@@ -125,7 +148,7 @@ describe("founder export card controller", () => {
     });
 
     result.controller.start();
-    result.controller.download();
+    await result.controller.download();
 
     expect(result.availability.at(-1)).toBe(false);
     expect(result.opened).toEqual([]);
@@ -140,20 +163,20 @@ describe("founder export card controller", () => {
     ["bad capability", `${applicationOrigin}/research-exports/${exportId}/download?capability=bad`],
     ["trailing query delimiter", `${downloadUrl}&`],
     ["percent-encoded capability", `${applicationOrigin}/research-exports/${exportId}/download?capability=%61${capability.slice(1)}`]
-  ])("fails closed for a %s private URL", (_label, privateUrl) => {
+  ])("fails closed for a %s private URL", async (_label, privateUrl) => {
     const result = harness({
       toolOutput: structuredOutput,
       toolResponseMetadata: privateMetadata(structuredOutput, { downloadUrl: privateUrl, expiresAt: capabilityExpiresAt })
     });
 
     result.controller.start();
-    result.controller.download();
+    await result.controller.download();
 
     expect(result.availability.at(-1)).toBe(false);
     expect(result.opened).toEqual([]);
   });
 
-  it("does not activate a private URL substituted into mcp structured content", () => {
+  it("does not activate a private URL substituted into mcp structured content", async () => {
     const unsafeUrl = `https://attacker.example/research-exports/${exportId}/download?capability=${capability}`;
     const result = harness({
       toolOutput: structuredOutput,
@@ -171,10 +194,40 @@ describe("founder export card controller", () => {
     });
 
     result.controller.start();
-    result.controller.download();
+    await result.controller.download();
 
     expect(result.availability.at(-1)).toBe(false);
     expect(result.opened).toEqual([]);
+  });
+
+  it("rejects an MCP error result despite matching structured content and private metadata", async () => {
+    const metadata = privateMetadata() as ReturnType<typeof privateMetadata> & {
+      mcp_tool_result: ReturnType<typeof privateMetadata>["mcp_tool_result"] & { isError: true };
+    };
+    metadata.mcp_tool_result.isError = true;
+    const result = harness({ toolOutput: structuredOutput, toolResponseMetadata: metadata });
+
+    result.controller.start();
+    await result.controller.download();
+
+    expect(result.availability.at(-1)).toBe(false);
+    expect(result.openExternal).not.toHaveBeenCalled();
+    expect(result.legacyOpenUrl).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["missing", null],
+    ["throwing", vi.fn(() => { throw new Error("private URL must not leak"); })],
+    ["rejecting", vi.fn(async () => { throw new Error("private URL must not leak"); })]
+  ] as const)("fails closed when openExternal is %s", async (_case, openExternal) => {
+    const result = harness(undefined, { openExternal });
+
+    result.controller.start();
+    await result.controller.download();
+
+    expect(result.availability.at(-1)).toBe(false);
+    expect(result.opened).toEqual([]);
+    expect(result.legacyOpenUrl).not.toHaveBeenCalled();
   });
 
   it("fails closed for unavailable, expired, and mismatched private metadata", () => {
@@ -200,7 +253,7 @@ describe("founder export card controller", () => {
     expect(mismatched.availability.at(-1)).toBe(false);
   });
 
-  it("waits for a matching repeated globals update, then ignores later URL substitution", () => {
+  it("waits for a matching repeated globals update, then ignores later URL substitution", async () => {
     const result = harness({ toolOutput: structuredOutput, toolResponseMetadata: undefined });
 
     result.controller.start();
@@ -212,14 +265,14 @@ describe("founder export card controller", () => {
         expiresAt: capabilityExpiresAt
       })
     });
-    result.controller.download();
+    await result.controller.download();
 
     expect(result.availability.at(-1)).toBe(true);
     expect(result.opened).toEqual([downloadUrl]);
     expect(result.globals.listeners.size).toBe(0);
   });
 
-  it("disables an active download at the earlier scheduled expiry", () => {
+  it("disables an active download at the earlier scheduled expiry", async () => {
     let scheduled: (() => void) | undefined;
     const scheduleExpiry = vi.fn((callback: () => void, delayMs: number) => {
       scheduled = callback;
@@ -230,7 +283,7 @@ describe("founder export card controller", () => {
 
     result.controller.start();
     scheduled?.();
-    result.controller.download();
+    await result.controller.download();
 
     expect(scheduleExpiry).toHaveBeenCalledOnce();
     expect(result.availability.at(-1)).toBe(false);

@@ -23,7 +23,8 @@ it("keeps the export client DOM-only and private-metadata-only", async () => {
   expect(source).toContain("toolResponseMetadata");
   expect(source).toContain('"openai:set_globals"');
   expect(source).toContain("textContent");
-  expect(source).toContain("window.open");
+  expect(source).toContain("openExternal");
+  expect(source).not.toContain("window.open");
   expect(source).not.toMatch(/\.innerHTML\s*=|insertAdjacentHTML|document\.write|\beval\s*\(/u);
   expect(source).not.toMatch(/callTool|linkedin|https?:\/\//iu);
 });
@@ -36,4 +37,6 @@ it("builds a minified IIFE founder export bundle without a source map", async ()
   expect(bundle).not.toMatch(/^\s*(?:import|export)\s/mu);
   expect(bundle).not.toContain("LINKEDIN_CLIENT_SECRET");
   expect(bundle).not.toMatch(/callTool|linkedin/iu);
+  expect(bundle).toContain("openExternal");
+  expect(bundle).toContain("redirectUrl");
 });

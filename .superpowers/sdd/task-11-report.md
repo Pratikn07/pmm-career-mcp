@@ -183,3 +183,47 @@ Before changing the controller, `npx vitest run tests/founder-export-card/contro
 ### Self-review
 
 The raw URL is now accepted only if its byte-for-byte spelling is canonical; no URL parser normalization can widen that acceptance. The timer callback clears the active private URL before disabling the UI, while normal invalid click handling cancels any pending timer. Timer setup is dependency-injected for deterministic tests and is fail-closed if the scheduler throws. The pre-existing progress file was not modified or staged.
+
+## Final review fixes
+
+### Corrections and integration rationale
+
+- Replaced browser `window.open` navigation with the hosted ChatGPT bridge contract: `window.openai.openExternal({ href: validatedUrl, redirectUrl: false })`. The false redirect flag is intentional so the host cannot append or mutate query data containing the private download capability.
+- Added the canonical application origin as the sole legacy `openai/widgetCSP.redirect_domains` entry on both the registered resource descriptor and returned resource contents. The standard `ui.csp` remains unchanged.
+- Made navigation asynchronous and fail closed. Missing `openExternal`, synchronous throws, and rejected promises clear the active URL, cancel its timer, disable the button, and show only the safe unavailable state. There is no `window.open` fallback.
+- Rejected `mcp_tool_result.isError` whenever present and not exactly `false`, while retaining compatibility with the expected success envelope where the field is absent.
+
+### RED
+
+Before production changes, `npx vitest run tests/founder-export-card tests/http/founder-export-card-client.test.ts` failed as expected: 3 files failed, 8 tests failed, and 17 passed. Relevant failures were:
+
+- the exact `openExternal({ href, redirectUrl: false })` assertion received zero calls;
+- `isError:true` left availability enabled (`true` instead of `false`);
+- missing, throwing, and rejecting `openExternal` each left availability enabled;
+- the expected `redirect_domains` entry was absent;
+- source and shipped bundle still lacked `openExternal` and contained the old navigation implementation.
+
+These failures directly demonstrated both requested blockers before production code changed.
+
+### GREEN and final verification
+
+- `npx vitest run tests/founder-export-card` — passed: 2 files / 22 tests.
+- `npm run build` — passed, including the rebuilt founder export card bundle.
+- `npx vitest run tests/founder-export-card tests/http/founder-export-card-client.test.ts tests/build/dockerfile.test.ts` — passed: 4 files / 33 tests.
+- `npm run typecheck` — passed.
+- `npm audit --omit=dev` — passed: `found 0 vulnerabilities`.
+- `git diff --check` — passed with no whitespace errors.
+
+### Files changed
+
+- `src/founder-export-card/client.ts`
+- `src/founder-export-card/controller.ts`
+- `src/founder-export-card/resource.ts`
+- `tests/founder-export-card/controller.test.ts`
+- `tests/founder-export-card/resource.test.ts`
+- `tests/http/founder-export-card-client.test.ts`
+- `.superpowers/sdd/task-11-report.md`
+
+### Self-review
+
+The controller is the single policy boundary for private navigation: it supplies the exact two-field bridge request only after all origin/path/query, envelope, correlation, and expiry checks pass. Every bridge-unavailable or bridge-failure path clears capability-bearing state before updating the UI. Resource tests verify the redirect allowlist at both metadata surfaces, while behavior tests verify exact bridge arguments and all fail-closed outcomes. Source and rebuilt-bundle checks independently confirm there is no `window.open` fallback. `.superpowers/sdd/progress.md` remains untouched and unstaged.

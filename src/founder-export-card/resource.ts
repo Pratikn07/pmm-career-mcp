@@ -61,7 +61,8 @@ export function registerFounderExportCardResource(
   const applicationOrigin = canonicalHttpsOrigin(options.applicationUrl);
   const csp = {
     connect_domains: [applicationOrigin],
-    resource_domains: [applicationOrigin]
+    resource_domains: [applicationOrigin],
+    redirect_domains: [applicationOrigin]
   };
   const ui = {
     domain: applicationOrigin,

@@ -33,14 +33,22 @@ it("serves the private founder export shell with one download control and an exa
         "openai/widgetDomain": "https://mcp.example",
         "openai/widgetCSP": {
           connect_domains: ["https://mcp.example"],
-          resource_domains: ["https://mcp.example"]
+          resource_domains: ["https://mcp.example"],
+          redirect_domains: ["https://mcp.example"]
         }
       })
     })
   ]));
   const resource = result.contents[0] as { text?: string; _meta?: Record<string, unknown> };
   const html = resource.text ?? "";
-  expect(resource._meta).toMatchObject({ "openai/widgetDomain": "https://mcp.example" });
+  expect(resource._meta).toMatchObject({
+    "openai/widgetDomain": "https://mcp.example",
+    "openai/widgetCSP": {
+      connect_domains: ["https://mcp.example"],
+      resource_domains: ["https://mcp.example"],
+      redirect_domains: ["https://mcp.example"]
+    }
+  });
   expect(html).toContain('src="https://mcp.example/founder-export-card-client.js"');
   expect(html).toContain('data-application-origin="https://mcp.example"');
   expect(html).toContain('id="download-excel"');

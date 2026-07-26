@@ -2,12 +2,14 @@ import {
   createFounderExportCardController,
   type FounderExportCardGlobalSource,
   type FounderExportCardGlobals,
-  type FounderExportCardUi
+  type FounderExportCardUi,
+  type FounderExportOpenExternalRequest
 } from "./controller.js";
 
 type OpenAiBridge = Readonly<{
   toolOutput?: unknown;
   toolResponseMetadata?: unknown;
+  openExternal?: (request: FounderExportOpenExternalRequest) => void | Promise<void>;
 }>;
 
 function openAiBridge(): OpenAiBridge | undefined {
@@ -81,11 +83,15 @@ function bootstrap(): void {
     applicationOrigin,
     globals,
     ui,
-    openUrl(url) {
-      window.open(url, "_blank", "noopener,noreferrer");
+    openExternal(request) {
+      const bridge = openAiBridge();
+      if (bridge?.openExternal === undefined) {
+        return Promise.reject(new Error("bridge unavailable"));
+      }
+      return bridge.openExternal(request);
     }
   });
-  download.addEventListener("click", () => controller.download());
+  download.addEventListener("click", () => { void controller.download(); });
   controller.start();
 }
 

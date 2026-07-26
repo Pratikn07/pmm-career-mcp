@@ -31,14 +31,19 @@ export type FounderExportCardUi = Readonly<{
 
 export type FounderExportCardController = Readonly<{
   start(): void;
-  download(): void;
+  download(): Promise<void>;
+}>;
+
+export type FounderExportOpenExternalRequest = Readonly<{
+  href: string;
+  redirectUrl: false;
 }>;
 
 export type FounderExportCardControllerDependencies = Readonly<{
   applicationOrigin: string;
   globals: FounderExportCardGlobalSource;
   ui: FounderExportCardUi;
-  openUrl(url: string): void;
+  openExternal?: (request: FounderExportOpenExternalRequest) => void | Promise<void>;
   now?: () => Date;
   scheduleExpiry?(callback: () => void, delayMs: number): () => void;
 }>;
@@ -165,6 +170,7 @@ function privateMetadata(value: unknown, expectedOutput: unknown): Record<string
     || hidden === undefined
     || !exactKeys(metadata, ["status", "call_tool_result", "mcp_tool_result"])
     || metadata.status !== "complete"
+    || (own(mcpResult, "isError") && mcpResult.isError !== false)
     || !jsonEqual(metadata.call_tool_result, expectedOutput)
     || !own(mcpResult, "structuredContent")
     || !jsonEqual(mcpResult.structuredContent, expectedOutput)
@@ -303,14 +309,27 @@ export function createFounderExportCardController(
       }
       refresh();
     },
-    download(): void {
+    async download(): Promise<void> {
       if (active === undefined || !readyIsCurrent(active)) {
         active = undefined;
         clearExpiry();
         unavailable();
         return;
       }
-      dependencies.openUrl(active.download.url);
+      const openExternal = dependencies.openExternal;
+      if (openExternal === undefined) {
+        active = undefined;
+        clearExpiry();
+        unavailable();
+        return;
+      }
+      try {
+        await openExternal({ href: active.download.url, redirectUrl: false });
+      } catch {
+        active = undefined;
+        clearExpiry();
+        unavailable();
+      }
     }
   });
 }
