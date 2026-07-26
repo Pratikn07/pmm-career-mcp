@@ -758,7 +758,7 @@ export const exportFounderResearchWorkbookOutput = outputSchema(z.object({
     runId: founderResearchId,
     createdAt: timestamp,
     expiresAt: timestamp,
-    rowCount: z.number().int().nonnegative().max(50),
+    rowCount: z.number().int().nonnegative().max(500),
     sheetCount: z.literal(4),
     checksumSha256: checksum
   }).strict()

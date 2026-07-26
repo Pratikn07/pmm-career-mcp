@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import JSZip from "jszip";
 
 const MAX_COMPANIES = 50;
+const MAX_WORKBOOK_ROWS = 500;
 const MAX_WORKBOOK_BYTES = 5 * 1024 * 1024;
 // XML entity escaping can expand a single UTF-8 byte to six bytes. This bound,
 // plus the fixed < 250 KiB OOXML envelope, remains below the five MiB export cap.
@@ -340,8 +341,8 @@ function validateInput(input: FounderResearchWorkbookInput): Readonly<{
   ) {
     invalidInput("run.processedCount must be between 0 and run.selectedCount");
   }
-  if (!Array.isArray(input.rows) || input.rows.length > run.requestedLimit) {
-    invalidInput("rows must not exceed run.requestedLimit");
+  if (!Array.isArray(input.rows) || input.rows.length > MAX_WORKBOOK_ROWS) {
+    invalidInput(`rows must not exceed ${MAX_WORKBOOK_ROWS}`);
   }
   if (input.includeCandidateUrls !== undefined && input.includeCandidateUrls !== true) {
     invalidInput("includeCandidateUrls must be true when present");

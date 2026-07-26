@@ -675,9 +675,17 @@ it("uses owner-scoped founder services and keeps export capabilities widget-priv
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
   const listedTools = await client.listTools();
   const candidateTool = listedTools.tools.find((tool) => tool.name === "save_founder_profile_candidates");
+  const exportTool = listedTools.tools.find((tool) => tool.name === "export_founder_research_workbook");
   const candidateProperties = (candidateTool?.inputSchema.properties?.candidates as { items?: { properties?: Record<string, unknown> } } | undefined)?.items?.properties;
+  const exportDataSchema = exportTool?.outputSchema?.properties?.data as {
+    anyOf?: Array<{ properties?: { export?: { properties?: Record<string, unknown> } } }>;
+  } | undefined;
+  const exportProperties = exportDataSchema?.anyOf?.find(
+    (variant) => variant.properties?.export !== undefined
+  )?.properties?.export?.properties;
   expect(candidateProperties?.candidateProfileUrl).toMatchObject({ type: "string", format: "uri", maxLength: 4096 });
   expect(candidateProperties?.resultUrl).toMatchObject({ type: "string", format: "uri", maxLength: 4096 });
+  expect(exportProperties?.rowCount).toMatchObject({ type: "integer", maximum: 500 });
 
   const start = await client.callTool({ name: "start_yc_founder_research", arguments: { limit: 1 } });
   expect(start.structuredContent).toMatchObject({ data: { run: { id: runId }, selectedCompanyIds: ["123e4567-e89b-12d3-a456-426614174017"] } });

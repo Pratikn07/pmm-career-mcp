@@ -311,6 +311,55 @@ describe("buildFounderResearchWorkbook", () => {
     expect(ready.indexOf("Company 01</t>")).toBeLessThan(ready.indexOf("Company 50</t>"));
   });
 
+  it("supports multiple founder rows per selected company with an independent row bound", async () => {
+    const compactRow = {
+      ...workbookInput.rows[0]!,
+      companyName: "Multi Founder Co",
+      checkedAt: "2026-07-25T10:02:00.000Z"
+    };
+    const twoFounderInput: FounderResearchWorkbookInput = {
+      ...workbookInput,
+      run: {
+        ...workbookInput.run,
+        requestedLimit: 1,
+        selectedCount: 1,
+        processedCount: 1
+      },
+      rows: [
+        { ...compactRow, id: "multi-founder-1", founderName: "Founder One" },
+        { ...compactRow, id: "multi-founder-2", founderName: "Founder Two" }
+      ]
+    };
+    const { zip } = await openWorkbook(twoFounderInput);
+    const ready = await text(zip, "xl/worksheets/sheet1.xml");
+
+    expect(ready).toContain("Founder One</t>");
+    expect(ready).toContain("Founder Two</t>");
+
+    const maximumRows = Array.from({ length: 500 }, (_, index) => ({
+      ...compactRow,
+      id: `bounded-founder-${index}`,
+      founderName: `Founder ${index}`
+    }));
+    const maximumBytes = await build({
+      ...twoFounderInput,
+      rows: maximumRows
+    });
+    const maximumZip = await JSZip.loadAsync(maximumBytes, { checkCRC32: true });
+    const maximumReady = await text(maximumZip, "xl/worksheets/sheet1.xml");
+
+    expect(maximumBytes.byteLength).toBeLessThan(5 * 1024 * 1024);
+    expect(maximumReady).toContain("Founder 499</t>");
+    await expect(build({
+      ...twoFounderInput,
+      rows: Array.from({ length: 501 }, (_, index) => ({
+        ...compactRow,
+        id: `bounded-founder-${index}`,
+        founderName: `Founder ${index}`
+      }))
+    })).rejects.toThrow("500");
+  });
+
   it("accepts only timezone-qualified RFC3339 timestamps and normalizes equivalent instants", async () => {
     const equivalent: FounderResearchWorkbookInput = {
       ...workbookInput,
