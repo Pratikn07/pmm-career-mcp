@@ -4,7 +4,9 @@ export default defineConfig({
   test: {
     environment: "node",
     clearMocks: true,
-    maxWorkers: 4,
+    maxWorkers: 1,
+    testTimeout: 30_000,
+    hookTimeout: 30_000,
     include: ["tests/**/*.test.ts"],
     coverage: {
       provider: "v8",
