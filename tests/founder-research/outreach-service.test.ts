@@ -13,7 +13,7 @@ import {
 
 const OWNER = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const OTHER_OWNER = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
-const CHECKED_AT = "2026-07-25T18:00:00.000Z";
+const CHECKED_AT = new Date(Date.now() + 24 * 60 * 60 * 1_000).toISOString();
 
 let db: TestCareerDatabase;
 

@@ -22,8 +22,16 @@ import {
   type TestCareerDatabase
 } from "../support/database.js";
 
-const NOW = "2026-07-25T18:00:00.000Z";
-const CHECKED_AT = "2026-07-25T17:55:00.000Z";
+const TEST_BASE_MS = Date.now() + 24 * 60 * 60 * 1_000;
+const CHECKED_AT = new Date(TEST_BASE_MS).toISOString();
+const NOW = new Date(TEST_BASE_MS + 5 * 60_000).toISOString();
+const NOW_MS = new Date(NOW).getTime();
+const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1_000;
+const FIVE_MINUTES_MS = 5 * 60 * 1_000;
+const STALE_CHECKED_AT = new Date(NOW_MS - THIRTY_DAYS_MS - 1).toISOString();
+const FRESH_BOUNDARY_CHECKED_AT = new Date(NOW_MS - THIRTY_DAYS_MS).toISOString();
+const FUTURE_BOUNDARY_CHECKED_AT = new Date(NOW_MS + FIVE_MINUTES_MS).toISOString();
+const TOO_FAR_FUTURE_CHECKED_AT = new Date(NOW_MS + FIVE_MINUTES_MS + 1).toISOString();
 const OWNER = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const OTHER_OWNER = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 
@@ -410,8 +418,8 @@ describe("Founder candidate service", () => {
 
   it.each([
     ["malformed", "July 24, 2026", "VALIDATION_ERROR"],
-    ["stale", "2026-06-25T17:59:59.999Z", "EVIDENCE_MISMATCH"],
-    ["too far in the future", "2026-07-25T18:05:00.001Z", "VALIDATION_ERROR"]
+    ["stale", STALE_CHECKED_AT, "EVIDENCE_MISMATCH"],
+    ["too far in the future", TOO_FAR_FUTURE_CHECKED_AT, "VALIDATION_ERROR"]
   ])("rejects %s public-search timestamps", async (_label, checkedAt, code) => {
     const context = await addCandidateContext();
     await expectDomainError(
@@ -423,14 +431,14 @@ describe("Founder candidate service", () => {
   it("accepts evidence at the exact 30-day freshness and five-minute future boundaries", async () => {
     const firstContext = await addCandidateContext({ companyName: "Fresh Boundary" });
     await expect(service().saveCandidate(candidateInput(firstContext, {
-      checkedAt: "2026-06-25T18:00:00.000Z"
+      checkedAt: FRESH_BOUNDARY_CHECKED_AT
     }))).resolves.toMatchObject({ requiresManualReview: true });
 
     const secondContext = await addCandidateContext({ companyName: "Future Boundary" });
     await expect(service().saveCandidate(candidateInput(secondContext, {
       candidateProfileUrl: "https://www.linkedin.com/in/future-boundary",
       resultUrl: "https://linkedin.com/in/future-boundary",
-      checkedAt: "2026-07-25T18:05:00.000Z"
+      checkedAt: FUTURE_BOUNDARY_CHECKED_AT
     }))).resolves.toMatchObject({ requiresManualReview: true });
   });
 
