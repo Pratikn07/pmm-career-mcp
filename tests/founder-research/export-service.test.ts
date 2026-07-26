@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import JSZip from "jszip";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import {
   createTestDatabase,
@@ -16,7 +17,7 @@ const database: TestCareerDatabase = await createTestDatabase();
 afterEach(async () => await database.resetForTests());
 afterAll(async () => await database.close());
 
-async function seedReadyRun(): Promise<{ runId: string; targetId: string }> {
+async function seedReadyRun(): Promise<{ runId: string; targetId: string; companyId: string }> {
   const company = await database.companies.upsert({
     ycId: "export-acme",
     name: "Export Acme",
@@ -74,7 +75,7 @@ async function seedReadyRun(): Promise<{ runId: string; targetId: string }> {
     text: "Hi Ada Export — I would value connecting.",
     evidenceIds: []
   });
-  return { runId: created.run.id, targetId: target.id };
+  return { runId: created.run.id, targetId: target.id, companyId: company.id };
 }
 
 async function exportService(now: () => Date, subject = OWNER) {
@@ -149,6 +150,71 @@ describe("founder research export service", () => {
       { runId, idempotencyKey: "foreign-owner" },
       () => undefined
     )).rejects.toMatchObject({ code: "NOT_FOUND" });
+  });
+
+  it("omits unsafe source websites instead of failing the entire workbook export", async () => {
+    const { runId, companyId } = await seedReadyRun();
+    const unsafeValues = [
+      "not-a-complete-url",
+      "http://unsafe.example/",
+      "https://user:password@unsafe.example/"
+    ];
+    for (const [index, value] of unsafeValues.entries()) {
+      await queryTestDatabase(database, `
+        update career_mcp.companies
+        set website_url = '${value}'
+        where id = '${companyId}'
+      `);
+
+      const result = await createPrivateExport(
+        runId,
+        `unsafe-source-website-${index}`,
+        () => new Date(START)
+      );
+      const stored = (await database.founderResearchExports.getOwned(
+        result.exportMetadata.id,
+        OWNER
+      ))!;
+      const workbook = await JSZip.loadAsync(
+        Buffer.from(stored.workbookBytes),
+        { checkCRC32: true }
+      );
+      const worksheetXml = (await Promise.all(
+        Object.values(workbook.files)
+          .filter((entry) => /^xl\/worksheets\/sheet\d+\.xml$/u.test(entry.name))
+          .map(async (entry) => await entry.async("string"))
+      )).join("\n");
+
+      expect(result.exportMetadata.rowCount).toBe(1);
+      expect(worksheetXml).not.toContain(value);
+    }
+
+    const safeValue = "https://safe.example/company";
+    await queryTestDatabase(database, `
+      update career_mcp.companies
+      set website_url = '${safeValue}'
+      where id = '${companyId}'
+    `);
+    const safeResult = await createPrivateExport(
+      runId,
+      "safe-source-website",
+      () => new Date(START)
+    );
+    const safeStored = (await database.founderResearchExports.getOwned(
+      safeResult.exportMetadata.id,
+      OWNER
+    ))!;
+    const safeWorkbook = await JSZip.loadAsync(
+      Buffer.from(safeStored.workbookBytes),
+      { checkCRC32: true }
+    );
+    const safeWorksheetXml = (await Promise.all(
+      Object.values(safeWorkbook.files)
+        .filter((entry) => /^xl\/worksheets\/sheet\d+\.xml$/u.test(entry.name))
+        .map(async (entry) => await entry.async("string"))
+    )).join("\n");
+
+    expect(safeWorksheetXml).toContain(safeValue);
   });
 
   it("durably reuses a matching owner/run/key snapshot across service instances", async () => {

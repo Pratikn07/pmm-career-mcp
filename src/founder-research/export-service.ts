@@ -99,6 +99,20 @@ function selectedCandidate(
   ))[0];
 }
 
+function safeCompanyWebsiteUrl(value: string | null): string | undefined {
+  if (value === null) return undefined;
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "https:"
+      && parsed.username === ""
+      && parsed.password === ""
+      ? value
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function safeFailure(item: FounderResearchExportSnapshot["items"][number]["item"]) {
   switch (item.errorCode) {
     case "DISCOVERY_BUDGET_EXHAUSTED":
@@ -127,12 +141,13 @@ function safeFailure(item: FounderResearchExportSnapshot["items"][number]["item"
 function snapshotRows(snapshot: FounderResearchExportSnapshot): FounderResearchWorkbookRow[] {
   const rows: FounderResearchWorkbookRow[] = [];
   for (const { item, company, people } of snapshot.items) {
+    const companyWebsiteUrl = safeCompanyWebsiteUrl(company.websiteUrl);
     const shared = {
       companyName: company.name,
       ...(company.batch === null ? {} : { ycBatch: company.batch }),
       ...(company.status === null ? {} : { companyStatus: company.status }),
       ...(company.isHiring === null ? {} : { hiring: company.isHiring }),
-      ...(company.websiteUrl === null ? {} : { companyWebsiteUrl: company.websiteUrl })
+      ...(companyWebsiteUrl === undefined ? {} : { companyWebsiteUrl })
     };
     if (people.length === 0) {
       if (item.state === "NOT_FOUND" || item.state === "FAILED") {
