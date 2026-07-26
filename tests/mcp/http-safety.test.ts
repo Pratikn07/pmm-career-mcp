@@ -1,13 +1,16 @@
 import request from "supertest";
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import { createHttpApp } from "../../src/http/app.js";
 import {
   createBrandedVisualBriefOutput,
   renderBrandedLinkedInCoverOutput
 } from "../../src/mcp/schemas.js";
 
-function app() {
-  return createHttpApp({ mcpHandler: (_request, response) => response.sendStatus(501) });
+function app(downloadFounderExport = vi.fn()) {
+  return createHttpApp({
+    mcpHandler: (_request, response) => response.sendStatus(501),
+    downloadFounderExport
+  });
 }
 
 it("returns a sanitized MCP error and propagates a safe request ID for malformed JSON", async () => {
@@ -36,6 +39,19 @@ it("bounds oversized MCP JSON bodies and still includes a generated request ID",
   expect(response.headers["x-request-id"]).toMatch(/^[0-9a-f-]{36}$/);
   expect(response.body).toEqual({ error: "MCP request could not be completed" });
   expect(response.text).not.toMatch(/entity\.too\.large|\/Users\//i);
+});
+
+it("keeps MCP body failures isolated from the founder export download dependency", async () => {
+  const downloadFounderExport = vi.fn();
+  const response = await request(app(downloadFounderExport))
+    .post("/mcp")
+    .set("content-type", "application/json")
+    .set("authorization", "Bearer private-mcp-token")
+    .send('{"incomplete":');
+
+  expect(response.status).toBe(400);
+  expect(response.body).toEqual({ error: "MCP request could not be completed" });
+  expect(downloadFounderExport).not.toHaveBeenCalled();
 });
 
 it("keeps Brand Studio output contracts closed to private transport and approval fields", () => {

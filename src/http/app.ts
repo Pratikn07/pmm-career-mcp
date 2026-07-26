@@ -15,12 +15,18 @@ import { applyConsentSecurityHeaders, hasConsentPageConfiguration, invalidConsen
 import { isSupabaseAuthorizationId } from "../oauth/authorization-id.js";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
+import type { FounderExportDownload } from "../founder-research/download-capability.js";
 
 type CommonHttpDependencies = {
   /** Required by hosted OAuth deployments; omitted only for existing local test handlers. */
   config?: AppConfig;
   /** A lightweight query that confirms the migrated database is reachable. */
   checkReady?: () => Promise<void>;
+  /** Verifies a private capability before returning exact persisted export bytes. */
+  downloadFounderExport?: (
+    exportId: string,
+    capability: unknown
+  ) => Promise<FounderExportDownload>;
 };
 
 type LegacyHttpDependencies = CommonHttpDependencies & {
@@ -179,6 +185,41 @@ export function createHttpApp(deps: HttpDependencies): Express {
   if (deps.config !== undefined && deps.config.authMode === "oauth") {
     app.get("/.well-known/oauth-protected-resource", (_request, response) => {
       response.json(protectedResourceMetadata(deps.config!));
+    });
+  }
+  if (deps.downloadFounderExport !== undefined) {
+    const downloadPath = "/research-exports/:exportId/download";
+    app.all(downloadPath, (request, response, next) => {
+      if (request.method === "GET") {
+        next();
+        return;
+      }
+      response.status(404).json({ error: "Founder research export is unavailable" });
+    });
+    app.get(downloadPath, async (request, response) => {
+      try {
+        const capability = request.query.capability;
+        const download = await deps.downloadFounderExport!(
+          request.params.exportId,
+          capability
+        );
+        response.status(200);
+        response.setHeader("Content-Disposition", `attachment; filename="${download.fileName}"`);
+        response.setHeader("Content-Type", download.mimeType);
+        response.setHeader("Content-Length", String(download.bytes.byteLength));
+        response.setHeader("ETag", `"${download.checksumSha256}"`);
+        response.setHeader("Cache-Control", "private, no-store");
+        response.setHeader("Pragma", "no-cache");
+        response.setHeader("X-Content-Type-Options", "nosniff");
+        response.setHeader("Referrer-Policy", "no-referrer");
+        response.setHeader(
+          "Content-Security-Policy",
+          "default-src 'none'; frame-ancestors 'none'; sandbox"
+        );
+        response.send(download.bytes);
+      } catch {
+        response.status(404).json({ error: "Founder research export is unavailable" });
+      }
     });
   }
   app.all("/mcp", "mcpHandler" in deps ? deps.mcpHandler : streamableMcpHandler(deps.mcpServerFactory));
