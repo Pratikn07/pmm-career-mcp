@@ -35,4 +35,5 @@ it("builds a minified IIFE founder export bundle without a source map", async ()
   expect(bundle).not.toContain("sourceMappingURL");
   expect(bundle).not.toMatch(/^\s*(?:import|export)\s/mu);
   expect(bundle).not.toContain("LINKEDIN_CLIENT_SECRET");
+  expect(bundle).not.toMatch(/callTool|linkedin/iu);
 });

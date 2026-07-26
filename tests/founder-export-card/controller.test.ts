@@ -68,7 +68,7 @@ class Globals implements FounderExportCardGlobalSource {
 function harness(initial: FounderExportCardGlobals = {
   toolOutput: structuredOutput,
   toolResponseMetadata: privateMetadata()
-}) {
+}, options: Readonly<{ scheduleExpiry?: (callback: () => void, delayMs: number) => () => void }> = {}) {
   const summaries: FounderExportCardSummary[] = [];
   const availability: boolean[] = [];
   const unavailable: string[] = [];
@@ -85,6 +85,7 @@ function harness(initial: FounderExportCardGlobals = {
     globals,
     ui,
     openUrl,
+    ...(options.scheduleExpiry === undefined ? {} : { scheduleExpiry: options.scheduleExpiry }),
     now: () => new Date("2026-07-25T12:05:00.000Z")
   });
   return { controller, globals, summaries, availability, unavailable, openUrl, opened };
@@ -136,11 +137,37 @@ describe("founder export card controller", () => {
     ["wrong route", `${applicationOrigin}/research-exports/${exportId}/other?capability=${capability}`],
     ["wrong export", `${applicationOrigin}/research-exports/${runId}/download?capability=${capability}`],
     ["extra query", `${downloadUrl}&next=https://attacker.example`],
-    ["bad capability", `${applicationOrigin}/research-exports/${exportId}/download?capability=bad`]
+    ["bad capability", `${applicationOrigin}/research-exports/${exportId}/download?capability=bad`],
+    ["trailing query delimiter", `${downloadUrl}&`],
+    ["percent-encoded capability", `${applicationOrigin}/research-exports/${exportId}/download?capability=%61${capability.slice(1)}`]
   ])("fails closed for a %s private URL", (_label, privateUrl) => {
     const result = harness({
       toolOutput: structuredOutput,
       toolResponseMetadata: privateMetadata(structuredOutput, { downloadUrl: privateUrl, expiresAt: capabilityExpiresAt })
+    });
+
+    result.controller.start();
+    result.controller.download();
+
+    expect(result.availability.at(-1)).toBe(false);
+    expect(result.opened).toEqual([]);
+  });
+
+  it("does not activate a private URL substituted into mcp structured content", () => {
+    const unsafeUrl = `https://attacker.example/research-exports/${exportId}/download?capability=${capability}`;
+    const result = harness({
+      toolOutput: structuredOutput,
+      toolResponseMetadata: {
+        ...privateMetadata(),
+        mcp_tool_result: {
+          structuredContent: {
+            data: {
+              export: { ...structuredOutput.data.export, downloadUrl: unsafeUrl }
+            }
+          },
+          _meta: { downloadUrl, expiresAt: capabilityExpiresAt }
+        }
+      }
     });
 
     result.controller.start();
@@ -190,5 +217,23 @@ describe("founder export card controller", () => {
     expect(result.availability.at(-1)).toBe(true);
     expect(result.opened).toEqual([downloadUrl]);
     expect(result.globals.listeners.size).toBe(0);
+  });
+
+  it("disables an active download at the earlier scheduled expiry", () => {
+    let scheduled: (() => void) | undefined;
+    const scheduleExpiry = vi.fn((callback: () => void, delayMs: number) => {
+      scheduled = callback;
+      expect(delayMs).toBe(10 * 60 * 1_000);
+      return () => { scheduled = undefined; };
+    });
+    const result = harness(undefined, { scheduleExpiry });
+
+    result.controller.start();
+    scheduled?.();
+    result.controller.download();
+
+    expect(scheduleExpiry).toHaveBeenCalledOnce();
+    expect(result.availability.at(-1)).toBe(false);
+    expect(result.opened).toEqual([]);
   });
 });

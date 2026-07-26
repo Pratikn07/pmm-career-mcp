@@ -40,6 +40,7 @@ export type FounderExportCardControllerDependencies = Readonly<{
   ui: FounderExportCardUi;
   openUrl(url: string): void;
   now?: () => Date;
+  scheduleExpiry?(callback: () => void, delayMs: number): () => void;
 }>;
 
 type ValidatedExport = Readonly<{
@@ -187,26 +188,14 @@ function validatedPrivateDownload(
     || canonicalTimestamp(metadata.expiresAt) === undefined) {
     return undefined;
   }
-  try {
-    const url = new URL(metadata.downloadUrl);
-    const expectedPath = `/research-exports/${exportId}/download`;
-    if (
-      url.origin !== applicationOrigin
-      || url.username !== ""
-      || url.password !== ""
-      || url.hash !== ""
-      || url.pathname !== expectedPath
-      || [...url.searchParams.keys()].length !== 1
-      || !url.searchParams.has("capability")
-    ) {
-      return undefined;
-    }
-    const capability = url.searchParams.get("capability");
-    if (capability === null || !CAPABILITY_PATTERN.test(capability)) return undefined;
-    return { url: url.toString(), expiresAt: metadata.expiresAt };
-  } catch {
-    return undefined;
-  }
+  const prefix = `${applicationOrigin}/research-exports/${exportId}/download?capability=`;
+  if (!metadata.downloadUrl.startsWith(prefix)) return undefined;
+  const capability = metadata.downloadUrl.slice(prefix.length);
+  if (!CAPABILITY_PATTERN.test(capability)) return undefined;
+  const canonicalUrl = `${prefix}${capability}`;
+  return metadata.downloadUrl === canonicalUrl
+    ? { url: canonicalUrl, expiresAt: metadata.expiresAt }
+    : undefined;
 }
 
 function currentTime(now: () => Date): number | undefined {
@@ -223,7 +212,12 @@ export function createFounderExportCardController(
 ): FounderExportCardController {
   const applicationOrigin = canonicalHttpsOrigin(dependencies.applicationOrigin);
   const now = dependencies.now ?? (() => new Date());
+  const scheduleExpiry = dependencies.scheduleExpiry ?? ((callback: () => void, delayMs: number) => {
+    const timer = setTimeout(callback, delayMs);
+    return () => clearTimeout(timer);
+  });
   let unsubscribe: (() => void) | undefined;
+  let cancelExpiry: (() => void) | undefined;
   let active: Readonly<{ export: ValidatedExport; download: PrivateDownload }> | undefined;
 
   function unavailable(): void {
@@ -236,6 +230,32 @@ export function createFounderExportCardController(
     return current !== undefined
       && Date.parse(value.export.summary.expiresAt) > current
       && Date.parse(value.download.expiresAt) > current;
+  }
+
+  function clearExpiry(): void {
+    cancelExpiry?.();
+    cancelExpiry = undefined;
+  }
+
+  function activate(value: Readonly<{ export: ValidatedExport; download: PrivateDownload }>): boolean {
+    const current = currentTime(now);
+    const expiresAt = Math.min(
+      Date.parse(value.export.summary.expiresAt),
+      Date.parse(value.download.expiresAt)
+    );
+    if (current === undefined || expiresAt <= current) return false;
+    try {
+      cancelExpiry = scheduleExpiry(() => {
+        active = undefined;
+        cancelExpiry = undefined;
+        unavailable();
+      }, expiresAt - current);
+    } catch {
+      cancelExpiry = undefined;
+      return false;
+    }
+    active = value;
+    return true;
   }
 
   function refresh(): void {
@@ -263,7 +283,10 @@ export function createFounderExportCardController(
       unavailable();
       return;
     }
-    active = { export: exportValue, download };
+    if (!activate({ export: exportValue, download })) {
+      unavailable();
+      return;
+    }
     unsubscribe?.();
     unsubscribe = undefined;
     dependencies.ui.setDownloadAvailable(true);
@@ -283,6 +306,7 @@ export function createFounderExportCardController(
     download(): void {
       if (active === undefined || !readyIsCurrent(active)) {
         active = undefined;
+        clearExpiry();
         unavailable();
         return;
       }

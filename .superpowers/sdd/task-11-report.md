@@ -150,3 +150,36 @@ expiresAt }` in the canonical `toolResponseMetadata` private metadata. The
 raw capability remains embedded only in that private download URL. The
 pre-existing `.superpowers/sdd/progress.md` change was left byte-for-byte
 untouched and will remain unstaged.
+
+## Review fixes
+
+### Corrections
+
+- Replaced semantic `URL`/`searchParams` validation with exact raw-string grammar validation. The private URL must exactly equal the canonical configured application origin, exact export download path, literal `?capability=`, and a 43-character base64url token. Trailing delimiters and percent-encoded token characters now fail closed.
+- Added an injectable, cancellable `scheduleExpiry` dependency. On activation, the controller schedules fail-closed disabling at the earlier of the export and capability expiries; expiry clears the active URL and disables the button without a click.
+- Added an independent test where `toolOutput` remains valid while `mcp_tool_result.structuredContent` carries an unsafe substituted URL. The strict canonical-envelope equality check prevents activation.
+- Extended the static-client test to scan the shipped `dist/public/founder-export-card-client.js` bundle for both `callTool` and `linkedin`, as well as the source-level check.
+
+### RED
+
+Before changing the controller, `npx vitest run tests/founder-export-card/controller.test.ts` failed as expected: 1 file, 3 failed / 10 passed tests. The relevant failures were the trailing query delimiter and percent-encoded capability cases (each received enabled `true` rather than disabled `false`) and the expiry case (the scheduler was called zero times rather than once). The explicit structured-content substitution test already passed on the prior strict binding behavior; the focused RED nevertheless proved the two reviewed behavior gaps before production code changed.
+
+### GREEN and verification
+
+- `npx vitest run tests/founder-export-card/controller.test.ts` — passed: 1 file / 13 tests.
+- `npm run build` — passed.
+- `npx vitest run tests/founder-export-card tests/http/founder-export-card-client.test.ts tests/build/dockerfile.test.ts` — passed: 4 files / 29 tests.
+- `npm run typecheck` — passed.
+- `npm audit --omit=dev` — passed: `found 0 vulnerabilities`.
+- `git diff --check` — passed with no whitespace errors.
+
+### Files changed for review fixes
+
+- `src/founder-export-card/controller.ts`
+- `tests/founder-export-card/controller.test.ts`
+- `tests/http/founder-export-card-client.test.ts`
+- `.superpowers/sdd/task-11-report.md`
+
+### Self-review
+
+The raw URL is now accepted only if its byte-for-byte spelling is canonical; no URL parser normalization can widen that acceptance. The timer callback clears the active private URL before disabling the UI, while normal invalid click handling cancels any pending timer. Timer setup is dependency-injected for deterministic tests and is fail-closed if the scheduler throws. The pre-existing progress file was not modified or staged.
