@@ -20,6 +20,13 @@ Set `DATABASE_URL` to the copied Supabase Session Pooler connection for the leas
 
 Keep both switches false through deployment and all pre-rollout checks. `LINKEDIN_PUBLISH_ENABLED` is the master gate for text and image posts. `LINKEDIN_IMAGE_PUBLISH_ENABLED` is an additional gate required whenever a draft contains images. Enabling a switch makes the app-only path available; it never authorizes an individual post or makes publishing automatic.
 
+For the current single-user production service, the owner completed those
+checks and explicitly approved both switches as `true`. Preserve that approved
+production state unless the owner asks to change it. Even while enabled, an
+individual post still requires an exact immutable preview, inspection, and a
+separate explicit publish instruction in the interactive review card. Scheduled
+or founder-research flows receive no publish capability.
+
 The active lines in [.env.example](../../.env.example) are copyable local-development defaults and require a local PostgreSQL server. Its production reference entries are commented; set their real values only in Railway. Leave `LINKEDIN_REDIRECT_URI` unset until the later LinkedIn authorization phase, then set it as host-only configuration (not a secret) to `BASE_URL/linkedin/callback`.
 
 ## 2. Configure Supabase before connecting the service
@@ -122,7 +129,7 @@ Use ChatGPT on the web. For Business, an admin or owner must enable Developer mo
 https://<railway-service-domain>/mcp
 ```
 
-Choose OAuth authentication, click **Scan Tools**, complete the browser login and explicit consent, and wait for the scan to finish before creating the private app. Confirm that ChatGPT can initialize it and list the approved tools. Then run a read-only YC search and a private draft flow. Keep both publishing switches false; no LinkedIn publish, message, connection request, or automated posting is part of this deployment check.
+Choose OAuth authentication, click **Scan Tools**, complete the browser login and explicit consent, and wait for the scan to finish before creating the private app. Confirm that ChatGPT can initialize it and list the approved tools. Then run a read-only YC search and a private draft flow. During an initial rollout, keep both publishing switches false until the review-card checks in section 7 pass. For this already-approved single-user production deployment, confirm the two existing switches remain true without changing them. No LinkedIn publish, message, connection request, or automated posting is part of the founder-research connector check.
 
 Confirm the tool boundary after every connector refresh:
 
@@ -149,6 +156,32 @@ export_founder_research_workbook
 ```
 
 Also confirm the private founder-research export card renders its run summary and **Download Excel** control. Do not expose, copy, log, screenshot, or paste a download capability while checking it. The card receives that capability privately; it is not part of model-visible output. The check is incomplete if a founder tool is missing, an unexpected founder tool appears, or the card/control is absent.
+
+The production rollout evidence for the connector refresh is:
+
+```text
+10-company workbook
+Rows: 10
+Checksum: 163e77dbdbb3f59da10f2d191373b2bc4b64d518f3c06bab27a9a36d97b7df74
+Expires: 2026-08-02T11:09:07.955Z
+
+50-company workbook
+Rows: 50
+Checksum: 2f984f1945a5546c9d34d48ac22478101f4dfe8cf41f0b98872921b8bf964957
+Expires: 2026-08-02T11:11:48.871Z
+```
+
+Both pilots produced durable `NEEDS_PUBLIC_SEARCH` work, exact database/workbook
+counters, and zero LinkedIn requests. Workbooks support up to 500 founder rows
+across at most 50 selected companies; they fail safely above that row cap and
+also retain the 640 KiB serialized-input and 5 MiB XLSX limits.
+
+After download, LinkedIn remains manual: open each candidate URL yourself,
+verify the name, founder role, and company, return to ChatGPT to explicitly
+record `CONFIRM` or `REJECT`, review the private connection-note draft, and then
+personally click **Connect** and decide whether to send the note. The MCP and
+ChatGPT never open LinkedIn, make the decision, click **Connect**, or send an
+invitation or message.
 
 ### Founder-research retention cleanup and rollback
 
@@ -193,6 +226,11 @@ Before requesting permission to enable either publishing switch, complete these 
 6. Interactively create an exact preview. With both switches still false, confirm publish is rejected before any LinkedIn request.
 7. Report the evidence and obtain explicit user approval before changing either switch. A first live post still requires a new exact preview, inspection of the locked card, explicit confirmation, and one deliberate publish attempt.
 
+The current single-user production deployment has already completed this
+approval checkpoint and intentionally keeps both switches true. This does not
+change the schedule boundary, the exact-preview requirement, or the separate
+per-post publish instruction.
+
 The publish state machine does not automatically retry. `media_upload_failed` and `publish_failed` are definite terminal failures. `media_upload_unknown` and `publish_unknown` are terminal ambiguous outcomes. For `publish_unknown`, manually inspect the connected member's LinkedIn activity before creating a new draft version or attempt; the original capability is consumed and must never be retried.
 
 ## Failure diagnostics
@@ -208,4 +246,4 @@ The publish state machine does not automatically retry. `media_upload_failed` an
 | `publish_unknown` | Do not retry. Inspect LinkedIn manually for the exact content before creating a new version and preview. |
 | Any secret appears in output | Revoke or rotate it using the provider, remove it from the exposed location, and repeat only the affected validation. |
 
-Do not mark the production deployment complete until the live smoke, OAuth audience, Railway readiness, private Storage/JWT gate, ChatGPT connector refresh, morning boundary, and disabled-switch checks above have all succeeded with both publishing switches false.
+Do not mark an initial production deployment complete until the live smoke, OAuth audience, Railway readiness, private Storage/JWT gate, ChatGPT connector refresh, and morning boundary checks have succeeded with publishing disabled. If the owner later explicitly approves publishing, record that approval, preserve the app-only exact-preview and per-post confirmation gates, and verify the approved switch state without changing it. For the current founder-research rollout, the remaining completion step is the user's connector Refresh/Scan and confirmation of the six tools plus Download Excel card.
