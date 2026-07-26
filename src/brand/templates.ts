@@ -16,7 +16,11 @@ export type BrandTextRectangles = Readonly<{
 }>;
 
 export type BrandTemplate = Readonly<{
-  id: "editorial-statement-v1" | "editorial-metaphor-v1";
+  id:
+    | "editorial-statement-v1"
+    | "editorial-evidence-v1"
+    | "editorial-model-v1"
+    | "editorial-metaphor-v1";
   version: 1;
   mode: BrandVisualMode;
   width: 1080;
@@ -69,9 +73,33 @@ export const EDITORIAL_METAPHOR_TEMPLATE: BrandTemplate = Object.freeze({
   requiresSourceImage: true
 });
 
+export const EDITORIAL_EVIDENCE_TEMPLATE: BrandTemplate = Object.freeze({
+  id: "editorial-evidence-v1",
+  version: 1,
+  mode: "EDITORIAL_EVIDENCE",
+  width: 1080,
+  height: 1350,
+  safeTextRectangles: textRectangles(rectangle(96, 245, 888, 790)),
+  imageZone: rectangle(96, 780, 888, 280),
+  requiresSourceImage: false
+});
+
+export const EDITORIAL_MODEL_TEMPLATE: BrandTemplate = Object.freeze({
+  id: "editorial-model-v1",
+  version: 1,
+  mode: "EDITORIAL_MODEL",
+  width: 1080,
+  height: 1350,
+  safeTextRectangles: textRectangles(rectangle(96, 120, 888, 970)),
+  imageZone: rectangle(96, 720, 888, 360),
+  requiresSourceImage: false
+});
+
 const TEMPLATE_BY_MODE: Readonly<Record<BrandVisualMode, BrandTemplate>> =
   Object.freeze({
     EDITORIAL_STATEMENT: EDITORIAL_STATEMENT_TEMPLATE,
+    EDITORIAL_EVIDENCE: EDITORIAL_EVIDENCE_TEMPLATE,
+    EDITORIAL_MODEL: EDITORIAL_MODEL_TEMPLATE,
     EDITORIAL_METAPHOR: EDITORIAL_METAPHOR_TEMPLATE
   });
 

@@ -16,6 +16,7 @@ import {
   uniqueIndex,
   uuid
 } from "drizzle-orm/pg-core";
+import type { BrandVisualContent } from "../brand/content.js";
 
 export const careerMcp = pgSchema("career_mcp");
 
@@ -320,6 +321,7 @@ export const brandVisualBriefs = careerMcp.table("brand_visual_briefs", {
   topicLabel: text("topic_label"),
   generationPrompt: text("generation_prompt").notNull(),
   negativeConstraintsJson: jsonb("negative_constraints_json").$type<string[]>().notNull(),
+  visualContentJson: jsonb("visual_content_json").$type<BrandVisualContent>(),
   state: text("state").notNull(),
   createdAt: timestamptz("created_at").notNull()
 }, (table) => [
@@ -338,7 +340,12 @@ export const brandVisualBriefs = careerMcp.table("brand_visual_briefs", {
     .on(table.brandProfileId, table.brandProfileVersion),
   index("brand_visual_briefs_owner_created_idx").on(table.ownerSubject, table.createdAt),
   check("brand_visual_briefs_mode_check",
-    sql`${table.visualMode} in ('EDITORIAL_STATEMENT','EDITORIAL_METAPHOR')`),
+    sql`${table.visualMode} in (
+      'EDITORIAL_STATEMENT',
+      'EDITORIAL_EVIDENCE',
+      'EDITORIAL_MODEL',
+      'EDITORIAL_METAPHOR'
+    )`),
   check("brand_visual_briefs_state_check", sql`${table.state} in ('ready','rendered')`)
 ]);
 

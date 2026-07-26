@@ -26,7 +26,10 @@ it("uses safe DOM operations and no executable third-party content", async () =>
   expect(source).toContain("referrerPolicy = \"no-referrer\"");
   expect(source).toContain("image.alt = item.altText");
   expect(source).toContain("safePostId.textContent = view.postId");
-  expect(source).toContain("safeBrandSeries.textContent = view.brand.seriesName");
+  expect(source).toContain("safeBriefTitle.textContent = view.dailyBrief.title");
+  expect(source).toContain("safeBriefSources.replaceChildren");
+  expect(source).toContain('link.rel = "noopener noreferrer"');
+  expect(source).not.toContain("safeBrandSeries");
   expect(source).toContain("safeBrandTemplate.textContent");
   expect(source).toContain("safeBrandHook.textContent = view.brand.coverHook");
   expect(source).toContain("abbreviatedChecksum(view.brand.renderChecksum)");

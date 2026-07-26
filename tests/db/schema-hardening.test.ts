@@ -312,6 +312,42 @@ describe("foreign-key indexing", () => {
   });
 });
 
+describe("editorial intelligence brief schema", () => {
+  it("stores optional structured content and allows all four reviewed visual modes", async () => {
+    const columns = await queryTestDatabase<{
+      column_name: string;
+      data_type: string;
+      is_nullable: string;
+    }>(db, `
+      select column_name, data_type, is_nullable
+      from information_schema.columns
+      where table_schema = 'career_mcp'
+        and table_name = 'brand_visual_briefs'
+        and column_name = 'visual_content_json'
+    `);
+    const constraint = await queryTestDatabase<{
+      definition: string;
+    }>(db, `
+      select pg_get_constraintdef(oid) as definition
+      from pg_constraint
+      where connamespace = 'career_mcp'::regnamespace
+        and conrelid = 'career_mcp.brand_visual_briefs'::regclass
+        and conname = 'brand_visual_briefs_mode_check'
+    `);
+
+    expect(columns).toEqual([{
+      column_name: "visual_content_json",
+      data_type: "jsonb",
+      is_nullable: "YES"
+    }]);
+    expect(constraint).toHaveLength(1);
+    expect(constraint[0]?.definition).toContain("EDITORIAL_STATEMENT");
+    expect(constraint[0]?.definition).toContain("EDITORIAL_EVIDENCE");
+    expect(constraint[0]?.definition).toContain("EDITORIAL_MODEL");
+    expect(constraint[0]?.definition).toContain("EDITORIAL_METAPHOR");
+  });
+});
+
 describe("brand source-media exclusivity", () => {
   it("backfills duplicate same-purpose rows into one durable claim each", async () => {
     const client = await createPreClaimDatabase();

@@ -1993,9 +1993,13 @@ export function createRepositories(database: Database) {
           }
           if (
             (brief.visualMode === "EDITORIAL_STATEMENT" && sourceMediaId !== undefined)
+            || (brief.visualMode === "EDITORIAL_EVIDENCE" && sourceMediaId !== undefined)
+            || (brief.visualMode === "EDITORIAL_MODEL" && sourceMediaId !== undefined)
             || (brief.visualMode === "EDITORIAL_METAPHOR" && sourceMediaId === undefined)
             || (
               brief.visualMode !== "EDITORIAL_STATEMENT"
+              && brief.visualMode !== "EDITORIAL_EVIDENCE"
+              && brief.visualMode !== "EDITORIAL_MODEL"
               && brief.visualMode !== "EDITORIAL_METAPHOR"
             )
           ) {

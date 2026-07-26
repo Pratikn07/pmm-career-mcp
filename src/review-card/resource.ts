@@ -34,12 +34,25 @@ function shell(baseUrl: string, storageOrigin: string): string {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>LinkedIn post review</title>
+  <title>Daily PMM review package</title>
   <style>#post-text { white-space: pre-wrap; overflow-wrap: anywhere; }</style>
 </head>
 <body>
   <main id="review-root" data-storage-origin="${storageOrigin}" aria-labelledby="review-title">
-    <h1 id="review-title">LinkedIn post review</h1>
+    <h1 id="review-title">Daily PMM review package</h1>
+    <section id="daily-brief" aria-labelledby="brief-title" hidden>
+      <h2 id="brief-title"></h2>
+      <p><strong>Decision:</strong> <span id="brief-decision"></span></p>
+      <h3>Strongest signal</h3>
+      <p id="brief-signal"></p>
+      <h3>Why it matters</h3>
+      <p id="brief-why"></p>
+      <h3>Bhagyashree’s angle</h3>
+      <p id="brief-angle"></p>
+      <p><strong>Confidence:</strong> <span id="brief-confidence"></span></p>
+      <h3>Sources</h3>
+      <ul id="brief-sources"></ul>
+    </section>
     <section aria-labelledby="content-title">
       <h2 id="content-title">Exact draft</h2>
       <p id="post-text"></p>
@@ -58,7 +71,6 @@ function shell(baseUrl: string, storageOrigin: string): string {
     <section id="brand-provenance" aria-labelledby="brand-title" hidden>
       <h2 id="brand-title">Brand provenance</h2>
       <dl>
-        <dt>Series</dt><dd id="brand-series"></dd>
         <dt>Brand profile</dt><dd id="brand-profile-version"></dd>
         <dt>Template</dt><dd id="brand-template"></dd>
         <dt>Cover hook</dt><dd id="brand-hook"></dd>
@@ -108,12 +120,12 @@ export function registerLinkedInReviewCardResource(
   };
 
   server.registerResource("linkedin-review-card", LINKEDIN_REVIEW_CARD_URI, {
-    title: "LinkedIn post review",
-    description: "Review an exact private LinkedIn draft before any app-only preview or publish action.",
+    title: "Daily PMM review package",
+    description: "Review the daily research brief, exact private LinkedIn draft, and completed ordered images before any app-only preview or publish action.",
     mimeType: "text/html+skybridge",
     _meta: {
       ui,
-      "openai/widgetDescription": "Review the full text, ordered images, alt text, visibility, version, and checksum.",
+      "openai/widgetDescription": "Review the daily PMM brief first, followed by the full post, completed ordered images, alt text, visibility, version, and checksum.",
       "openai/widgetPrefersBorder": true,
       "openai/widgetDomain": baseUrl,
       "openai/widgetCSP": csp

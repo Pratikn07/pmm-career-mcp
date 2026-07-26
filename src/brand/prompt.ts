@@ -85,7 +85,7 @@ export function buildSourceArtPrompt(
   ].join(", ");
 
   const generationPrompt = [
-    "Create a restrained premium editorial visual for a Product Marketing field note.",
+    "Create restrained premium source art for a personal-brand Product Marketing editorial visual.",
     `Use a ${palette} palette.`,
     "Compose for a 4:5 LinkedIn cover.",
     compositionInstruction(template),

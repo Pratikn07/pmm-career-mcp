@@ -59,24 +59,34 @@ The model-visible tools may research, save or revise a private draft, attach or 
 
 Every newly created draft, including its first text-only version, uses the whole-post checksum format and can enter exact review without a forced revision. Drafts stored before that format remain readable, but exact review rejects them; revise a legacy draft to create a new immutable current-format version before opening an exact preview.
 
-Use this exact instruction for the morning ChatGPT schedule:
+Use this exact instruction for the morning ChatGPT schedule. The current
+`list_post_history` action requires a known draft ID, so it must not be used as
+an initial recent-post discovery step:
 
-> Research today's approved PMM topic and save a private LinkedIn draft in PMM
-> Career MCP. Use the active PMM FIELD NOTES brand profile. Create a short,
-> curiosity-driven cover hook that does not explain the post. Save a branded
-> visual brief and render one private editorial cover. If metaphor source-image
-> generation is unavailable in this scheduled run, save the brief and stop.
-> Do not create an exact preview, do not upload anything to LinkedIn, and do not
-> publish. Notify me when the private draft is ready, then stop.
+> Run Bhagyashree Nandoskar's daily PMM Career OS workflow. Research today's
+> strongest approved PMM signal, use available conversation context to avoid
+> repetition, and present the concise Daily
+> PMM Career Brief first. Choose one action. If the action is a post candidate,
+> save the final text with `draft_linkedin_post`, create an
+> `EDITORIAL_MODEL` or `EDITORIAL_EVIDENCE` brief with exact structured content,
+> render and attach one 1080x1350 branded image, then call
+> `open_linkedin_review_card` for the newest immutable version with
+> `expectedImageCount: 1` and the Daily PMM Career Brief. The review card must be
+> the final item so I see the analysis first and the complete post-and-image
+> package last. Do not use or display PMM FIELD NOTES. Do not create an exact
+> preview, upload anything to LinkedIn, create a LinkedIn authorization URL, or
+> publish. Stop after opening the complete private review package.
 
 Use the Brand Studio tools in these orders:
 
 ```text
-Statement: draft → brief → render → open review card
-Metaphor: draft → brief → ChatGPT image → render with source → open review card
+Research-led model: daily brief → draft → model brief → render → open complete review card
+Research-led evidence: daily brief → draft → evidence brief → render → open complete review card
+Statement: daily brief → draft → statement brief → render → open complete review card
+Metaphor (rare): daily brief → draft → metaphor brief → source art → render → open complete review card
 ```
 
-For either sequence, only the final branded PNG is attached to the post draft. Source art is kept private and is never attached or published. If a scheduled ChatGPT run cannot pass a generated metaphor source image to the MCP, it must save the text draft plus the branded visual brief and stop. Generate or upload the source image later in the interactive conversation. Do not add an OpenAI API key, paid image service, or secret Supabase key as a workaround.
+`EDITORIAL_MODEL` is the default for frameworks, stages, systems, comparisons, and operating models. `EDITORIAL_EVIDENCE` is the default when the source-backed pattern itself is the visual story. These modes are rendered deterministically by the MCP and need no separate ChatGPT image-generation step. Only the final branded PNG is attached to the post draft. Metaphor source art is kept private and is never attached or published. If a scheduled run chooses the rare metaphor mode but cannot pass a generated source image to the MCP, it must save the text draft plus the branded visual brief and stop. Do not add an OpenAI API key, paid image service, or secret Supabase key as a workaround.
 
 Publishing uses one deliberate, no-retry attempt. `media_upload_failed` and `publish_failed` are definite terminal failures; create a new draft version and exact preview before another deliberate attempt. `media_upload_unknown` and `publish_unknown` are terminal ambiguous states. For `publish_unknown`, inspect LinkedIn manually before doing anything else—never retry the same capability.
 

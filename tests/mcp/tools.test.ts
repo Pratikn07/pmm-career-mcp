@@ -9,6 +9,7 @@ import {
   attachLinkedInPostImagesOutput,
   createBrandedVisualBriefInput,
   createBrandedVisualBriefOutput,
+  openLinkedInReviewCardInput,
   rankNetworkingTargetsInput,
   renderBrandedLinkedInCoverInput,
   renderBrandedLinkedInCoverOutput,
@@ -86,6 +87,39 @@ it("publishes strict bounded Brand Studio inputs", () => {
   expect(createBrandedVisualBriefInput.safeParse({ ...brief, coverHook: "x".repeat(73) }).success).toBe(false);
   expect(createBrandedVisualBriefInput.safeParse({ ...brief, conceptSummary: "x".repeat(501) }).success).toBe(false);
   expect(createBrandedVisualBriefInput.safeParse({ ...brief, topicLabel: "x".repeat(25) }).success).toBe(false);
+  const modelBrief = {
+    ...brief,
+    coverHook: "The distance is getting shorter",
+    visualMode: "EDITORIAL_MODEL" as const,
+    visualContent: {
+      kind: "model" as const,
+      subhead: "What early-stage PMM is starting to look like",
+      stages: [
+        { number: "01" as const, label: "UNDERSTAND", items: ["Customer research", "Market intelligence"] },
+        { number: "02" as const, label: "TRANSLATE", items: ["Positioning", "Messaging", "Category narrative"] },
+        { number: "03" as const, label: "EXECUTE", items: ["Launch", "Enablement", "Experimentation"] }
+      ],
+      evidenceLine: "Observed across selected current YC startup roles"
+    }
+  };
+  expect(createBrandedVisualBriefInput.parse(modelBrief)).toEqual(modelBrief);
+  expect(createBrandedVisualBriefInput.safeParse({
+    ...modelBrief,
+    visualContent: undefined
+  }).success).toBe(false);
+  expect(createBrandedVisualBriefInput.safeParse({
+    ...modelBrief,
+    visualContent: {
+      kind: "evidence",
+      subhead: "Three current signals",
+      signals: [
+        { label: "Signal one", detail: "Detail one" },
+        { label: "Signal two", detail: "Detail two" },
+        { label: "Signal three", detail: "Detail three" }
+      ],
+      evidenceLine: "Observed in current sources"
+    }
+  }).success).toBe(false);
   expect(renderBrandedLinkedInCoverInput.parse(render)).toEqual(render);
   expect(renderBrandedLinkedInCoverInput.safeParse({ ...render, extra: true }).success).toBe(false);
   expect(renderBrandedLinkedInCoverInput.safeParse({
@@ -140,6 +174,39 @@ it("counts LinkedIn image alt text by Unicode code point in input and output sch
   expect(attachLinkedInPostImagesInput.safeParse(attach(alt121)).success).toBe(false);
   expect(setLinkedInPostImagesInput.safeParse(set(alt121)).success).toBe(false);
   expect(attachLinkedInPostImagesOutput.safeParse(output(alt121)).success).toBe(false);
+});
+
+it("accepts only HTTP or HTTPS source links in the daily review brief", () => {
+  const review = {
+    postId: BRAND_POST_ID,
+    version: 1,
+    expectedImageCount: 1,
+    dailyBrief: {
+      title: "Daily PMM Career Brief — July 26, 2026",
+      decision: "POST CANDIDATE" as const,
+      strongestSignal: "A current PMM signal.",
+      whyItMatters: "It changes how PMM work is evaluated.",
+      distinctiveAngle: "The distance between strategy and execution is getting shorter.",
+      confidence: "High",
+      sources: [{ title: "Current source", url: "https://example.com/current" }]
+    }
+  };
+
+  expect(openLinkedInReviewCardInput.safeParse(review).success).toBe(true);
+  expect(openLinkedInReviewCardInput.safeParse({
+    ...review,
+    dailyBrief: {
+      ...review.dailyBrief,
+      sources: [{ title: "Unsafe source", url: "javascript:alert(1)" }]
+    }
+  }).success).toBe(false);
+  expect(openLinkedInReviewCardInput.safeParse({
+    ...review,
+    dailyBrief: {
+      ...review.dailyBrief,
+      sources: [{ title: "Unsupported source", url: "ftp://example.com/file" }]
+    }
+  }).success).toBe(false);
 });
 
 function scoringTarget(overrides: Partial<ScoreTargetInput> = {}): ScoreTargetInput {
@@ -302,6 +369,7 @@ function successfulDependencies(): CareerMcpDependencies {
     topicLabel: "POSITIONING",
     generationPrompt: "Create text-free restrained abstract editorial geometry.",
     negativeConstraintsJson: ["readable text", "logos", "watermarks"],
+    visualContentJson: null,
     state: "ready",
     createdAt: timestamp
   };
@@ -984,6 +1052,18 @@ it("opens a non-writing review card and keeps signed URLs widget-private", async
     }]
   };
   const previewCreate = vi.fn();
+  const dailyBrief = {
+    title: "Daily PMM Career Brief — July 26, 2026",
+    decision: "POST CANDIDATE" as const,
+    strongestSignal: "Early-stage PMM strategy is moving closer to execution.",
+    whyItMatters: "PMM insight increasingly needs to become usable GTM output.",
+    distinctiveAngle: "The distance between strategy and execution is getting shorter.",
+    confidence: "High",
+    sources: [{
+      title: "Selected current YC startup roles",
+      url: "https://www.ycombinator.com/jobs"
+    }]
+  };
   const getProvenanceForMedia = vi.fn(async () => ({
     seriesName: "PMM FIELD NOTES",
     profileVersion: 1,
@@ -1021,7 +1101,12 @@ it("opens a non-writing review card and keeps signed URLs widget-private", async
 
   const result = await client.callTool({
     name: "open_linkedin_review_card",
-    arguments: { postId: post.id, version: post.version }
+    arguments: {
+      postId: post.id,
+      version: post.version,
+      expectedImageCount: 1,
+      dailyBrief
+    }
   });
   await Promise.all([client.close(), server.close()]);
 
@@ -1029,6 +1114,7 @@ it("opens a non-writing review card and keeps signed URLs widget-private", async
   expect(result.structuredContent).toEqual({
     data: {
       post,
+      dailyBrief,
       brand: {
         seriesName: "PMM FIELD NOTES",
         profileVersion: 1,
@@ -1051,6 +1137,54 @@ it("opens a non-writing review card and keeps signed URLs widget-private", async
   expect(JSON.stringify(result.content)).not.toContain("supabase.co");
   expect(JSON.stringify(result)).not.toContain("request-token-that-must-not-leak");
   expect(previewCreate).not.toHaveBeenCalled();
+});
+
+it("refuses to open an incomplete post-and-image review package", async () => {
+  const timestamp = FIXED_NOW.toISOString();
+  const post = {
+    id: "123e4567-e89b-12d3-a456-426614174001",
+    versionId: "123e4567-e89b-12d3-a456-426614174002",
+    text: "Exact private text",
+    visibility: "PUBLIC" as const,
+    version: 1,
+    checksum: "b".repeat(64),
+    state: "draft",
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    media: []
+  };
+  const deps = dependencies();
+  deps.media = {
+    attachFiles: vi.fn(),
+    setMedia: vi.fn(),
+    getVersion: vi.fn(async () => post),
+    createSignedUrls: vi.fn(async () => [])
+  };
+  const server = createCareerMcpServer(deps, {
+    requestAuthContext: Object.freeze({
+      subject: "123e4567-e89b-12d3-a456-426614174000",
+      accessToken: "request-token"
+    })
+  });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "test", version: "1.0.0" });
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+
+  const result = await client.callTool({
+    name: "open_linkedin_review_card",
+    arguments: {
+      postId: post.id,
+      version: post.version,
+      expectedImageCount: 1
+    }
+  });
+  await Promise.all([client.close(), server.close()]);
+
+  expect(result.isError).toBe(true);
+  expect(result.structuredContent).toEqual({
+    data: { error: { code: "CONFLICT" } }
+  });
+  expect(deps.media.createSignedUrls).not.toHaveBeenCalled();
 });
 
 it("reports the independent image-publishing switch as a boolean only", async () => {
@@ -1096,6 +1230,10 @@ it("makes publishing, research, and branded-cover safety rules prominent in inst
   expect(instructions).toContain("stop and report the validation error; never silently substitute or retry with altered content");
   expect(instructions).toContain("curiosity covers, not post summaries");
   expect(instructions).toContain("source art must contain no text");
+  expect(instructions).toContain("open_linkedin_review_card");
+  expect(instructions).toContain("expectedImageCount: 1");
+  expect(instructions).toContain("dailyBrief");
+  expect(instructions).toContain("If the daily decision is POST CANDIDATE");
 });
 
 it("serves MCP initialization through stateless Streamable HTTP", async () => {

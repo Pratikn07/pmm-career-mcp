@@ -6,6 +6,12 @@ const shortText = z.string().trim().min(1).max(500);
 const mediumText = z.string().trim().min(1).max(2_000);
 const longText = z.string().max(4_000);
 const url = z.string().url().max(2_048);
+const httpUrl = url.refine((value) => {
+  const protocol = new URL(value).protocol;
+  return protocol === "http:" || protocol === "https:";
+}, {
+  message: "URL must use HTTP or HTTPS"
+});
 const timestamp = z.string().datetime({ offset: true });
 const confidence = z.number().finite().min(0).max(1);
 const scoreComponent = z.number().finite().min(0).max(100);
@@ -144,14 +150,110 @@ export const revisePostInput = z.object({
   postId: id,
   text: z.string().trim().min(1).max(3_000)
 }).strict();
-export const createBrandedVisualBriefInput = z.object({
+const brandVisualBriefBase = {
   postId: id,
   expectedVersion: z.number().int().positive(),
   coverHook: z.string().trim().min(1).max(72),
   conceptSummary: z.string().trim().min(1).max(500),
-  visualMode: z.enum(["EDITORIAL_STATEMENT", "EDITORIAL_METAPHOR"]),
   topicLabel: z.string().trim().min(1).max(24).optional()
+} as const;
+const editorialModelContentSchema = z.object({
+  kind: z.literal("model"),
+  subhead: z.string().trim().min(1).max(80),
+  stages: z.tuple([
+    z.object({
+      number: z.literal("01"),
+      label: z.string().trim().min(1).max(20),
+      items: z.array(z.string().trim().min(1).max(36)).min(2).max(3)
+    }).strict(),
+    z.object({
+      number: z.literal("02"),
+      label: z.string().trim().min(1).max(20),
+      items: z.array(z.string().trim().min(1).max(36)).min(2).max(3)
+    }).strict(),
+    z.object({
+      number: z.literal("03"),
+      label: z.string().trim().min(1).max(20),
+      items: z.array(z.string().trim().min(1).max(36)).min(2).max(3)
+    }).strict()
+  ]),
+  evidenceLine: z.string().trim().min(1).max(100)
 }).strict();
+const editorialEvidenceContentSchema = z.object({
+  kind: z.literal("evidence"),
+  subhead: z.string().trim().min(1).max(80),
+  signals: z.tuple([
+    z.object({
+      label: z.string().trim().min(1).max(20),
+      detail: z.string().trim().min(1).max(72)
+    }).strict(),
+    z.object({
+      label: z.string().trim().min(1).max(20),
+      detail: z.string().trim().min(1).max(72)
+    }).strict(),
+    z.object({
+      label: z.string().trim().min(1).max(20),
+      detail: z.string().trim().min(1).max(72)
+    }).strict()
+  ]),
+  evidenceLine: z.string().trim().min(1).max(100)
+}).strict();
+export const createBrandedVisualBriefInput = z.object({
+  ...brandVisualBriefBase,
+  visualMode: z.enum([
+    "EDITORIAL_STATEMENT",
+    "EDITORIAL_EVIDENCE",
+    "EDITORIAL_MODEL",
+    "EDITORIAL_METAPHOR"
+  ]),
+  visualContent: z.union([
+    editorialEvidenceContentSchema,
+    editorialModelContentSchema
+  ]).optional()
+}).strict().superRefine((value, context) => {
+  if (
+    (value.visualMode === "EDITORIAL_EVIDENCE" || value.visualMode === "EDITORIAL_MODEL")
+    && value.visualContent === undefined
+  ) {
+    context.addIssue({
+      code: "custom",
+      path: ["visualContent"],
+      message: `${value.visualMode} requires structured visualContent`
+    });
+  }
+  if (
+    (value.visualMode === "EDITORIAL_STATEMENT" || value.visualMode === "EDITORIAL_METAPHOR")
+    && value.visualContent !== undefined
+  ) {
+    context.addIssue({
+      code: "custom",
+      path: ["visualContent"],
+      message: `${value.visualMode} does not accept structured visualContent`
+    });
+  }
+  if (
+    value.visualMode === "EDITORIAL_MODEL"
+    && value.visualContent !== undefined
+    && value.visualContent.kind !== "model"
+  ) {
+    context.addIssue({
+      code: "custom",
+      path: ["visualContent", "kind"],
+      message: "EDITORIAL_MODEL requires model visualContent"
+    });
+  }
+  if (
+    value.visualMode === "EDITORIAL_EVIDENCE"
+    && value.visualContent !== undefined
+    && value.visualContent.kind !== "evidence"
+  ) {
+    context.addIssue({
+      code: "custom",
+      path: ["visualContent", "kind"],
+      message: "EDITORIAL_EVIDENCE requires evidence visualContent"
+    });
+  }
+});
 export const openAiFileSchema = z.object({
   download_url: z.string().url(),
   file_id: z.string().min(1).max(512),
@@ -182,9 +284,31 @@ export const setLinkedInPostImagesInput = z.object({
     altText: imageAltText
   }).strict()).max(4)
 }).strict();
+const dailyBriefSchema = z.object({
+  title: z.string().trim().min(1).max(160),
+  decision: z.enum([
+    "POST CANDIDATE",
+    "LEARN",
+    "NETWORK",
+    "SAVE OPPORTUNITY",
+    "BUILD PORTFOLIO",
+    "PREPARE INTERVIEW",
+    "NO PUBLIC ACTION"
+  ]),
+  strongestSignal: z.string().trim().min(1).max(1_000),
+  whyItMatters: z.string().trim().min(1).max(1_000),
+  distinctiveAngle: z.string().trim().min(1).max(1_000),
+  confidence: z.string().trim().min(1).max(100),
+  sources: z.array(z.object({
+    title: z.string().trim().min(1).max(300),
+    url: httpUrl
+  }).strict()).max(20)
+}).strict();
 export const openLinkedInReviewCardInput = z.object({
   postId: id,
-  version: z.number().int().positive()
+  version: z.number().int().positive(),
+  expectedImageCount: z.number().int().min(0).max(4).optional(),
+  dailyBrief: dailyBriefSchema.optional()
 }).strict();
 export const createExactLinkedInPreviewInput = z.object({
   postId: id,
@@ -341,7 +465,12 @@ const brandVisualBriefSchema = z.object({
   templateId: id,
   templateVersion: z.number().int().positive(),
   promptFormatVersion: z.number().int().positive(),
-  visualMode: z.enum(["EDITORIAL_STATEMENT", "EDITORIAL_METAPHOR"]),
+  visualMode: z.enum([
+    "EDITORIAL_STATEMENT",
+    "EDITORIAL_EVIDENCE",
+    "EDITORIAL_MODEL",
+    "EDITORIAL_METAPHOR"
+  ]),
   coverHook: z.string().max(72),
   conceptSummary: z.string().max(500),
   topicLabel: z.string().max(24).nullable(),
@@ -512,6 +641,7 @@ export const attachLinkedInPostImagesOutput = outputSchema(z.object({ post: post
 export const setLinkedInPostImagesOutput = outputSchema(z.object({ post: postDraftSchema }).strict());
 export const openLinkedInReviewCardOutput = outputSchema(z.object({
   post: postDraftSchema,
+  dailyBrief: dailyBriefSchema.optional(),
   brand: brandReviewProvenanceSchema.optional()
 }).strict());
 export const createExactLinkedInPreviewOutput = outputSchema(z.object({

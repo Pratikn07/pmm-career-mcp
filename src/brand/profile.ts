@@ -1,4 +1,8 @@
-export type BrandVisualMode = "EDITORIAL_STATEMENT" | "EDITORIAL_METAPHOR";
+export type BrandVisualMode =
+  | "EDITORIAL_STATEMENT"
+  | "EDITORIAL_EVIDENCE"
+  | "EDITORIAL_MODEL"
+  | "EDITORIAL_METAPHOR";
 
 export type PmmBrandProfile = Readonly<{
   version: 1;

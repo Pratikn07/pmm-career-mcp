@@ -42,6 +42,34 @@ const statementInput = {
   topicLabel: "POSITIONING"
 } as const;
 
+const modelInput = {
+  profile: DEFAULT_PMM_BRAND_PROFILE,
+  template: templateForMode("EDITORIAL_MODEL"),
+  coverHook: "The distance is getting shorter",
+  visualContent: {
+    kind: "model",
+    subhead: "What early-stage PMM is starting to look like",
+    stages: [
+      {
+        number: "01",
+        label: "UNDERSTAND",
+        items: ["Customer research", "Market intelligence"]
+      },
+      {
+        number: "02",
+        label: "TRANSLATE",
+        items: ["Positioning", "Messaging", "Category narrative"]
+      },
+      {
+        number: "03",
+        label: "EXECUTE",
+        items: ["Launch", "Enablement", "Experimentation"]
+      }
+    ],
+    evidenceLine: "Observed across selected current YC startup roles"
+  }
+} as const;
+
 function crc32(bytes: Uint8Array): number {
   let crc = 0xffffffff;
   for (const value of bytes) {
@@ -131,6 +159,46 @@ describe("bundled renderer assets", () => {
 });
 
 describe("buildCoverSvg", () => {
+  it("builds the approved editorial model without the retired series label", () => {
+    const svg = buildCoverSvg(modelInput);
+
+    expect(svg).toContain("THE DISTANCE IS GETTING SHORTER");
+    expect(svg).toContain("What early-stage PMM is starting to look like");
+    expect(svg).toContain("UNDERSTAND");
+    expect(svg).toContain("TRANSLATE");
+    expect(svg).toContain("EXECUTE");
+    expect(svg).toContain("Customer research");
+    expect(svg).toContain("Category narrative");
+    expect(svg).toContain("Observed across selected current YC startup roles");
+    expect(svg).toContain("BHAGYASHREE NANDOSKAR");
+    expect(svg).toContain("PRODUCT MARKETING");
+    expect(svg).not.toContain("PMM FIELD NOTES");
+  });
+
+  it("keeps maximum-length structured stage labels inside their columns", () => {
+    const svg = buildCoverSvg({
+      ...modelInput,
+      visualContent: {
+        ...modelInput.visualContent,
+        stages: [
+          {
+            ...modelInput.visualContent.stages[0],
+            label: "WIDE OPERATING MODEL"
+          },
+          modelInput.visualContent.stages[1],
+          modelInput.visualContent.stages[2]
+        ]
+      }
+    });
+
+    expect(svg).toContain("WIDE OPERATING");
+    expect(svg).toContain(">MODEL</text>");
+  });
+
+  it("does not render the retired series label on statement covers", () => {
+    expect(buildCoverSvg(statementInput)).not.toContain("PMM FIELD NOTES");
+  });
+
   it("normalizes and XML-escapes every caller-controlled string", () => {
     const callerMarkup = `A <svg/> & "quoted" 'mark'`;
     const svg = buildCoverSvg({
@@ -231,6 +299,25 @@ describe("buildCoverSvg", () => {
 });
 
 describe("renderBrandedCover", () => {
+  it("renders the approved editorial model as a deterministic 1080 by 1350 PNG", async () => {
+    const [first, second] = await Promise.all([
+      renderBrandedCover(modelInput),
+      renderBrandedCover(modelInput)
+    ]);
+
+    expect(first.bytes).toEqual(second.bytes);
+    expect(await sharp(first.bytes).metadata()).toMatchObject({
+      format: "png",
+      width: 1080,
+      height: 1350
+    });
+    expect(first.validation).toEqual({
+      fixedLabelsPresent: true,
+      textWithinSafeArea: true,
+      sourceImageUsed: false
+    });
+  }, 30_000);
+
   it("renders exactly one validated 1080 by 1350 PNG", async () => {
     const result = await renderBrandedCover(statementInput);
     const metadata = await sharp(result.bytes).metadata();

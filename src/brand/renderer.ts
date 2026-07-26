@@ -4,6 +4,12 @@ import sharp, { type Metadata, type OverlayOptions } from "sharp";
 import { DomainError } from "../domain/errors.js";
 import { fontPath } from "./assets.js";
 import {
+  validateBrandVisualContent,
+  type BrandVisualContent,
+  type EditorialEvidenceContent,
+  type EditorialModelContent
+} from "./content.js";
+import {
   DEFAULT_PMM_BRAND_PROFILE,
   type PmmBrandProfile
 } from "./profile.js";
@@ -51,6 +57,16 @@ const HOOK_LAYOUTS = Object.freeze({
     "5-6": Object.freeze({ fontSize: 96, lineHeight: 108, tier: "5-6" }),
     "7-8": Object.freeze({ fontSize: 82, lineHeight: 94, tier: "7-8" })
   }),
+  "editorial-evidence-v1": Object.freeze({
+    "2-4": Object.freeze({ fontSize: 98, lineHeight: 106, tier: "2-4" }),
+    "5-6": Object.freeze({ fontSize: 88, lineHeight: 96, tier: "5-6" }),
+    "7-8": Object.freeze({ fontSize: 78, lineHeight: 86, tier: "7-8" })
+  }),
+  "editorial-model-v1": Object.freeze({
+    "2-4": Object.freeze({ fontSize: 106, lineHeight: 106, tier: "2-4" }),
+    "5-6": Object.freeze({ fontSize: 98, lineHeight: 98, tier: "5-6" }),
+    "7-8": Object.freeze({ fontSize: 88, lineHeight: 90, tier: "7-8" })
+  }),
   "editorial-metaphor-v1": Object.freeze({
     "2-4": Object.freeze({ fontSize: 72, lineHeight: 82, tier: "2-4" }),
     "5-6": Object.freeze({ fontSize: 64, lineHeight: 74, tier: "5-6" }),
@@ -75,6 +91,7 @@ export type RenderBrandedCoverInput = Readonly<{
   template: BrandTemplate;
   coverHook: string;
   topicLabel?: string;
+  visualContent?: BrandVisualContent;
   sourceImageBytes?: Buffer;
 }>;
 
@@ -150,11 +167,16 @@ function canonicalTextInput(
   );
   const coverHook = input.coverHook;
   const topicLabel = input.topicLabel;
+  const visualContent = validateBrandVisualContent(
+    template.mode,
+    input.visualContent
+  );
   return Object.freeze({
     profile,
     template,
     coverHook,
-    ...(topicLabel === undefined ? {} : { topicLabel })
+    ...(topicLabel === undefined ? {} : { topicLabel }),
+    ...(visualContent === undefined ? {} : { visualContent })
   });
 }
 
@@ -390,6 +412,18 @@ function validatedSvgInput(
 }
 
 function buildCanonicalCoverSvg(input: RenderBrandedCoverInput): string {
+  if (input.template.mode === "EDITORIAL_MODEL") {
+    return buildEditorialModelSvg(
+      input,
+      input.visualContent as EditorialModelContent
+    );
+  }
+  if (input.template.mode === "EDITORIAL_EVIDENCE") {
+    return buildEditorialEvidenceSvg(
+      input,
+      input.visualContent as EditorialEvidenceContent
+    );
+  }
   const { hookLines: fitted, topic } = validatedSvgInput(
     input,
     createTextMeasurer()
@@ -416,14 +450,12 @@ function buildCanonicalCoverSvg(input: RenderBrandedCoverInput): string {
   return [
     `<svg xmlns="http://www.w3.org/2000/svg" width="${WIDTH}" height="${HEIGHT}" viewBox="0 0 ${WIDTH} ${HEIGHT}">`,
     `<defs>`,
-    clipPath("series-safe", rectangles.series),
     clipPath("topic-safe", rectangles.topic),
     clipPath("hook-safe", rectangles.hook),
     clipPath("signature-safe", rectangles.signature),
     clipPath("monogram-safe", rectangles.monogram),
     `</defs>`,
     `<g fill="${profile.palette.navy}">`,
-    `<text clip-path="url(#series-safe)" x="${rectangles.series.x}" y="${rectangles.series.y + 34}" font-family="${LABEL_FONT}" font-size="24" font-weight="600" letter-spacing="4">${escapeXml(profile.seriesName)}</text>`,
     topicText,
     `<text data-hook-tier="${fitted.layout.tier}" clip-path="url(#hook-safe)" font-family="${HEADLINE_FONT}" font-size="${fitted.layout.fontSize}" font-weight="600">${hookText}</text>`,
     `<g clip-path="url(#signature-safe)" font-family="${LABEL_FONT}">`,
@@ -438,15 +470,302 @@ function buildCanonicalCoverSvg(input: RenderBrandedCoverInput): string {
   ].join("");
 }
 
+function wrappedLines(
+  value: string,
+  maximumWidth: number,
+  maximumLines: number,
+  style: TextMeasurementStyle,
+  measureText: TextMeasurer
+): readonly string[] {
+  const words = value.split(" ");
+  const lines: string[] = [];
+  let current = "";
+  for (const word of words) {
+    const candidate = current.length === 0 ? word : `${current} ${word}`;
+    if (measureText(candidate, style) <= maximumWidth) {
+      current = candidate;
+      continue;
+    }
+    if (current.length === 0 || lines.length >= maximumLines - 1) {
+      throw validationError("visualContent", "text_fit");
+    }
+    lines.push(current);
+    current = word;
+  }
+  if (current.length > 0) {
+    lines.push(current);
+  }
+  if (
+    lines.length > maximumLines
+    || lines.some((line) => measureText(line, style) > maximumWidth)
+  ) {
+    throw validationError("visualContent", "text_fit");
+  }
+  return Object.freeze(lines);
+}
+
+function svgTextLines(
+  lines: readonly string[],
+  x: number,
+  firstBaseline: number,
+  lineHeight: number,
+  attributes: string
+): string {
+  return lines.map((line, index) =>
+    `<text x="${x}" y="${firstBaseline + index * lineHeight}" ${attributes}>${escapeXml(line)}</text>`
+  ).join("");
+}
+
+function structuredHeadline(
+  input: RenderBrandedCoverInput,
+  measureText: TextMeasurer
+): Readonly<{ text: string; svg: string; bottom: number }> {
+  const text = normalizeInline(input.coverHook, "coverHook").toLocaleUpperCase(
+    "en-US"
+  );
+  const characterCount = [...text].length;
+  if (
+    characterCount < 1
+    || characterCount > input.profile.hookRules.maxCharacters
+  ) {
+    throw validationError("coverHook", "character_count");
+  }
+  tierForWordCount(text.split(" ").length);
+  const style = {
+    fontFamily: HEADLINE_FONT,
+    fontSize: 102,
+    fontWeight: 600
+  } as const;
+  const lines = wrappedLines(text, 830, 4, style, measureText);
+  const firstBaseline = 170;
+  const lineHeight = 100;
+  return Object.freeze({
+    text,
+    svg: [
+      `<g data-cover-hook="${escapeXml(text)}" font-family="${HEADLINE_FONT}" font-size="102" font-weight="600" fill="${input.profile.palette.navy}">`,
+      svgTextLines(lines, 96, firstBaseline, lineHeight, ""),
+      `</g>`
+    ].join(""),
+    bottom: firstBaseline + (lines.length - 1) * lineHeight + 32
+  });
+}
+
+function structuredFooter(input: RenderBrandedCoverInput): string {
+  const { profile } = input;
+  return [
+    `<line x1="96" y1="1222" x2="984" y2="1222" stroke="${profile.palette.copper}" stroke-width="1.5"/>`,
+    `<text x="96" y="1300" font-family="${HEADLINE_FONT}" font-size="68" font-weight="600" fill="${profile.palette.copper}">${escapeXml(profile.monogram)}</text>`,
+    `<line x1="205" y1="1246" x2="205" y2="1310" stroke="${profile.palette.copper}" stroke-width="1.5"/>`,
+    `<text x="236" y="1270" font-family="${LABEL_FONT}" font-size="19" font-weight="600" letter-spacing="1.6" fill="${profile.palette.navy}">${escapeXml(profile.publicName)}</text>`,
+    `<text x="236" y="1303" font-family="${LABEL_FONT}" font-size="15" font-weight="500" letter-spacing="3.2" fill="${profile.palette.navy}">${escapeXml(profile.roleLine)}</text>`
+  ].join("");
+}
+
+function structuredSubhead(
+  value: string,
+  y: number,
+  input: RenderBrandedCoverInput,
+  measureText: TextMeasurer
+): Readonly<{ svg: string; bottom: number }> {
+  const style = {
+    fontFamily: LABEL_FONT,
+    fontSize: 25,
+    fontWeight: 500,
+    letterSpacing: 1.2
+  } as const;
+  const lines = wrappedLines(value, 800, 2, style, measureText);
+  return Object.freeze({
+    svg: [
+      `<g data-subhead="${escapeXml(value)}" font-family="${LABEL_FONT}" font-size="25" font-weight="500" letter-spacing="1.2" fill="${input.profile.palette.navy}">`,
+      svgTextLines(lines, 96, y, 34, ""),
+      `</g>`
+    ].join(""),
+    bottom: y + (lines.length - 1) * 34 + 12
+  });
+}
+
+function evidenceLineSvg(
+  value: string,
+  input: RenderBrandedCoverInput,
+  measureText: TextMeasurer
+): string {
+  const style = {
+    fontFamily: LABEL_FONT,
+    fontSize: 16,
+    fontWeight: 500
+  } as const;
+  const lines = wrappedLines(value, 770, 2, style, measureText);
+  return [
+    `<line x1="96" y1="1154" x2="984" y2="1154" stroke="${input.profile.palette.taupe}" stroke-width="1.5" stroke-dasharray="2 5"/>`,
+    `<circle cx="110" cy="1188" r="6" fill="${input.profile.palette.copper}"/>`,
+    `<g data-evidence-line="${escapeXml(value)}" font-family="${LABEL_FONT}" font-size="16" font-weight="500" fill="${input.profile.palette.navy}">`,
+    svgTextLines(lines, 130, 1194, 23, ""),
+    `</g>`
+  ].join("");
+}
+
+function buildEditorialModelSvg(
+  input: RenderBrandedCoverInput,
+  content: EditorialModelContent
+): string {
+  const measureText = createTextMeasurer();
+  const headline = structuredHeadline(input, measureText);
+  const ruleY = headline.bottom + 22;
+  const subhead = structuredSubhead(
+    content.subhead,
+    ruleY + 58,
+    input,
+    measureText
+  );
+  const stageTop = Math.max(720, subhead.bottom + 62);
+  const columnWidth = 260;
+  const columnGap = 55;
+  const columnXs = [96, 96 + columnWidth + columnGap, 96 + 2 * (columnWidth + columnGap)];
+  const stageSvg = content.stages.map((stage, stageIndex) => {
+    const x = columnXs[stageIndex]!;
+    let labelLines: readonly string[] | undefined;
+    let labelFontSize: number | undefined;
+    for (const fontSize of [18, 16, 14, 12, 10] as const) {
+      try {
+        labelLines = wrappedLines(
+          stage.label,
+          210,
+          2,
+          {
+            fontFamily: LABEL_FONT,
+            fontSize,
+            fontWeight: 600,
+            letterSpacing: 2.2
+          },
+          measureText
+        );
+        labelFontSize = fontSize;
+        break;
+      } catch (error) {
+        if (!(error instanceof DomainError) || error.code !== "VALIDATION_ERROR") {
+          throw error;
+        }
+      }
+    }
+    if (labelLines === undefined || labelFontSize === undefined) {
+      throw validationError("visualContent", "text_fit");
+    }
+    const labelSvg = [
+      `<g data-model-stage-label="${escapeXml(stage.label)}" font-family="${LABEL_FONT}" font-size="${labelFontSize}" font-weight="600" letter-spacing="2.2" fill="${input.profile.palette.navy}">`,
+      svgTextLines(labelLines, x, stageTop + 96, 22, ""),
+      `</g>`
+    ].join("");
+    const itemSvg = stage.items.map((item, itemIndex) => {
+      const style = {
+        fontFamily: LABEL_FONT,
+        fontSize: 18,
+        fontWeight: 500
+      } as const;
+      const lines = wrappedLines(item, 220, 2, style, measureText);
+      const y = stageTop + 180 + itemIndex * 62;
+      return [
+        `<circle cx="${x + 6}" cy="${y - 6}" r="4" fill="${input.profile.palette.copper}"/>`,
+        `<g data-model-item="${escapeXml(item)}" font-family="${LABEL_FONT}" font-size="18" font-weight="500" fill="${input.profile.palette.navy}">`,
+        svgTextLines(lines, x + 22, y, 24, ""),
+        `</g>`
+      ].join("");
+    }).join("");
+    return [
+      `<circle cx="${x + 42}" cy="${stageTop + 28}" r="28" fill="none" stroke="${input.profile.palette.copper}" stroke-width="1.5"/>`,
+      `<text x="${x + 42}" y="${stageTop + 36}" text-anchor="middle" font-family="${HEADLINE_FONT}" font-size="24" font-weight="600" fill="${input.profile.palette.copper}">${stage.number}</text>`,
+      labelSvg,
+      `<line x1="${x}" y1="${stageTop + 144}" x2="${x + 210}" y2="${stageTop + 144}" stroke="${input.profile.palette.copper}" stroke-width="1.5"/>`,
+      itemSvg
+    ].join("");
+  }).join("");
+  const arrowSvg = [0, 1].map((index) => {
+    const x1 = columnXs[index]! + 195;
+    const x2 = columnXs[index + 1]! + 10;
+    const y = stageTop + 28;
+    return [
+      `<line x1="${x1}" y1="${y}" x2="${x2}" y2="${y}" stroke="${input.profile.palette.copper}" stroke-width="1.5"/>`,
+      `<path d="M${x2 - 9} ${y - 7} L${x2} ${y} L${x2 - 9} ${y + 7}" fill="none" stroke="${input.profile.palette.copper}" stroke-width="1.5"/>`
+    ].join("");
+  }).join("");
+
+  return [
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${WIDTH}" height="${HEIGHT}" viewBox="0 0 ${WIDTH} ${HEIGHT}">`,
+    headline.svg,
+    `<line x1="96" y1="${ruleY}" x2="665" y2="${ruleY}" stroke="${input.profile.palette.copper}" stroke-width="2"/>`,
+    `<circle cx="665" cy="${ruleY}" r="5" fill="${input.profile.palette.copper}"/>`,
+    subhead.svg,
+    arrowSvg,
+    stageSvg,
+    evidenceLineSvg(content.evidenceLine, input, measureText),
+    structuredFooter(input),
+    `</svg>`
+  ].join("");
+}
+
+function buildEditorialEvidenceSvg(
+  input: RenderBrandedCoverInput,
+  content: EditorialEvidenceContent
+): string {
+  const measureText = createTextMeasurer();
+  const headline = structuredHeadline(input, measureText);
+  const ruleY = headline.bottom + 22;
+  const subhead = structuredSubhead(
+    content.subhead,
+    ruleY + 58,
+    input,
+    measureText
+  );
+  const signalTop = Math.max(675, subhead.bottom + 62);
+  const signals = content.signals.map((signal, index) => {
+    const y = signalTop + index * 142;
+    const detailStyle = {
+      fontFamily: LABEL_FONT,
+      fontSize: 20,
+      fontWeight: 500
+    } as const;
+    const detailLines = wrappedLines(
+      signal.detail,
+      715,
+      2,
+      detailStyle,
+      measureText
+    );
+    return [
+      `<circle cx="126" cy="${y}" r="25" fill="none" stroke="${input.profile.palette.copper}" stroke-width="1.5"/>`,
+      `<text x="126" y="${y + 8}" text-anchor="middle" font-family="${HEADLINE_FONT}" font-size="23" font-weight="600" fill="${input.profile.palette.copper}">0${index + 1}</text>`,
+      `<text x="178" y="${y - 7}" font-family="${LABEL_FONT}" font-size="17" font-weight="600" letter-spacing="2.1" fill="${input.profile.palette.navy}">${escapeXml(signal.label)}</text>`,
+      `<g data-evidence-signal="${escapeXml(signal.detail)}" font-family="${LABEL_FONT}" font-size="20" font-weight="500" fill="${input.profile.palette.navy}">`,
+      svgTextLines(detailLines, 178, y + 28, 27, ""),
+      `</g>`,
+      `<line x1="178" y1="${y + 76}" x2="948" y2="${y + 76}" stroke="${input.profile.palette.taupe}" stroke-width="1"/>`
+    ].join("");
+  }).join("");
+
+  return [
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${WIDTH}" height="${HEIGHT}" viewBox="0 0 ${WIDTH} ${HEIGHT}">`,
+    headline.svg,
+    `<line x1="96" y1="${ruleY}" x2="665" y2="${ruleY}" stroke="${input.profile.palette.copper}" stroke-width="2"/>`,
+    `<circle cx="665" cy="${ruleY}" r="5" fill="${input.profile.palette.copper}"/>`,
+    subhead.svg,
+    signals,
+    evidenceLineSvg(content.evidenceLine, input, measureText),
+    structuredFooter(input),
+    `</svg>`
+  ].join("");
+}
+
 export function buildCoverSvg(input: RenderBrandedCoverInput): string {
   return buildCanonicalCoverSvg(canonicalTextInput(input));
 }
 
 function textureBytes(template: BrandTemplate): Buffer {
   const bytes = Buffer.allocUnsafe(WIDTH * HEIGHT * 4);
-  let state = template.id === "editorial-statement-v1"
-    ? 0x42a91e37
-    : 0x6d25f113;
+  let state = {
+    "editorial-statement-v1": 0x42a91e37,
+    "editorial-evidence-v1": 0x194d3f77,
+    "editorial-model-v1": 0x37d2bc91,
+    "editorial-metaphor-v1": 0x6d25f113
+  }[template.id];
   for (let offset = 0; offset < bytes.length; offset += 4) {
     state ^= state << 13;
     state ^= state >>> 17;
@@ -463,6 +782,14 @@ function textureBytes(template: BrandTemplate): Buffer {
 function geometrySvg(input: RenderBrandedCoverInput): Buffer {
   const { palette } = input.profile;
   const { imageZone } = input.template;
+  if (
+    input.template.mode === "EDITORIAL_MODEL"
+    || input.template.mode === "EDITORIAL_EVIDENCE"
+  ) {
+    return Buffer.from(
+      `<svg xmlns="http://www.w3.org/2000/svg" width="${WIDTH}" height="${HEIGHT}" viewBox="0 0 ${WIDTH} ${HEIGHT}"></svg>`
+    );
+  }
   const shared = [
     `<line x1="96" y1="224" x2="984" y2="224" stroke="${palette.taupe}" stroke-width="2"/>`,
     `<line x1="96" y1="1153" x2="984" y2="1153" stroke="${palette.taupe}" stroke-width="2"/>`

@@ -53,6 +53,14 @@ function abbreviatedChecksum(value: string): string {
 
 function bootstrap(): void {
   const reviewRoot = element("review-root", HTMLElement);
+  const dailyBrief = element("daily-brief", HTMLElement);
+  const briefTitle = element("brief-title", HTMLElement);
+  const briefDecision = element("brief-decision", HTMLElement);
+  const briefSignal = element("brief-signal", HTMLElement);
+  const briefWhy = element("brief-why", HTMLElement);
+  const briefAngle = element("brief-angle", HTMLElement);
+  const briefConfidence = element("brief-confidence", HTMLElement);
+  const briefSources = element("brief-sources", HTMLUListElement);
   const postText = element("post-text", HTMLElement);
   const postVisibility = element("post-visibility", HTMLElement);
   const postMedia = element("post-media", HTMLOListElement);
@@ -61,7 +69,6 @@ function bootstrap(): void {
   const postChecksum = element("post-checksum", HTMLElement);
   const previewExpiry = element("preview-expiry", HTMLElement);
   const brandProvenance = element("brand-provenance", HTMLElement);
-  const brandSeries = element("brand-series", HTMLElement);
   const brandProfileVersion = element("brand-profile-version", HTMLElement);
   const brandTemplate = element("brand-template", HTMLElement);
   const brandHook = element("brand-hook", HTMLElement);
@@ -74,6 +81,14 @@ function bootstrap(): void {
   const confirmation = element("publish-confirmation", HTMLDialogElement);
   const confirmationSummary = element("confirmation-summary", HTMLElement);
   if (reviewRoot === undefined
+    || dailyBrief === undefined
+    || briefTitle === undefined
+    || briefDecision === undefined
+    || briefSignal === undefined
+    || briefWhy === undefined
+    || briefAngle === undefined
+    || briefConfidence === undefined
+    || briefSources === undefined
     || postText === undefined
     || postVisibility === undefined
     || postMedia === undefined
@@ -82,7 +97,6 @@ function bootstrap(): void {
     || postChecksum === undefined
     || previewExpiry === undefined
     || brandProvenance === undefined
-    || brandSeries === undefined
     || brandProfileVersion === undefined
     || brandTemplate === undefined
     || brandHook === undefined
@@ -99,6 +113,14 @@ function bootstrap(): void {
   const storageOrigin = reviewRoot.getAttribute("data-storage-origin");
   if (storageOrigin === null) return;
   const safePostText = postText;
+  const safeDailyBrief = dailyBrief;
+  const safeBriefTitle = briefTitle;
+  const safeBriefDecision = briefDecision;
+  const safeBriefSignal = briefSignal;
+  const safeBriefWhy = briefWhy;
+  const safeBriefAngle = briefAngle;
+  const safeBriefConfidence = briefConfidence;
+  const safeBriefSources = briefSources;
   const safePostVisibility = postVisibility;
   const safePostMedia = postMedia;
   const safePostId = postId;
@@ -106,7 +128,6 @@ function bootstrap(): void {
   const safePostChecksum = postChecksum;
   const safePreviewExpiry = previewExpiry;
   const safeBrandProvenance = brandProvenance;
-  const safeBrandSeries = brandSeries;
   const safeBrandProfileVersion = brandProfileVersion;
   const safeBrandTemplate = brandTemplate;
   const safeBrandHook = brandHook;
@@ -129,6 +150,34 @@ function bootstrap(): void {
   }
 
   function render(view: ReviewCardView): void {
+    if (view.dailyBrief === undefined) {
+      safeDailyBrief.hidden = true;
+      safeBriefTitle.textContent = "";
+      safeBriefDecision.textContent = "";
+      safeBriefSignal.textContent = "";
+      safeBriefWhy.textContent = "";
+      safeBriefAngle.textContent = "";
+      safeBriefConfidence.textContent = "";
+      safeBriefSources.replaceChildren();
+    } else {
+      safeBriefTitle.textContent = view.dailyBrief.title;
+      safeBriefDecision.textContent = view.dailyBrief.decision;
+      safeBriefSignal.textContent = view.dailyBrief.strongestSignal;
+      safeBriefWhy.textContent = view.dailyBrief.whyItMatters;
+      safeBriefAngle.textContent = view.dailyBrief.distinctiveAngle;
+      safeBriefConfidence.textContent = view.dailyBrief.confidence;
+      safeBriefSources.replaceChildren(...view.dailyBrief.sources.map((source) => {
+        const item = document.createElement("li");
+        const link = document.createElement("a");
+        link.href = source.url;
+        link.textContent = source.title;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        item.append(link);
+        return item;
+      }));
+      safeDailyBrief.hidden = false;
+    }
     safePostText.textContent = view.text;
     safePostVisibility.textContent = view.visibility;
     safePostId.textContent = view.postId;
@@ -137,14 +186,12 @@ function bootstrap(): void {
     safePreviewExpiry.textContent = view.previewExpiresAt ?? "Not created";
     if (view.brand === undefined) {
       safeBrandProvenance.hidden = true;
-      safeBrandSeries.textContent = "";
       safeBrandProfileVersion.textContent = "";
       safeBrandTemplate.textContent = "";
       safeBrandHook.textContent = "";
       safeBrandChecksum.textContent = "";
       safeBrandValidation.textContent = "";
     } else {
-      safeBrandSeries.textContent = view.brand.seriesName;
       safeBrandProfileVersion.textContent = `Version ${view.brand.profileVersion}`;
       safeBrandTemplate.textContent =
         `${view.brand.templateId} · version ${view.brand.templateVersion}`;

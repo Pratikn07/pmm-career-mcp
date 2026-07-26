@@ -6,6 +6,10 @@ import type {
   BrandVisualBrief
 } from "../db/repositories.js";
 import { DomainError, postgresErrorKind } from "../domain/errors.js";
+import {
+  validateBrandVisualContent,
+  type BrandVisualContent
+} from "./content.js";
 import { normalizeTopicLabel, validateCoverHook } from "./hook.js";
 import {
   DEFAULT_PMM_BRAND_PROFILE,
@@ -18,6 +22,12 @@ import { templateForMode } from "./templates.js";
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MAX_TOPIC_LABEL_CHARACTERS = 24;
+const MAX_CONCEPT_SUMMARY_CHARACTERS = 500;
+const STRUCTURED_RENDER_CONSTRAINTS = Object.freeze([
+  "unvalidated structured content",
+  "unapproved branding",
+  "source imagery"
+] as const);
 
 export type CreateBrandVisualBriefInput = Readonly<{
   postId: string;
@@ -26,6 +36,7 @@ export type CreateBrandVisualBriefInput = Readonly<{
   conceptSummary: string;
   visualMode: BrandVisualMode;
   topicLabel?: string;
+  visualContent?: BrandVisualContent;
 }>;
 
 export type BrandReviewProvenance = Readonly<{
@@ -81,6 +92,8 @@ function validateInput(input: CreateBrandVisualBriefInput): void {
   }
   if (
     input.visualMode !== "EDITORIAL_STATEMENT"
+    && input.visualMode !== "EDITORIAL_EVIDENCE"
+    && input.visualMode !== "EDITORIAL_MODEL"
     && input.visualMode !== "EDITORIAL_METAPHOR"
   ) {
     throw validationError("visualMode", "unsupported");
@@ -105,6 +118,30 @@ function normalizedTopicLabel(topicLabel: string | undefined): string | undefine
       "topicLabel",
       "character_count",
       MAX_TOPIC_LABEL_CHARACTERS
+    );
+  }
+  return normalized;
+}
+
+function normalizedConceptSummary(conceptSummary: string): string {
+  if (typeof conceptSummary !== "string") {
+    throw validationError(
+      "conceptSummary",
+      "character_count",
+      MAX_CONCEPT_SUMMARY_CHARACTERS
+    );
+  }
+  const normalized = conceptSummary
+    .normalize("NFC")
+    .replace(/[\r\n\v\f\u0085\u2028\u2029]+/gu, " ")
+    .trim()
+    .replace(/\s+/gu, " ");
+  const length = [...normalized].length;
+  if (length < 1 || length > MAX_CONCEPT_SUMMARY_CHARACTERS) {
+    throw validationError(
+      "conceptSummary",
+      "character_count",
+      MAX_CONCEPT_SUMMARY_CHARACTERS
     );
   }
   return normalized;
@@ -281,6 +318,11 @@ export function createBrandBriefService(
       try {
         validateInput(input);
         const topicLabel = normalizedTopicLabel(input.topicLabel);
+        const conceptSummary = normalizedConceptSummary(input.conceptSummary);
+        const visualContent = validateBrandVisualContent(
+          input.visualMode,
+          input.visualContent
+        );
         const post = await exactLatestOwnedPost(input.postId, input.expectedVersion);
         const coverHook = validateCoverHook(post.text, input.coverHook);
         const recent = await recentBriefs();
@@ -292,13 +334,23 @@ export function createBrandBriefService(
           );
         }
         const template = templateForMode(input.visualMode);
-        const prompt = buildSourceArtPrompt(
-          DEFAULT_PMM_BRAND_PROFILE,
-          template,
-          input.conceptSummary
-        );
-        const proposedAltText =
-          `Editorial PMM Field Notes cover reading “${coverHook}”.`;
+        const prompt = visualContent === undefined
+          ? buildSourceArtPrompt(
+              DEFAULT_PMM_BRAND_PROFILE,
+              template,
+              conceptSummary
+            )
+          : Object.freeze({
+              formatVersion: 1 as const,
+              generationPrompt:
+                "Render the validated structured editorial content deterministically with the selected brand template.",
+              negativeConstraints: STRUCTURED_RENDER_CONSTRAINTS
+            });
+        const proposedAltText = input.visualMode === "EDITORIAL_MODEL"
+          ? `Editorial Product Marketing model titled “${coverHook}”.`
+          : input.visualMode === "EDITORIAL_EVIDENCE"
+            ? `Editorial Product Marketing evidence card titled “${coverHook}”.`
+            : `Editorial Product Marketing cover titled “${coverHook}”.`;
         if ([...proposedAltText].length > 120) {
           throw safePersistenceError(
             "Brand visual brief alt text could not be prepared",
@@ -332,14 +384,13 @@ export function createBrandBriefService(
               promptFormatVersion: prompt.formatVersion,
               visualMode: template.mode,
               coverHook,
-              conceptSummary: input.conceptSummary
-                .normalize("NFC")
-                .replace(/[\r\n\v\f\u0085\u2028\u2029]+/gu, " ")
-                .trim()
-                .replace(/\s+/gu, " "),
+              conceptSummary,
               ...(topicLabel === undefined ? {} : { topicLabel }),
               generationPrompt: prompt.generationPrompt,
               negativeConstraintsJson: [...prompt.negativeConstraints],
+              ...(visualContent === undefined
+                ? {}
+                : { visualContentJson: visualContent }),
               state: "ready"
             }
           });

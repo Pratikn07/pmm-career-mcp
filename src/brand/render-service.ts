@@ -20,6 +20,7 @@ import {
   type LinkedInPostChecksumMedia
 } from "../posts/post-checksum.js";
 import type { BrandReviewProvenance } from "./brief-service.js";
+import { validateBrandVisualContent } from "./content.js";
 import { DEFAULT_PMM_BRAND_PROFILE } from "./profile.js";
 import {
   renderBrandedCover,
@@ -309,6 +310,8 @@ export function createBrandRenderService(
         const { brief, post } = await exactReadySource(input);
         if (
           brief.visualMode !== "EDITORIAL_STATEMENT"
+          && brief.visualMode !== "EDITORIAL_EVIDENCE"
+          && brief.visualMode !== "EDITORIAL_MODEL"
           && brief.visualMode !== "EDITORIAL_METAPHOR"
         ) {
           throw integrityError(
@@ -317,6 +320,10 @@ export function createBrandRenderService(
           );
         }
         const template = templateForMode(brief.visualMode);
+        const visualContent = validateBrandVisualContent(
+          brief.visualMode,
+          brief.visualContentJson
+        );
         if (
           brief.templateId !== template.id
           || brief.templateVersion !== template.version
@@ -345,6 +352,7 @@ export function createBrandRenderService(
           profile: DEFAULT_PMM_BRAND_PROFILE,
           template,
           coverHook: brief.coverHook,
+          ...(visualContent === undefined ? {} : { visualContent }),
           ...(brief.topicLabel === null ? {} : { topicLabel: brief.topicLabel }),
           ...(source === undefined
             ? {}

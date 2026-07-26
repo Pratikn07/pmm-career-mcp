@@ -116,26 +116,36 @@ This release requires encrypted, versioned LinkedIn scope evidence. After deploy
 
 ## 7. Verify the morning and interactive boundaries
 
-Use this exact schedule instruction:
+Use this exact schedule instruction. The current `list_post_history` action
+requires a known draft ID, so it must not be used as an initial recent-post
+discovery step:
 
-> Research today's approved PMM topic and save a private LinkedIn draft in PMM
-> Career MCP. Use the active PMM FIELD NOTES brand profile. Create a short,
-> curiosity-driven cover hook that does not explain the post. Save a branded
-> visual brief and render one private editorial cover. If metaphor source-image
-> generation is unavailable in this scheduled run, save the brief and stop.
-> Do not create an exact preview, do not upload anything to LinkedIn, and do not
-> publish. Notify me when the private draft is ready, then stop.
+> Run Bhagyashree Nandoskar's daily PMM Career OS workflow. Research today's
+> strongest approved PMM signal, use available conversation context to avoid
+> repetition, and present the concise Daily
+> PMM Career Brief first. Choose one action. If the action is a post candidate,
+> save the final text with `draft_linkedin_post`, create an
+> `EDITORIAL_MODEL` or `EDITORIAL_EVIDENCE` brief with exact structured content,
+> render and attach one 1080x1350 branded image, then call
+> `open_linkedin_review_card` for the newest immutable version with
+> `expectedImageCount: 1` and the Daily PMM Career Brief. The review card must be
+> the final item so I see the analysis first and the complete post-and-image
+> package last. Do not use or display PMM FIELD NOTES. Do not create an exact
+> preview, upload anything to LinkedIn, create a LinkedIn authorization URL, or
+> publish. Stop after opening the complete private review package.
 
-The two supported Brand Studio sequences are:
+The supported Brand Studio sequences are:
 
 ```text
-Statement: draft → brief → render → open review card
-Metaphor: draft → brief → ChatGPT image → render with source → open review card
+Research-led model: daily brief → draft → model brief → render → open complete review card
+Research-led evidence: daily brief → draft → evidence brief → render → open complete review card
+Statement: daily brief → draft → statement brief → render → open complete review card
+Metaphor (rare): daily brief → draft → metaphor brief → source art → render → open complete review card
 ```
 
-The scheduled flow may research, draft, save a branded visual brief, render one private editorial cover, save immutable versions, open the non-writing review-card boundary, and notify the user. It must finish with zero exact-preview rows and zero LinkedIn initialize, upload, or final-post calls. Only the final branded PNG is attached to the post draft; metaphor source art remains private and is never attached or published.
+The scheduled flow may research, draft, save a branded visual brief, deterministically render one private structured editorial cover, save immutable versions, open the non-writing review-card boundary, and notify the user. It must present its reasoning before opening the review package, and it must finish with zero exact-preview rows and zero LinkedIn initialize, upload, or final-post calls. Only the final branded PNG is attached to the post draft; metaphor source art remains private and is never attached or published.
 
-Scheduled image handoff is a capability gate, not a reason to add credentials. If the scheduled ChatGPT environment cannot hand a generated metaphor source image to the MCP file parameter, save the text draft plus the branded visual brief and stop. Generate or upload the source image later in the interactive conversation. Do not add an OpenAI API key, paid image service, Supabase service-role key, or Supabase secret key.
+Use `EDITORIAL_MODEL` by default for frameworks, stages, systems, comparisons, and operating models. Use `EDITORIAL_EVIDENCE` when the source-backed pattern itself is the visual story. These modes require no external image handoff. Scheduled image handoff is only a capability gate for the rare metaphor mode; if ChatGPT cannot pass a generated metaphor source image to the MCP file parameter, save the text draft plus a branded visual brief and stop. Do not add an OpenAI API key, paid image service, Supabase service-role key, or Supabase secret key.
 
 Every new initial draft, including a text-only draft with no images, uses the versioned whole-post checksum and can enter exact review directly. Drafts stored before that checksum remain readable but cannot enter exact review; use `revise_post` to create a new immutable current-format version first. Any later text, visibility, image bytes, order, MIME type, or alt-text change also requires a new version and a new exact preview.
 
@@ -160,7 +170,7 @@ The publish state machine does not automatically retry. `media_upload_failed` an
 | OAuth discovery or consent fails | Recheck `SUPABASE_URL`, the derived issuer, Site URL, Authorization Path `/oauth/consent`, OAuth 2.1/DCR settings, and `openid`/`email` scopes. |
 | Token is rejected | Run the private token verifier. Confirm the mandatory hook is enabled and check the exact issuer, canonical `BASE_URL` audience, expiry, one allowed subject, and `openid email` scopes. Do not bypass a mismatch. |
 | ChatGPT cannot initialize `/mcp` | Confirm the HTTPS connector URL, successful OAuth consent, protected-resource metadata, and a healthy `/ready` endpoint. |
-| Scheduled run cannot pass a generated image file | Save the text draft plus a branded visual brief and stop. Continue interactively; do not add an API key. |
+| Scheduled run cannot pass a metaphor source image file | Prefer a structured model/evidence visual when appropriate. Otherwise save the text draft plus a branded visual brief and stop. Continue interactively; do not add an API key. |
 | `publish_unknown` | Do not retry. Inspect LinkedIn manually for the exact content before creating a new version and preview. |
 | Any secret appears in output | Revoke or rotate it using the provider, remove it from the exposed location, and repeat only the affected validation. |
 

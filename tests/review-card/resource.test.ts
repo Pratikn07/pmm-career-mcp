@@ -54,6 +54,14 @@ it("serves a self-contained semantic review-card shell with minimal canonical CS
   expect(html).toContain('src="https://mcp.example/review-card-client.js"');
   expect(html).toContain('data-storage-origin="https://project.supabase.co"');
   for (const id of [
+    "daily-brief",
+    "brief-title",
+    "brief-decision",
+    "brief-signal",
+    "brief-why",
+    "brief-angle",
+    "brief-confidence",
+    "brief-sources",
     "post-text",
     "post-visibility",
     "post-media",
@@ -62,7 +70,6 @@ it("serves a self-contained semantic review-card shell with minimal canonical CS
     "post-checksum",
     "preview-expiry",
     "brand-provenance",
-    "brand-series",
     "brand-profile-version",
     "brand-template",
     "brand-hook",
@@ -76,6 +83,15 @@ it("serves a self-contained semantic review-card shell with minimal canonical CS
   ]) {
     expect(html).toContain(`id="${id}"`);
   }
+  expect(html.indexOf('id="daily-brief"')).toBeLessThan(
+    html.indexOf('id="content-title"')
+  );
+  expect(html.indexOf('id="content-title"')).toBeLessThan(
+    html.indexOf('id="media-title"')
+  );
+  expect(html.indexOf('id="media-title"')).toBeLessThan(
+    html.indexOf('id="create-preview"')
+  );
   expect(html).toContain("<dialog");
   expect(html.match(/https?:\/\//g)).toHaveLength(2);
   expect(html).not.toMatch(/<script[^>]+src=(?!"https:\/\/mcp\.example\/review-card-client\.js")/i);

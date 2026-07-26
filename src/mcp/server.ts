@@ -77,7 +77,7 @@ import {
   updateOutreachStatusOutput
 } from "./schemas.js";
 
-export const CAREER_MCP_INSTRUCTIONS = "Never fetch LinkedIn for research. Never claim complete employee coverage. Never claim complete YC-company coverage. Scheduled and model-driven flows must stop after saving private drafts and may only open the non-writing review card. Exact preview and publish actions are app-only, never model-callable, and available only after the current user explicitly asks to publish the exact preview. Never batch or retry publishing. If a user supplies exact draft text, a cover hook, images, alt text, or visibility, use it exactly once. If the corresponding tool returns a validation error, stop and report the validation error; never silently substitute or retry with altered content. Research is restricted to YC companies and allowed public sources. Drafts and pipeline data stay private. Branded visuals are curiosity covers, not post summaries; source art must contain no text.";
+export const CAREER_MCP_INSTRUCTIONS = "Never fetch LinkedIn for research. Never claim complete employee coverage or complete YC-company coverage. Publish only when the current user explicitly asks to publish the exact preview. Never batch or retry publishing. Scheduled runs must present the daily research brief first. If the daily decision is POST CANDIDATE, then save the final private LinkedIn draft, create a structured Editorial Intelligence brief, render and attach the completed branded image as the newest immutable draft version, and call open_linkedin_review_card with expectedImageCount: 1 and dailyBrief set to the presented brief so the complete post-and-image review package opens last. If the decision is not POST CANDIDATE, stop after the brief and selected private action without manufacturing a LinkedIn post. Prefer EDITORIAL_MODEL or EDITORIAL_EVIDENCE for research-led posts; use EDITORIAL_STATEMENT for a short standalone idea and EDITORIAL_METAPHOR only when source art genuinely adds value. Images are curiosity covers, not post summaries; source art must contain no text. New visuals must never display PMM FIELD NOTES. Scheduled and model-driven flows must never create an exact preview, send media to LinkedIn, authorize, or publish. Exact preview and publish actions are app-only. If a user supplies exact draft text, a cover hook, images, alt text, or visibility, use it exactly once. If validation rejects it, stop and report the validation error; never silently substitute or retry with altered content. Research is restricted to YC companies and allowed public sources. Drafts and pipeline data stay private.";
 
 type YcProvider = { searchYcCompanies(query: CompanySearchQuery): Promise<CompanyResult[]> };
 type ConnectionStatus = {
@@ -433,18 +433,18 @@ export function createCareerMcpServer(
 
   server.registerTool("get_pmm_brand_profile", {
     title: "Get PMM brand profile",
-    description: "Return the active model-safe PMM Field Notes brand rules. Read-only.",
+    description: "Return the active model-safe Bhagyashree Editorial Intelligence brand rules. Read-only.",
     inputSchema: emptyInputSchema,
     outputSchema: getPmmBrandProfileOutput,
     annotations: readOnly,
     _meta: oauthToolMetadata
   }, async () => guarded(async () => ({
     profile: modelSafeProfile(await authenticatedBrand().getProfile())
-  }), () => "Loaded the active PMM Field Notes brand profile; nothing was changed.")());
+  }), () => "Loaded the active Editorial Intelligence brand profile; nothing was changed.")());
 
   server.registerTool("create_branded_visual_brief", {
     title: "Create branded visual brief",
-    description: "Save one private PMM Field Notes curiosity-cover brief. When the user supplied an exact hook, use it once exactly; if validation rejects it, stop and report the error rather than substituting another hook. This does not attach an image, create a preview, or publish.",
+    description: "Save one private Editorial Intelligence visual brief. Use EDITORIAL_MODEL or EDITORIAL_EVIDENCE for research-led posts so the renderer can create the final card without source art. When the user supplied an exact hook, use it once exactly; if validation rejects it, stop rather than substituting another hook. This does not attach an image, create a preview, or publish.",
     inputSchema: createBrandedVisualBriefInput,
     outputSchema: createBrandedVisualBriefOutput,
     annotations: privateWrite,
@@ -456,6 +456,10 @@ export function createCareerMcpServer(
       coverHook: input.coverHook,
       conceptSummary: input.conceptSummary,
       visualMode: input.visualMode,
+      ...(input.visualContent === undefined
+        ? {}
+        : { visualContent: input.visualContent }
+      ),
       ...(input.topicLabel === undefined
         ? {}
         : { topicLabel: input.topicLabel })
@@ -485,7 +489,7 @@ export function createCareerMcpServer(
 
   server.registerTool("render_branded_linkedin_cover", {
     title: "Render branded LinkedIn cover",
-    description: "Render and privately attach one PMM Field Notes curiosity cover to a new immutable post version. This does not create a preview or publish.",
+    description: "Render and privately attach one completed Editorial Intelligence card to a new immutable post version. Structured model and evidence cards render deterministically without source art. This does not create a preview, send media externally, or publish.",
     inputSchema: renderBrandedLinkedInCoverInput,
     outputSchema: renderBrandedLinkedInCoverOutput,
     annotations: attachmentWrite,
@@ -568,12 +572,26 @@ export function createCareerMcpServer(
     outputSchema: openLinkedInReviewCardOutput,
     annotations: readOnly,
     _meta: reviewCardLauncherMetadata
-  }, async ({ postId, version }) => {
+  }, async ({ postId, version, expectedImageCount, dailyBrief }) => {
     try {
       const media = authenticatedMedia();
       const post = await media.getVersion(postId, version);
       if (post === undefined) {
         throw new DomainError("NOT_FOUND", "Post draft was not found", { entity: "post_draft" });
+      }
+      if (
+        expectedImageCount !== undefined
+        && post.media.length !== expectedImageCount
+      ) {
+        throw new DomainError(
+          "CONFLICT",
+          "Review package is incomplete",
+          {
+            entity: "post_draft",
+            expectedImageCount,
+            actualImageCount: post.media.length
+          }
+        );
       }
       const mediaUrls = await media.createSignedUrls(post);
       const positionZeroMedia = post.media.find(({ position }) => position === 0);
@@ -594,6 +612,7 @@ export function createCareerMcpServer(
       return {
         ...response({
           post,
+          ...(dailyBrief === undefined ? {} : { dailyBrief }),
           ...(brand === undefined ? {} : { brand })
         }, `Opened private post version ${post.version} for review; no preview or publish action was created.`),
         _meta: { mediaUrls: [...mediaUrls] }

@@ -154,6 +154,60 @@ async function readyBrief(
   return { post, profile: result.profile, brief: result.brief };
 }
 
+async function readyModelBrief() {
+  const postMedia = await addMedia(owner);
+  const post = (await db.postDrafts.createVersionWithMedia({
+    ownerSubject: owner,
+    text: "Strategy and execution are moving closer together in early-stage teams.",
+    visibility: "PUBLIC",
+    checksum: "brand-model-render-source",
+    state: "draft",
+    media: [{ mediaId: postMedia.id, altText: "Private draft ownership media" }]
+  })).post;
+  const visualContentJson = {
+    kind: "model",
+    subhead: "What early-stage PMM is starting to look like",
+    stages: [
+      {
+        number: "01",
+        label: "UNDERSTAND",
+        items: ["Customer research", "Market intelligence"]
+      },
+      {
+        number: "02",
+        label: "TRANSLATE",
+        items: ["Positioning", "Messaging", "Category narrative"]
+      },
+      {
+        number: "03",
+        label: "EXECUTE",
+        items: ["Launch", "Enablement", "Experimentation"]
+      }
+    ],
+    evidenceLine: "Observed across selected current YC startup roles"
+  } as const;
+  const result = await db.brandVisualBriefs.createWithDefaultProfile({
+    profile: canonicalProfile(owner),
+    brief: {
+      id: randomUUID(),
+      ownerSubject: owner,
+      postDraftId: post.id,
+      postVersion: post.version,
+      templateId: "editorial-model-v1",
+      templateVersion: 1,
+      promptFormatVersion: 1,
+      visualMode: "EDITORIAL_MODEL",
+      coverHook: "The distance is getting shorter",
+      conceptSummary: "A compact three-stage model",
+      generationPrompt: "Deterministic editorial model",
+      negativeConstraintsJson: ["no PMM FIELD NOTES"],
+      visualContentJson,
+      state: "ready"
+    }
+  });
+  return { post, profile: result.profile, brief: result.brief, visualContentJson };
+}
+
 function renderedCover(bytes = finalBytes): RenderedBrandCover {
   return Object.freeze({
     bytes: Buffer.from(bytes),
@@ -231,6 +285,33 @@ afterAll(async () => {
 });
 
 describe("brand render service", () => {
+  it("renders and attaches a structured editorial model without source art", async () => {
+    const source = await readyModelBrief();
+    const renderCover = vi.fn(async () => renderedCover());
+    const modelAltText =
+      "Editorial Product Marketing model titled “The distance is getting shorter”.";
+
+    const result = await renderService({ renderCover }).render({
+      briefId: source.brief.id,
+      postId: source.post.draftId,
+      expectedVersion: source.post.version,
+      altText: modelAltText
+    });
+
+    expect(result.post.version).toBe(source.post.version + 1);
+    expect(result.post.media).toHaveLength(1);
+    expect(renderCover).toHaveBeenCalledWith({
+      profile: DEFAULT_PMM_BRAND_PROFILE,
+      template: expect.objectContaining({ id: "editorial-model-v1" }),
+      coverHook: "The distance is getting shorter",
+      visualContent: source.visualContentJson
+    });
+    expect(result.provenance).toMatchObject({
+      templateId: "editorial-model-v1",
+      coverHook: "The distance is getting shorter"
+    });
+  });
+
   it("branded render stores and attaches exactly one final statement cover", async () => {
     const source = await readyBrief();
     const renderCover = vi.fn(async () => renderedCover());

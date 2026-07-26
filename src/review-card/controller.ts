@@ -42,7 +42,25 @@ export type ReviewCardBrand = Readonly<{
   validationPassed: boolean;
 }>;
 
+export type ReviewCardDailyBrief = Readonly<{
+  title: string;
+  decision:
+    | "POST CANDIDATE"
+    | "LEARN"
+    | "NETWORK"
+    | "SAVE OPPORTUNITY"
+    | "BUILD PORTFOLIO"
+    | "PREPARE INTERVIEW"
+    | "NO PUBLIC ACTION";
+  strongestSignal: string;
+  whyItMatters: string;
+  distinctiveAngle: string;
+  confidence: string;
+  sources: readonly Readonly<{ title: string; url: string }>[];
+}>;
+
 export type ReviewCardView = Readonly<{
+  dailyBrief?: ReviewCardDailyBrief;
   postId: string;
   versionId: string;
   text: string;
@@ -288,6 +306,89 @@ function initialBrand(value: unknown): ReviewCardBrand | undefined {
   return safeBrand(nestedData(value)?.brand);
 }
 
+function safeDailyBrief(value: unknown): ReviewCardDailyBrief | undefined {
+  const brief = record(value);
+  const decisions = new Set([
+    "POST CANDIDATE",
+    "LEARN",
+    "NETWORK",
+    "SAVE OPPORTUNITY",
+    "BUILD PORTFOLIO",
+    "PREPARE INTERVIEW",
+    "NO PUBLIC ACTION"
+  ]);
+  if (
+    brief === undefined
+    || !exactKeys(brief, [
+      "title",
+      "decision",
+      "strongestSignal",
+      "whyItMatters",
+      "distinctiveAngle",
+      "confidence",
+      "sources"
+    ])
+    || typeof brief.title !== "string"
+    || [...brief.title].length < 1
+    || [...brief.title].length > 160
+    || typeof brief.decision !== "string"
+    || !decisions.has(brief.decision)
+    || typeof brief.strongestSignal !== "string"
+    || [...brief.strongestSignal].length < 1
+    || [...brief.strongestSignal].length > 1_000
+    || typeof brief.whyItMatters !== "string"
+    || [...brief.whyItMatters].length < 1
+    || [...brief.whyItMatters].length > 1_000
+    || typeof brief.distinctiveAngle !== "string"
+    || [...brief.distinctiveAngle].length < 1
+    || [...brief.distinctiveAngle].length > 1_000
+    || typeof brief.confidence !== "string"
+    || [...brief.confidence].length < 1
+    || [...brief.confidence].length > 100
+    || !Array.isArray(brief.sources)
+    || brief.sources.length > 20
+  ) {
+    return undefined;
+  }
+  const sources: Array<{ title: string; url: string }> = [];
+  for (const value_ of brief.sources) {
+    const source = record(value_);
+    if (
+      source === undefined
+      || !exactKeys(source, ["title", "url"])
+      || typeof source.title !== "string"
+      || [...source.title].length < 1
+      || [...source.title].length > 300
+      || typeof source.url !== "string"
+      || source.url.length > 2_048
+    ) {
+      return undefined;
+    }
+    try {
+      const parsed = new URL(source.url);
+      if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+        return undefined;
+      }
+    } catch {
+      return undefined;
+    }
+    sources.push({ title: source.title, url: source.url });
+  }
+  return {
+    title: brief.title,
+    decision: brief.decision as ReviewCardDailyBrief["decision"],
+    strongestSignal: brief.strongestSignal,
+    whyItMatters: brief.whyItMatters,
+    distinctiveAngle: brief.distinctiveAngle,
+    confidence: brief.confidence,
+    sources
+  };
+}
+
+function initialDailyBrief(value: unknown): ReviewCardDailyBrief | undefined {
+  return safeDailyBrief(nestedData(value)?.dailyBrief);
+}
+
 function initialLaunchFailed(value: unknown): boolean {
   const error = record(nestedData(value)?.error);
   return error !== undefined && typeof error.code === "string";
@@ -437,9 +538,11 @@ function sameSelectedVersion(preview: SafePost, selected: SafePost): boolean {
 function view(
   post: SafePost,
   urls: readonly string[],
-  brand: ReviewCardBrand | undefined
+  brand: ReviewCardBrand | undefined,
+  dailyBrief: ReviewCardDailyBrief | undefined
 ): ReviewCardView {
   return {
+    ...(dailyBrief === undefined ? {} : { dailyBrief }),
     postId: post.postId,
     versionId: post.versionId,
     text: post.text,
@@ -610,6 +713,7 @@ export function createReviewCardController(
     : DEFAULT_INITIAL_METADATA_TIMEOUT_MS;
   let currentPost: SafePost | undefined;
   let currentBrand: ReviewCardBrand | undefined;
+  let currentDailyBrief: ReviewCardDailyBrief | undefined;
   let approvalCapability: string | undefined;
   let busy = false;
   let terminal = false;
@@ -701,21 +805,35 @@ export function createReviewCardController(
             );
           return post === undefined || urls === undefined
             ? undefined
-            : { failure: false as const, post, urls, brand: initialBrand(globals.toolOutput) };
+            : {
+                failure: false as const,
+                post,
+                urls,
+                brand: initialBrand(globals.toolOutput),
+                dailyBrief: initialDailyBrief(globals.toolOutput)
+              };
         });
         if (loaded.failure) {
           currentPost = undefined;
           currentBrand = undefined;
+          currentDailyBrief = undefined;
           disablePublishing();
           dependencies.ui.showError(INITIAL_LOAD_ERROR);
           return;
         }
         currentPost = loaded.post;
         currentBrand = loaded.brand;
-        dependencies.ui.render(view(loaded.post, loaded.urls, loaded.brand));
+        currentDailyBrief = loaded.dailyBrief;
+        dependencies.ui.render(view(
+          loaded.post,
+          loaded.urls,
+          loaded.brand,
+          loaded.dailyBrief
+        ));
       } catch {
         currentPost = undefined;
         currentBrand = undefined;
+        currentDailyBrief = undefined;
         disablePublishing();
         genericError();
       } finally {
@@ -761,7 +879,12 @@ export function createReviewCardController(
           storageOrigin
         ));
         currentPost = preview;
-        dependencies.ui.render(view(preview, metadata.urls, currentBrand));
+        dependencies.ui.render(view(
+          preview,
+          metadata.urls,
+          currentBrand,
+          currentDailyBrief
+        ));
         approvalCapability = metadata.capability;
         if (!scheduleExpiry(preview)) {
           disablePublishing();

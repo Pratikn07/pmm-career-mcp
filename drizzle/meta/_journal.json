@@ -50,6 +50,13 @@
       "when": 1784804706167,
       "tag": "0006_brand_brief_source_claims",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1785105453617,
+      "tag": "0007_editorial_intelligence",
+      "breakpoints": true
     }
   ]
 }

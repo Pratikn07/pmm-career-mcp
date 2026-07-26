@@ -94,6 +94,67 @@ async function expectDomainError(
 }
 
 describe("Brand brief service", () => {
+  it("saves the approved structured model and prepares neutral branded alt text", async () => {
+    const owner = randomUUID();
+    const post = await addOwnedPost(owner, {
+      text: "Strategy and execution are moving closer together in early-stage teams."
+    });
+    const service = createBrandBriefService(db, { subject: owner });
+    const visualContent = {
+      kind: "model",
+      subhead: "What early-stage PMM is starting to look like",
+      stages: [
+        {
+          number: "01",
+          label: "Understand",
+          items: ["Customer research", "Market intelligence"]
+        },
+        {
+          number: "02",
+          label: "Translate",
+          items: ["Positioning", "Messaging", "Category narrative"]
+        },
+        {
+          number: "03",
+          label: "Execute",
+          items: ["Launch", "Enablement", "Experimentation"]
+        }
+      ],
+      evidenceLine: "Observed across selected current YC startup roles"
+    } as const;
+
+    const result = await service.createBrief({
+      postId: post.draftId,
+      expectedVersion: post.version,
+      coverHook: "The distance is getting shorter",
+      conceptSummary: "Bhagyashree's compact three-stage model from understanding to execution",
+      visualMode: "EDITORIAL_MODEL",
+      visualContent
+    });
+
+    expect(result.brief).toMatchObject({
+      templateId: "editorial-model-v1",
+      visualMode: "EDITORIAL_MODEL",
+      visualContentJson: {
+        ...visualContent,
+        stages: [
+          { ...visualContent.stages[0], label: "UNDERSTAND" },
+          { ...visualContent.stages[1], label: "TRANSLATE" },
+          { ...visualContent.stages[2], label: "EXECUTE" }
+        ]
+      }
+    });
+    expect(result.requiresSourceImage).toBe(false);
+    expect(result.proposedAltText).toBe(
+      "Editorial Product Marketing model titled “The distance is getting shorter”."
+    );
+    expect(result.proposedAltText).not.toContain("PMM Field Notes");
+    expect(result.brief.generationPrompt).toContain(
+      "validated structured editorial content deterministically"
+    );
+    expect(result.brief.generationPrompt).not.toContain("source art");
+  });
+
   it("returns the effective canonical profile without initializing persistence", async () => {
     const owner = randomUUID();
     const service = createBrandBriefService(db, { subject: owner });
@@ -162,7 +223,7 @@ describe("Brand brief service", () => {
     }]);
     expect(result.requiresSourceImage).toBe(false);
     expect(result.proposedAltText).toBe(
-      "Editorial PMM Field Notes cover reading “Clarity beats capability.”."
+      "Editorial Product Marketing cover titled “Clarity beats capability.”."
     );
     expect([...result.proposedAltText].length).toBeLessThanOrEqual(120);
     expect(result.brief.generationPrompt).toContain("restrained abstract geometry");

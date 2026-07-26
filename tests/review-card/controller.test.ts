@@ -41,8 +41,22 @@ const media = [{
   createdAt: "2026-07-19T12:00:00.000Z"
 }];
 
+const dailyBrief = {
+  title: "Daily PMM Career Brief — July 26, 2026",
+  decision: "POST CANDIDATE",
+  strongestSignal: "Early-stage PMM strategy is moving closer to execution.",
+  whyItMatters: "PMM insight increasingly needs to become usable GTM output.",
+  distinctiveAngle: "The distance between strategy and execution is getting shorter.",
+  confidence: "High",
+  sources: [{
+    title: "Selected current YC startup roles",
+    url: "https://www.ycombinator.com/jobs"
+  }]
+};
+
 const draftOutput = {
   data: {
+    dailyBrief,
     post: {
       id: postId,
       versionId,
@@ -233,6 +247,7 @@ describe("LinkedIn review-card controller", () => {
     expect(result.callTool).not.toHaveBeenCalled();
     expect(result.globals.listeners.size).toBe(0);
     expect(result.views).toEqual([expect.objectContaining({
+      dailyBrief,
       postId,
       version: 2,
       visibility: "CONNECTIONS",

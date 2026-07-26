@@ -21,6 +21,10 @@ describe("buildSourceArtPrompt", () => {
       expect(prompt.generationPrompt).toContain(color);
     }
     expect(prompt.generationPrompt).toContain("open doorway");
+    expect(prompt.generationPrompt).toContain(
+      "personal-brand Product Marketing editorial visual"
+    );
+    expect(prompt.generationPrompt).not.toMatch(/field notes?/iu);
     expect(prompt.generationPrompt).not.toContain("Bhagyashree");
     expect(prompt.negativeConstraints).toContain("readable text");
     expect(prompt.negativeConstraints).toContain("names, logos, or watermarks");
