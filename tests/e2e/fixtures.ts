@@ -4,6 +4,8 @@ import type { RequestAuthContext } from "../../src/auth/request-context.js";
 
 export const E2E_NOW = "2026-07-17T12:00:00.000Z";
 export const E2E_SUBJECT = "123e4567-e89b-42d3-a456-426614174000";
+export const FOUNDER_E2E_NOW = "2026-07-26T06:00:00.000Z";
+export const FOUNDER_E2E_OTHER_SUBJECT = "223e4567-e89b-42d3-a456-426614174000";
 export const E2E_AUTH_CONTEXT: RequestAuthContext = Object.freeze({
   subject: E2E_SUBJECT,
   accessToken: "private-request-token"
@@ -45,4 +47,66 @@ export const COMPANY_HOME_FIXTURE: FetchedPage = {
 export function mockedCompanyPage(url: string): FetchedPage {
   if (url === COMPANY_HOME_FIXTURE.url) return COMPANY_HOME_FIXTURE;
   throw new Error(`Unexpected mocked public endpoint: ${url}`);
+}
+
+export const FOUNDER_YC_DIRECTORY_FIXTURE: YcSourcePage = {
+  url: "https://www.ycombinator.com/companies",
+  checkedAt: FOUNDER_E2E_NOW,
+  html: `<!doctype html><main data-yc-company-directory>
+    <article data-yc-company-id="atlas-yc">
+      <a class="company-name" href="/companies/atlas">Atlas Verified</a>
+      <span data-company-batch>W26</span>
+      <span data-company-status>Active</span>
+      <span data-company-hiring>Hiring</span>
+      <a data-company-website href="https://atlas.example/">Website</a>
+    </article>
+    <article data-yc-company-id="beacon-yc">
+      <a class="company-name" href="/companies/beacon">Beacon Search</a>
+      <span data-company-batch>W26</span>
+      <span data-company-status>Active</span>
+      <span data-company-hiring>Hiring</span>
+      <a data-company-website href="https://beacon.example/">Website</a>
+    </article>
+  </main>`
+};
+
+const FOUNDER_COMPANY_PAGES: Readonly<Record<string, FetchedPage>> = Object.freeze({
+  "https://atlas.example/": {
+    url: "https://atlas.example/",
+    title: "Atlas Verified",
+    text: "Atlas leadership",
+    checkedAt: FOUNDER_E2E_NOW,
+    contentType: "text/html",
+    untrusted: true,
+    html: '<!doctype html><nav><a href="/team">Team</a></nav>'
+  },
+  "https://atlas.example/team": {
+    url: "https://atlas.example/team",
+    title: "Atlas team",
+    text: "Avery Atlas Co-founder and CEO",
+    checkedAt: FOUNDER_E2E_NOW,
+    contentType: "text/html",
+    untrusted: true,
+    html: `<!doctype html><article class="team-member">
+      <h2>Avery Atlas</h2>
+      <p class="role">Co-founder &amp; CEO</p>
+      <a href="https://www.linkedin.com/in/avery-atlas">LinkedIn</a>
+    </article>`
+  },
+  "https://beacon.example/": {
+    url: "https://beacon.example/",
+    title: "Beacon Search",
+    text: "Beacon Search",
+    checkedAt: FOUNDER_E2E_NOW,
+    contentType: "text/html",
+    untrusted: true,
+    html: "<!doctype html><main><h1>Beacon Search</h1></main>"
+  }
+});
+
+/** Minimal official-site allowlist; any LinkedIn or unplanned request fails the E2E. */
+export function mockedFounderCompanyPage(url: string): FetchedPage {
+  const page = FOUNDER_COMPANY_PAGES[url];
+  if (page !== undefined) return page;
+  throw new Error(`Unexpected mocked founder endpoint: ${url}`);
 }

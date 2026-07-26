@@ -12,6 +12,7 @@ import type { Company } from "../../src/db/repositories.js";
 import { DomainError } from "../../src/domain/errors.js";
 import { createCareerApplication, startServer } from "../../src/index.js";
 import type { DraftMediaStorage } from "../../src/media/storage.js";
+import { createTestDatabase } from "../support/database.js";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -427,6 +428,100 @@ it("composes one lazy owner-scoped Brand Studio per authenticated request and fa
       unauthenticatedClient.close(),
       unauthenticatedServer.close()
     ]);
+  }
+});
+
+it("composes founder research per owner and one application-scoped capability download route", async () => {
+  const subject = "123e4567-e89b-42d3-a456-426614174000";
+  const otherSubject = "223e4567-e89b-42d3-a456-426614174000";
+  const database = await createTestDatabase();
+  const runtime = await createCareerApplication({
+    config: {
+      ...testConfig(),
+      baseUrl: "https://career.example",
+      allowedSubject: subject
+    },
+    database,
+    ycSource: {
+      fetch: async () => ({
+        url: "https://www.ycombinator.com/companies",
+        checkedAt: "2026-07-26T06:00:00.000Z",
+        html: `<!doctype html><main data-yc-company-directory>
+          <article data-yc-company-id="composition-yc">
+            <a class="company-name" href="/companies/composition">Composition</a>
+            <a data-company-website href="https://composition.example/">Website</a>
+          </article>
+        </main>`
+      })
+    },
+    now: () => new Date("2026-07-26T06:00:00.000Z")
+  });
+  const connect = async (
+    context: Parameters<typeof runtime.createMcpServer>[0]
+  ) => {
+    const server = runtime.createMcpServer(context);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "founder-composition", version: "1.0.0" });
+    await Promise.all([
+      server.connect(serverTransport),
+      client.connect(clientTransport)
+    ]);
+    return { client, server };
+  };
+  const owner = await connect({ subject, accessToken: "owner-token" });
+  const otherOwner = await connect({ subject: otherSubject, accessToken: "other-token" });
+  const unauthenticated = await connect(undefined);
+
+  try {
+    const started = await owner.client.callTool({
+      name: "start_yc_founder_research",
+      arguments: { limit: 1 }
+    });
+    expect(started.isError).not.toBe(true);
+    const runId = (
+      started.structuredContent as { data: { run: { id: string } } }
+    ).data.run.id;
+    expect(await database.founderResearchRuns.getOwned(runId, subject)).toBeDefined();
+    expect(await database.founderResearchRuns.getOwned(runId, otherSubject)).toBeUndefined();
+
+    const crossOwner = await otherOwner.client.callTool({
+      name: "process_yc_founder_research",
+      arguments: { runId, maxCompanies: 1 }
+    });
+    expect(crossOwner.structuredContent).toEqual({
+      data: { error: { code: "NOT_FOUND" } }
+    });
+    const unauthenticatedStart = await unauthenticated.client.callTool({
+      name: "start_yc_founder_research",
+      arguments: { limit: 1 }
+    });
+    expect(unauthenticatedStart.structuredContent).toEqual({
+      data: { error: { code: "AUTH_REQUIRED" } }
+    });
+
+    const resources = await owner.client.listResources();
+    expect(resources.resources).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uri: "ui://pmm-career-mcp/founder-export-card.html",
+        _meta: expect.objectContaining({
+          "openai/widgetDomain": "https://career.example"
+        })
+      })
+    ]));
+    await request(runtime.app)
+      .get("/research-exports/123e4567-e89b-42d3-a456-426614174099/download")
+      .query({ capability: "A".repeat(43) })
+      .expect(404, { error: "Founder research export is unavailable" });
+  } finally {
+    await Promise.all([
+      owner.client.close(),
+      owner.server.close(),
+      otherOwner.client.close(),
+      otherOwner.server.close(),
+      unauthenticated.client.close(),
+      unauthenticated.server.close()
+    ]);
+    await database.close();
   }
 });
 

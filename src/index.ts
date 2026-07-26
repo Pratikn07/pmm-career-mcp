@@ -14,6 +14,11 @@ import {
 } from "./db/client.js";
 import { DomainError } from "./domain/errors.js";
 import { createDraftService } from "./drafts/service.js";
+import { createFounderCandidateService } from "./founder-research/candidate-service.js";
+import { createFounderExportDownloadService } from "./founder-research/download-capability.js";
+import { createFounderResearchExportService } from "./founder-research/export-service.js";
+import { createFounderOutreachService } from "./founder-research/outreach-service.js";
+import { createFounderResearchRunService } from "./founder-research/run-service.js";
 import { createHttpApp } from "./http/app.js";
 import { createLinkedInOAuth, type LinkedInOAuth } from "./linkedin/oauth.js";
 import { loadLinkedInCredential } from "./linkedin/posts-client.js";
@@ -191,6 +196,23 @@ function hasPrivateMediaConfiguration(config: AppConfig): boolean {
   }
 }
 
+function canonicalFounderApplicationOrigin(value: string): string | undefined {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:"
+      && url.username === ""
+      && url.password === ""
+      && url.pathname === "/"
+      && url.search === ""
+      && url.hash === ""
+      && url.origin === value
+      ? url.origin
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Composes the production server and also provides an injection seam for the
  * offline end-to-end test. No service is contacted until its MCP tool is called.
@@ -231,6 +253,13 @@ export async function createCareerApplication(
     }));
   const linkedin = options.linkedinOAuth ?? unavailableLinkedInOAuth();
   const mediaStorageFactory = options.mediaStorageFactory ?? createSupabaseDraftMediaStorage;
+  const founderApplicationOrigin = canonicalFounderApplicationOrigin(options.config.baseUrl);
+  const founderExportDownloads = options.config.allowedSubject === undefined
+    ? undefined
+    : createFounderExportDownloadService(database, {
+      subject: options.config.allowedSubject,
+      now
+    });
   const createMcpServer = (context: RequestAuthContext | undefined): McpServer => {
     const draftSubject = context?.subject ?? options.config.allowedSubject;
     const drafts = draftSubject === undefined
@@ -262,6 +291,28 @@ export async function createCareerApplication(
     const brand = context === undefined
       ? undefined
       : createBrandBriefService(database, { subject: context.subject });
+    const founderResearch = context === undefined || founderApplicationOrigin === undefined
+      ? undefined
+      : {
+          applicationUrl: founderApplicationOrigin,
+          runs: createFounderResearchRunService(database, {
+            subject: context.subject,
+            ycProvider,
+            peopleDiscovery,
+            now
+          }),
+          candidates: createFounderCandidateService(database, {
+            subject: context.subject,
+            now
+          }),
+          outreach: createFounderOutreachService(database, {
+            subject: context.subject
+          }),
+          exports: createFounderResearchExportService(database, {
+            subject: context.subject,
+            now
+          })
+        };
     let brandRenderer;
     if (context !== undefined && hasPrivateMediaConfiguration(options.config)) {
       try {
@@ -329,6 +380,7 @@ export async function createCareerApplication(
       ...(media === undefined ? {} : { media }),
       ...(brand === undefined ? {} : { brand }),
       ...(brandRenderer === undefined ? {} : { brandRenderer }),
+      ...(founderResearch === undefined ? {} : { founderResearch }),
       publish: publisher,
       linkedin,
       getLinkedInConnectionStatus: async () => {
@@ -356,7 +408,10 @@ export async function createCareerApplication(
   const app = createHttpApp({
     config: options.config,
     checkReady: () => database.checkReady(),
-    mcpServerFactory: createMcpServer
+    mcpServerFactory: createMcpServer,
+    ...(founderExportDownloads === undefined
+      ? {}
+      : { downloadFounderExport: founderExportDownloads.download })
   });
   app.get("/linkedin/callback", async (request, response) => {
     const code = typeof request.query.code === "string" ? request.query.code : undefined;
