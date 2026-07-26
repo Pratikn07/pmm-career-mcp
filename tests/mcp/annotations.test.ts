@@ -53,6 +53,12 @@ it("uses complete, safe tool annotations", async () => {
     destructiveHint: false
   });
   expect(annotationsFor("publish_exact_linkedin_post")).toEqual({ readOnlyHint: false, openWorldHint: true, destructiveHint: false });
+  expect(annotationsFor("start_yc_founder_research")).toEqual({ readOnlyHint: false, openWorldHint: false, destructiveHint: false });
+  expect(annotationsFor("process_yc_founder_research")).toEqual({ readOnlyHint: false, openWorldHint: true, destructiveHint: false });
+  expect(annotationsFor("save_founder_profile_candidates")).toEqual({ readOnlyHint: false, openWorldHint: false, destructiveHint: false });
+  expect(annotationsFor("confirm_founder_profile_candidate")).toEqual({ readOnlyHint: false, openWorldHint: false, destructiveHint: false });
+  expect(annotationsFor("save_founder_outreach_batch")).toEqual({ readOnlyHint: false, openWorldHint: false, destructiveHint: false });
+  expect(annotationsFor("export_founder_research_workbook")).toEqual({ readOnlyHint: false, openWorldHint: false, destructiveHint: false });
   expect([...byName.values()].every((tool) => tool.annotations !== undefined && tool.annotations !== null)).toBe(true);
   for (const tool of byName.values()) {
     expect(tool._meta).toMatchObject({
@@ -76,6 +82,10 @@ it("uses complete, safe tool annotations", async () => {
   });
   expect(byName.get("publish_exact_linkedin_post")?._meta).toMatchObject({
     ui: { visibility: ["app"] },
+    "openai/widgetAccessible": true
+  });
+  expect(byName.get("export_founder_research_workbook")?._meta).toMatchObject({
+    "openai/outputTemplate": "ui://pmm-career-mcp/founder-export-card.html",
     "openai/widgetAccessible": true
   });
 

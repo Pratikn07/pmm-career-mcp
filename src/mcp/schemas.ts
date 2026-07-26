@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { validateNonFetchingLinkedInProfileUrl } from "../founder-research/profile-url.js";
 
 const id = z.string().trim().min(1).max(256);
 const name = z.string().trim().min(1).max(200);
@@ -543,4 +544,197 @@ export const publishExactLinkedInPostOutput = outputSchema(z.object({
     z.object({ state: z.literal("publish_failed") }).strict(),
     z.object({ state: z.literal("publish_unknown") }).strict()
   ])
+}).strict());
+
+const founderResearchId = z.string().uuid();
+const founderResearchRunState = z.enum([
+  "PENDING", "RUNNING", "NEEDS_PUBLIC_SEARCH", "COMPLETE", "PARTIAL", "FAILED"
+]);
+const founderResearchItemState = z.enum([
+  "COMPLETE", "PARTIAL", "NOT_FOUND", "AMBIGUOUS", "NEEDS_PUBLIC_SEARCH", "FAILED", "STALE_ATTEMPT"
+]);
+const founderProfileStatus = z.enum(["VERIFIED", "CANDIDATE", "CONFIRMED", "REJECTED"]);
+const founderCandidateProfileUrl = z.string().superRefine((value, context) => {
+  if (!validateNonFetchingLinkedInProfileUrl(value).ok) {
+    context.addIssue({ code: "custom", message: "must be a safe non-fetching LinkedIn profile URL" });
+  }
+});
+
+function unicodeText(maximum: number) {
+  return z.string().trim().min(1).refine((value) => [...value.normalize("NFC")].length <= maximum, {
+    message: `must contain at most ${maximum} Unicode characters`
+  });
+}
+const founderRunSchema = z.object({
+  id: founderResearchId,
+  state: founderResearchRunState,
+  requestedLimit: z.number().int().min(1).max(50),
+  selectedCount: z.number().int().min(0).max(50),
+  processedCount: z.number().int().min(0).max(50),
+  completeCount: z.number().int().min(0).max(50),
+  partialCount: z.number().int().min(0).max(50),
+  ambiguousCount: z.number().int().min(0).max(50),
+  notFoundCount: z.number().int().min(0).max(50),
+  failedCount: z.number().int().min(0).max(50),
+  createdAt: timestamp,
+  startedAt: timestamp.nullable(),
+  completedAt: timestamp.nullable(),
+  updatedAt: timestamp
+}).strict();
+const founderCandidateSchema = z.object({
+  id: founderResearchId,
+  runPersonId: founderResearchId,
+  profileUrl: founderCandidateProfileUrl,
+  status: founderProfileStatus,
+  sourceKind: z.enum(["OFFICIAL_YC", "OFFICIAL_COMPANY", "PUBLIC_SEARCH", "MANUAL_CONFIRMATION"]),
+  searchQuery: z.string().min(1).max(500).nullable(),
+  evidenceUrl: url,
+  evidenceTitle: z.string().min(1).max(512).nullable(),
+  evidenceSnippet: z.string().min(1).max(2_000).nullable(),
+  checkedAt: timestamp,
+  confidence,
+  createdAt: timestamp,
+  updatedAt: timestamp
+}).strict();
+const founderCandidateResultSchema = z.object({
+  candidate: founderCandidateSchema,
+  canonical: founderCandidateSchema.optional(),
+  requiresManualReview: z.boolean()
+}).strict();
+
+export const startYcFounderResearchInput = z.object({
+  batch: z.string().trim().min(1).max(80).optional(),
+  industry: z.string().trim().min(1).max(160).optional(),
+  status: z.string().trim().min(1).max(80).optional(),
+  location: z.string().trim().min(1).max(160).optional(),
+  keyword: z.string().trim().min(1).max(240).optional(),
+  hiring: z.boolean().optional(),
+  limit: z.number().int().min(1).max(50).default(50)
+}).strict();
+export const processYcFounderResearchInput = z.object({
+  runId: founderResearchId,
+  maxCompanies: z.number().int().min(1).max(5).default(5)
+}).strict();
+const founderProfileCandidateInput = z.object({
+  runItemId: founderResearchId,
+  runPersonId: founderResearchId.optional(),
+  founderName: z.string().trim().min(1).max(200),
+  founderRole: z.string().trim().min(1).max(128),
+  candidateProfileUrl: founderCandidateProfileUrl,
+  searchQuery: z.string().trim().min(1).max(500),
+  resultUrl: founderCandidateProfileUrl,
+  resultTitle: z.string().trim().min(1).max(512).optional(),
+  resultSnippet: z.string().trim().min(1).max(2_000).optional(),
+  checkedAt: timestamp,
+  confidence,
+  linkedInNotFetched: z.literal(true)
+}).strict().refine((value) => value.resultTitle !== undefined || value.resultSnippet !== undefined, {
+  message: "resultTitle or resultSnippet is required"
+}).refine((value) => (
+  (() => {
+    const profile = validateNonFetchingLinkedInProfileUrl(value.candidateProfileUrl);
+    const result = validateNonFetchingLinkedInProfileUrl(value.resultUrl);
+    return profile.ok && result.ok && profile.value === result.value;
+  })()
+), { message: "resultUrl must match candidateProfileUrl" });
+export const saveFounderProfileCandidatesInput = z.object({
+  runId: founderResearchId,
+  candidates: z.array(founderProfileCandidateInput).min(1).max(25)
+}).strict();
+export const confirmFounderProfileCandidateInput = z.object({
+  candidateId: founderResearchId,
+  decision: z.enum(["CONFIRM", "REJECT"]),
+  note: z.string().trim().min(1).max(1_000).optional()
+}).strict();
+const founderOutreachEntryInput = z.object({
+  personId: founderResearchId,
+  pmmOpportunity: scoreComponent,
+  referralPotential: scoreComponent,
+  networkValue: scoreComponent,
+  total: scoreComponent,
+  confidence,
+  reasons: z.array(shortText).max(50),
+  missingEvidence: z.array(shortText).max(50),
+  evidenceIds: z.array(founderResearchId).max(25),
+  personalizationClaims: z.array(z.object({
+    text: z.string().trim().min(1).max(500),
+    evidenceIds: z.array(founderResearchId).min(1).max(25)
+  }).strict()).max(25),
+  text: unicodeText(200),
+  reviewState: z.enum(["READY_TO_REVIEW", "NEEDS_REVIEW"]).optional()
+}).strict();
+export const saveFounderOutreachBatchInput = z.object({
+  runId: founderResearchId,
+  requestId: z.string().trim().min(1).max(200),
+  entries: z.array(founderOutreachEntryInput).min(1).max(25)
+}).strict();
+export const exportFounderResearchWorkbookInput = z.object({
+  runId: founderResearchId,
+  includeCandidateUrls: z.literal(true).default(true)
+}).strict();
+
+export const startYcFounderResearchOutput = outputSchema(z.object({
+  run: founderRunSchema,
+  selectedCompanyIds: z.array(founderResearchId).max(50),
+  nextAction: z.literal("PROCESS")
+}).strict());
+const founderProcessedItemSchema = z.object({
+  runItemId: founderResearchId,
+  companyId: founderResearchId,
+  leaseAttempt: z.number().int().min(0).max(100),
+  state: founderResearchItemState,
+  founderCount: z.number().int().min(0).max(50),
+  verifiedProfileCount: z.number().int().min(0).max(50),
+  errorCode: z.string().regex(/^[A-Z][A-Z0-9_]{0,127}$/u).optional(),
+  errorSummary: z.string().trim().min(1).max(240).optional()
+}).strict();
+const founderPublicSearchTaskSchema = z.object({
+  runItemId: founderResearchId,
+  companyId: founderResearchId,
+  companyName: z.string().trim().min(1).max(200),
+  officialWebsiteUrl: url.optional(),
+  knownPersonId: founderResearchId.optional(),
+  knownFounderName: z.string().trim().min(1).max(200).optional(),
+  knownFounderRole: z.string().trim().min(1).max(160).optional(),
+  suggestedQueries: z.array(z.string().trim().min(1).max(500)).max(5),
+  reason: z.enum(["PROFILE_URL_MISSING", "FOUNDER_NOT_FOUND", "AMBIGUOUS"])
+}).strict();
+export const processYcFounderResearchOutput = outputSchema(z.object({
+  run: founderRunSchema,
+  leasedCount: z.number().int().min(0).max(5),
+  items: z.array(founderProcessedItemSchema).max(5),
+  publicSearchTasks: z.array(founderPublicSearchTaskSchema).max(25),
+  shouldContinue: z.boolean(),
+  nextAction: z.enum(["PROCESS", "PUBLIC_SEARCH", "EXPORT", "COMPLETE"])
+}).strict());
+export const saveFounderProfileCandidatesOutput = outputSchema(z.object({
+  results: z.array(founderCandidateResultSchema).max(25)
+}).strict());
+export const confirmFounderProfileCandidateOutput = outputSchema(founderCandidateResultSchema);
+const founderOutreachDraftSchema = z.object({
+  personId: founderResearchId,
+  targetId: founderResearchId,
+  draftId: founderResearchId,
+  version: z.number().int().positive(),
+  purpose: z.literal("linkedin_connection_request"),
+  text: unicodeText(200),
+  evidenceIds: z.array(founderResearchId).max(25)
+}).strict();
+export const saveFounderOutreachBatchOutput = outputSchema(z.object({
+  drafts: z.array(founderOutreachDraftSchema).max(25),
+  needsVerification: z.array(z.object({
+    personId: founderResearchId,
+    reason: z.literal("PROFILE_NOT_CONFIRMED")
+  }).strict()).max(25)
+}).strict());
+export const exportFounderResearchWorkbookOutput = outputSchema(z.object({
+  export: z.object({
+    id: founderResearchId,
+    runId: founderResearchId,
+    createdAt: timestamp,
+    expiresAt: timestamp,
+    rowCount: z.number().int().nonnegative().max(50),
+    sheetCount: z.literal(4),
+    checksumSha256: checksum
+  }).strict()
 }).strict());

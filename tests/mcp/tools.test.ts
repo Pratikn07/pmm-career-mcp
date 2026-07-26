@@ -9,13 +9,21 @@ import {
   attachLinkedInPostImagesOutput,
   createBrandedVisualBriefInput,
   createBrandedVisualBriefOutput,
+  confirmFounderProfileCandidateInput,
+  exportFounderResearchWorkbookInput,
+  processYcFounderResearchInput,
   rankNetworkingTargetsInput,
   renderBrandedLinkedInCoverInput,
   renderBrandedLinkedInCoverOutput,
+  saveFounderOutreachBatchInput,
+  saveFounderOutreachBatchOutput,
+  saveFounderProfileCandidatesInput,
   saveTargetInput,
+  startYcFounderResearchInput,
   setLinkedInPostImagesInput
 } from "../../src/mcp/schemas.js";
 import { scoreTarget, type ScoreTargetInput } from "../../src/ranking/score-target.js";
+import { DomainError } from "../../src/domain/errors.js";
 import request from "supertest";
 
 function deferred<T>() {
@@ -52,7 +60,13 @@ const expectedTools = [
   "list_post_history",
   "get_linkedin_connection_status",
   "create_linkedin_authorization_url",
-  "publish_exact_linkedin_post"
+  "publish_exact_linkedin_post",
+  "start_yc_founder_research",
+  "process_yc_founder_research",
+  "save_founder_profile_candidates",
+  "confirm_founder_profile_candidate",
+  "save_founder_outreach_batch",
+  "export_founder_research_workbook"
 ] as const;
 
 const FIXED_NOW = new Date("2026-07-17T00:00:00.000Z");
@@ -482,9 +496,239 @@ async function listTools() {
 it("registers exactly the approved Career MCP tools", async () => {
   const tools = await listTools();
   expect(tools.map((tool) => tool.name).sort()).toEqual([...expectedTools].sort());
-  expect(tools.map((tool) => tool.name).some((name) => /scrape|message|schedule|batch/.test(name))).toBe(false);
+  expect(tools.map((tool) => tool.name).some((name) => /scrape|message|schedule/.test(name))).toBe(false);
   expect(tools.every((tool) => tool.inputSchema.additionalProperties === false)).toBe(true);
   expect(tools.every((tool) => tool.outputSchema !== undefined)).toBe(true);
+});
+
+it("publishes strict bounded founder-research inputs", () => {
+  const runId = "123e4567-e89b-12d3-a456-426614174010";
+  const runItemId = "123e4567-e89b-12d3-a456-426614174011";
+  const runPersonId = "123e4567-e89b-12d3-a456-426614174012";
+  const personId = "123e4567-e89b-12d3-a456-426614174013";
+  const candidateId = "123e4567-e89b-12d3-a456-426614174014";
+  const evidenceId = "123e4567-e89b-12d3-a456-426614174015";
+  const start = startYcFounderResearchInput.parse({ limit: 50 });
+  expect(start).toEqual({ limit: 50 });
+  expect(startYcFounderResearchInput.safeParse({ limit: 51 }).success).toBe(false);
+  expect(startYcFounderResearchInput.safeParse({ ownerSubject: runId }).success).toBe(false);
+  expect(processYcFounderResearchInput.parse({ runId, maxCompanies: 5 })).toEqual({ runId, maxCompanies: 5 });
+  expect(processYcFounderResearchInput.safeParse({ runId, maxCompanies: 6 }).success).toBe(false);
+  expect(processYcFounderResearchInput.safeParse({ runId, extra: true }).success).toBe(false);
+
+  const candidate = {
+    runItemId,
+    runPersonId,
+    founderName: "Ada Lovelace",
+    founderRole: "Co-founder",
+    candidateProfileUrl: "https://www.linkedin.com/in/ada-lovelace",
+    searchQuery: "Ada Lovelace Acme LinkedIn",
+    resultUrl: "https://www.linkedin.com/in/ada-lovelace?trk=public_profile",
+    resultTitle: "Ada Lovelace at Acme",
+    checkedAt: FIXED_NOW.toISOString(),
+    confidence: 0.8,
+    linkedInNotFetched: true
+  };
+  expect(saveFounderProfileCandidatesInput.parse({ runId, candidates: [candidate] })).toEqual({ runId, candidates: [candidate] });
+  const { runPersonId: _runPersonId, ...unresolvedIdentity } = candidate;
+  expect(saveFounderProfileCandidatesInput.safeParse({ runId, candidates: [unresolvedIdentity] }).success).toBe(true);
+  expect(saveFounderProfileCandidatesInput.safeParse({ runId, candidates: [{ ...candidate, resultTitle: undefined }] }).success).toBe(false);
+  expect(saveFounderProfileCandidatesInput.safeParse({ runId, candidates: Array.from({ length: 26 }, () => candidate) }).success).toBe(false);
+  expect(saveFounderProfileCandidatesInput.safeParse({ runId, candidates: [{ ...candidate, linkedInNotFetched: false }] }).success).toBe(false);
+  expect(saveFounderProfileCandidatesInput.safeParse({ runId, candidates: [{ ...candidate, resultUrl: "https://www.linkedin.com/in/ada-lovelace?unsafe=value" }] }).success).toBe(false);
+  expect(saveFounderProfileCandidatesInput.safeParse({ runId, candidates: [{ ...candidate, candidateProfileUrl: "https://www.linkedin.com/in/Ada-Lovelace", resultUrl: "https://www.linkedin.com/in/ada-lovelace" }] }).success).toBe(false);
+  expect(confirmFounderProfileCandidateInput.parse({ candidateId, decision: "CONFIRM" })).toEqual({ candidateId, decision: "CONFIRM" });
+  expect(confirmFounderProfileCandidateInput.safeParse({ candidateId, decision: "DELETE" }).success).toBe(false);
+
+  const outreach = {
+    personId,
+    pmmOpportunity: 50,
+    referralPotential: 50,
+    networkValue: 50,
+    total: 50,
+    confidence: 0.8,
+    reasons: ["Evidence-backed"],
+    missingEvidence: [],
+    evidenceIds: [evidenceId],
+    personalizationClaims: [{ text: "Acme's launch", evidenceIds: [evidenceId] }],
+    text: "Hi Ada — I appreciated Acme's launch. I'd value connecting.",
+    reviewState: "READY_TO_REVIEW"
+  };
+  expect(saveFounderOutreachBatchInput.safeParse({ runId, requestId: "request-1", entries: [outreach] }).success).toBe(true);
+  expect(saveFounderOutreachBatchInput.safeParse({
+    runId,
+    requestId: "request-1",
+    entries: [{ ...outreach, text: "🙂".repeat(200) }]
+  }).success).toBe(true);
+  expect(saveFounderOutreachBatchInput.safeParse({
+    runId,
+    requestId: "request-1",
+    entries: [{ ...outreach, text: "🙂".repeat(201) }]
+  }).success).toBe(false);
+  expect(saveFounderOutreachBatchOutput.safeParse({ data: {
+    drafts: [{
+      personId,
+      targetId: "123e4567-e89b-12d3-a456-426614174016",
+      draftId: "123e4567-e89b-12d3-a456-426614174017",
+      version: 1,
+      purpose: "linkedin_connection_request",
+      text: "🙂".repeat(200),
+      evidenceIds: []
+    }],
+    needsVerification: []
+  } }).success).toBe(true);
+  expect(saveFounderOutreachBatchInput.safeParse({ runId, requestId: "request-1", entries: Array.from({ length: 26 }, () => outreach) }).success).toBe(false);
+  expect(exportFounderResearchWorkbookInput.parse({ runId })).toEqual({ runId, includeCandidateUrls: true });
+  expect(exportFounderResearchWorkbookInput.safeParse({ runId, includeCandidateUrls: false }).success).toBe(false);
+  expect(exportFounderResearchWorkbookInput.safeParse({ runId, extra: true }).success).toBe(false);
+});
+
+it("uses owner-scoped founder services and keeps export capabilities widget-private", async () => {
+  const runId = "123e4567-e89b-12d3-a456-426614174010";
+  const runItemId = "123e4567-e89b-12d3-a456-426614174011";
+  const runPersonId = "123e4567-e89b-12d3-a456-426614174012";
+  const personId = "123e4567-e89b-12d3-a456-426614174013";
+  const candidateId = "123e4567-e89b-12d3-a456-426614174014";
+  const exportId = "123e4567-e89b-12d3-a456-426614174016";
+  const run = {
+    id: runId,
+    state: "PENDING",
+    queryJson: {},
+    requestedLimit: 1,
+    selectedCount: 1,
+    processedCount: 0,
+    completeCount: 0,
+    partialCount: 0,
+    ambiguousCount: 0,
+    notFoundCount: 0,
+    failedCount: 0,
+    createdAt: FIXED_NOW.toISOString(),
+    startedAt: null,
+    completedAt: null,
+    updatedAt: FIXED_NOW.toISOString()
+  };
+  const candidate = {
+    id: candidateId,
+    runPersonId,
+    profileUrl: "https://www.linkedin.com/in/ada-lovelace",
+    status: "CANDIDATE",
+    sourceKind: "PUBLIC_SEARCH",
+    searchQuery: "Ada Lovelace Acme LinkedIn",
+    evidenceUrl: "https://www.linkedin.com/in/ada-lovelace?trk=public_profile",
+    evidenceTitle: "Ada Lovelace at Acme",
+    evidenceSnippet: null,
+    checkedAt: FIXED_NOW.toISOString(),
+    confidence: 0.8,
+    createdAt: FIXED_NOW.toISOString(),
+    updatedAt: FIXED_NOW.toISOString()
+  };
+  const capability = "A".repeat(43);
+  const startRun = vi.fn(async () => ({ run, selectedCompanyIds: ["123e4567-e89b-12d3-a456-426614174017"] }));
+  const processRun = vi.fn(async () => ({
+    run: { ...run, state: "NEEDS_PUBLIC_SEARCH" },
+    leasedCount: 1,
+    items: Array.from({ length: 6 }, (_, index) => ({ runItemId: `${runItemId.slice(0, -1)}${index}`, companyId: "123e4567-e89b-12d3-a456-426614174017", leaseAttempt: 1, state: "NEEDS_PUBLIC_SEARCH", founderCount: 1, verifiedProfileCount: 0, ...(index === 0 ? { errorCode: "OFFICIAL_SOURCE_UNAVAILABLE", errorSummary: "Official source unavailable" } : {}) })),
+    publicSearchTasks: Array.from({ length: 26 }, (_, index) => ({ runItemId: `${runItemId.slice(0, -2)}${String(index).padStart(2, "0")}`, companyId: "123e4567-e89b-12d3-a456-426614174017", companyName: "Acme", suggestedQueries: ["Ada Lovelace Acme LinkedIn"], reason: "PROFILE_URL_MISSING" })),
+    shouldContinue: false
+  }));
+  const saveCandidate = vi.fn(async () => ({ candidate, canonical: undefined, requiresManualReview: true }));
+  const saveCandidateForRunItem = vi.fn(async () => ({ candidate, canonical: undefined, requiresManualReview: true }));
+  const decideCandidate = vi.fn(async () => ({ candidate: { ...candidate, status: "CONFIRMED" }, canonical: { ...candidate, status: "CONFIRMED" }, requiresManualReview: false }));
+  const saveBatch = vi.fn(async () => ({
+    drafts: [{ personId, targetId: "123e4567-e89b-12d3-a456-426614174018", draftId: "123e4567-e89b-12d3-a456-426614174019", version: 1, purpose: "linkedin_connection_request", text: "Hi Ada — I'd value connecting.", evidenceIds: [] }],
+    needsVerification: []
+  }));
+  const createExport = vi.fn(async (_input: unknown, privateMetadata: (value: { capability: string; expiresAt: string }) => void) => {
+    privateMetadata({ capability, expiresAt: "2026-07-17T00:15:00.000Z" });
+    return {
+      id: exportId,
+      runId,
+      createdAt: FIXED_NOW.toISOString(),
+      fileName: "founder-research.xlsx",
+      mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      byteSize: 100,
+      checksumSha256: "a".repeat(64),
+      rowCount: 1,
+      sheetCount: 4,
+      expiresAt: "2026-07-24T00:00:00.000Z"
+    };
+  });
+  const deps = dependencies() as CareerMcpDependencies & { founderResearch: unknown };
+  deps.founderResearch = {
+    applicationUrl: "https://career.example",
+    runs: { startRun: startRun as never, processRun: processRun as never },
+    candidates: { saveCandidate: saveCandidate as never, saveCandidateForRunItem: saveCandidateForRunItem as never, decideCandidate: decideCandidate as never },
+    outreach: { saveBatch: saveBatch as never },
+    exports: { createExport: createExport as never }
+  };
+  const server = createCareerMcpServer(deps, {
+    requestAuthContext: { subject: "123e4567-e89b-12d3-a456-426614174000", accessToken: "request-token" }
+  });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "test", version: "1.0.0" });
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+
+  const start = await client.callTool({ name: "start_yc_founder_research", arguments: { limit: 1 } });
+  expect(start.structuredContent).toMatchObject({ data: { run: { id: runId }, selectedCompanyIds: ["123e4567-e89b-12d3-a456-426614174017"] } });
+  expect(startRun).toHaveBeenCalledWith({}, 1);
+  const processed = await client.callTool({ name: "process_yc_founder_research", arguments: { runId, maxCompanies: 5 } });
+  expect(processed.structuredContent).toMatchObject({ data: { shouldContinue: false } });
+  expect((processed.structuredContent as { data: { items: unknown[]; publicSearchTasks: unknown[] } }).data.items).toHaveLength(5);
+  expect((processed.structuredContent as { data: { items: unknown[]; publicSearchTasks: unknown[] } }).data.publicSearchTasks).toHaveLength(25);
+  expect((processed.structuredContent as { data: { items: unknown[] } }).data.items[0]).toMatchObject({ errorCode: "OFFICIAL_SOURCE_UNAVAILABLE", errorSummary: "Official source unavailable" });
+  expect(processRun).toHaveBeenCalledWith(runId, 5);
+  await client.callTool({ name: "save_founder_profile_candidates", arguments: { runId, candidates: [{ runItemId, founderName: "Ada Lovelace", founderRole: "Co-founder", candidateProfileUrl: candidate.profileUrl, searchQuery: candidate.searchQuery, resultUrl: candidate.evidenceUrl, resultTitle: candidate.evidenceTitle, checkedAt: candidate.checkedAt, confidence: candidate.confidence, linkedInNotFetched: true }] } });
+  expect(saveCandidateForRunItem).toHaveBeenCalledOnce();
+  expect(saveCandidate).not.toHaveBeenCalled();
+  await client.callTool({ name: "confirm_founder_profile_candidate", arguments: { candidateId, decision: "CONFIRM" } });
+  expect(decideCandidate).toHaveBeenCalledWith({ candidateId, decision: "CONFIRM" });
+  await client.callTool({ name: "save_founder_outreach_batch", arguments: { runId, requestId: "request-1", entries: [{ personId, pmmOpportunity: 50, referralPotential: 50, networkValue: 50, total: 50, confidence: 0.8, reasons: ["Evidence-backed"], missingEvidence: [], evidenceIds: [], personalizationClaims: [], text: "Hi Ada — I'd value connecting.", reviewState: "READY_TO_REVIEW" }] } });
+  expect(saveBatch).toHaveBeenCalledOnce();
+  const exported = await client.callTool({ name: "export_founder_research_workbook", arguments: { runId } });
+  const resources = await client.listResources();
+  await Promise.all([client.close(), server.close()]);
+
+  expect(exported.structuredContent).toEqual({ data: { export: { id: exportId, runId, createdAt: FIXED_NOW.toISOString(), expiresAt: "2026-07-24T00:00:00.000Z", rowCount: 1, sheetCount: 4, checksumSha256: "a".repeat(64) } } });
+  expect(exported._meta).toEqual({ downloadUrl: `https://career.example/research-exports/${exportId}/download?capability=${capability}`, expiresAt: "2026-07-17T00:15:00.000Z" });
+  expect(createExport).toHaveBeenCalledWith({ runId, idempotencyKey: `founder-export:${runId}:v1` }, expect.any(Function));
+  expect(JSON.stringify(exported.content)).not.toContain(capability);
+  expect(JSON.stringify(exported.structuredContent)).not.toContain(capability);
+  expect(JSON.stringify(exported.content)).not.toContain("/download?");
+  expect(JSON.stringify(exported.structuredContent)).not.toContain("/download?");
+  expect(resources.resources.map((resource) => resource.uri)).toContain("ui://pmm-career-mcp/founder-export-card.html");
+});
+
+it("requires authenticated owner-scoped founder services and maps only stable errors", async () => {
+  const runId = "123e4567-e89b-12d3-a456-426614174010";
+  const deps = dependencies() as CareerMcpDependencies & { founderResearch: unknown };
+  const startRun = vi.fn(async () => { throw new DomainError("EVIDENCE_MISMATCH", "internal candidate detail"); });
+  deps.founderResearch = {
+    applicationUrl: "https://career.example",
+    runs: { startRun: startRun as never, processRun: vi.fn() as never },
+    candidates: { saveCandidate: vi.fn() as never, saveCandidateForRunItem: vi.fn() as never, decideCandidate: vi.fn() as never },
+    outreach: { saveBatch: vi.fn() as never },
+    exports: { createExport: vi.fn() as never }
+  };
+  const unauthenticated = createCareerMcpServer(deps);
+  const [unauthClientTransport, unauthServerTransport] = InMemoryTransport.createLinkedPair();
+  const unauthClient = new Client({ name: "test", version: "1.0.0" });
+  await Promise.all([unauthenticated.connect(unauthServerTransport), unauthClient.connect(unauthClientTransport)]);
+  const unauthResult = await unauthClient.callTool({ name: "start_yc_founder_research", arguments: { limit: 1 } });
+  await Promise.all([unauthClient.close(), unauthenticated.close()]);
+  expect(unauthResult.structuredContent).toEqual({ data: { error: { code: "AUTH_REQUIRED" } } });
+  expect(startRun).not.toHaveBeenCalled();
+
+  const authenticated = createCareerMcpServer(deps, {
+    requestAuthContext: { subject: "123e4567-e89b-12d3-a456-426614174000", accessToken: "request-token" }
+  });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "test", version: "1.0.0" });
+  await Promise.all([authenticated.connect(serverTransport), client.connect(clientTransport)]);
+  const result = await client.callTool({ name: "start_yc_founder_research", arguments: { limit: 1 } });
+  await Promise.all([client.close(), authenticated.close()]);
+  expect(result.structuredContent).toEqual({ data: { error: { code: "EVIDENCE_MISMATCH" } } });
+  expect(JSON.stringify(result)).not.toContain("internal candidate detail");
+  expect(JSON.stringify(result)).not.toContain(runId);
 });
 
 it("keeps exact publishing app-only with capability-only input and secret-free output", async () => {
@@ -546,7 +790,13 @@ it("publishes an explicit success and safe-error output contract for every tool"
     list_post_history: "posts",
     get_linkedin_connection_status: "connection",
     create_linkedin_authorization_url: "authorizationUrl",
-    publish_exact_linkedin_post: "result"
+    publish_exact_linkedin_post: "result",
+    start_yc_founder_research: "run",
+    process_yc_founder_research: "items",
+    save_founder_profile_candidates: "results",
+    confirm_founder_profile_candidate: "candidate",
+    save_founder_outreach_batch: "drafts",
+    export_founder_research_workbook: "export"
   };
 
   for (const tool of tools) {

@@ -12,6 +12,18 @@ import type { PostMediaService } from "../media/post-media-service.js";
 import type { PipelineService } from "../pipeline/service.js";
 import type { PreviewService } from "../posts/preview-service.js";
 import type { ReviewService } from "../posts/review-service.js";
+import type { FounderResearchRunService } from "../founder-research/run-service.js";
+import type { FounderCandidateService, SaveFounderProfileCandidateInput } from "../founder-research/candidate-service.js";
+import type { FounderOutreachService, SaveFounderOutreachBatchInput } from "../founder-research/outreach-service.js";
+import type {
+  CreateFounderResearchExportInput,
+  FounderResearchExportMetadata,
+  PrivateFounderExportMetadataConsumer
+} from "../founder-research/export-service.js";
+import {
+  FOUNDER_EXPORT_CARD_URI,
+  registerFounderExportCardResource
+} from "../founder-export-card/resource.js";
 import {
   explainTargetMatch,
   rankTargetScores,
@@ -44,6 +56,8 @@ import {
   draftOutreachInput,
   draftOutreachOutput,
   emptyInputSchema,
+  confirmFounderProfileCandidateInput,
+  confirmFounderProfileCandidateOutput,
   explainTargetMatchInput,
   explainTargetMatchOutput,
   findPmmOpportunitiesInput,
@@ -65,6 +79,14 @@ import {
   recordNoteOutput,
   renderBrandedLinkedInCoverInput,
   renderBrandedLinkedInCoverOutput,
+  exportFounderResearchWorkbookInput,
+  exportFounderResearchWorkbookOutput,
+  processYcFounderResearchInput,
+  processYcFounderResearchOutput,
+  saveFounderOutreachBatchInput,
+  saveFounderOutreachBatchOutput,
+  saveFounderProfileCandidatesInput,
+  saveFounderProfileCandidatesOutput,
   revisePostInput,
   revisePostOutput,
   saveTargetInput,
@@ -74,10 +96,12 @@ import {
   setLinkedInPostImagesInput,
   setLinkedInPostImagesOutput,
   updateOutreachStatusInput,
-  updateOutreachStatusOutput
+  updateOutreachStatusOutput,
+  startYcFounderResearchInput,
+  startYcFounderResearchOutput
 } from "./schemas.js";
 
-export const CAREER_MCP_INSTRUCTIONS = "Never fetch LinkedIn for research. Never claim complete employee coverage. Never claim complete YC-company coverage. Scheduled and model-driven flows must stop after saving private drafts and may only open the non-writing review card. Exact preview and publish actions are app-only, never model-callable, and available only after the current user explicitly asks to publish the exact preview. Never batch or retry publishing. Research is restricted to YC companies and allowed public sources. Drafts and pipeline data stay private. Branded visuals are curiosity covers, not post summaries; source art must contain no text.";
+export const CAREER_MCP_INSTRUCTIONS = "Never fetch LinkedIn for research. Never claim complete employee coverage. Never claim complete YC-company coverage. Scheduled and model-driven flows must stop after saving private drafts and may only open the non-writing review card. Exact preview and publish actions are app-only, never model-callable, and available only after the current user explicitly asks to publish the exact preview. Never batch or retry publishing. Founder research fetches only YC and official company sources; it never opens a LinkedIn URL. For unresolved candidates, ChatGPT may use public search without opening LinkedIn, save exact evidence-backed candidates, and require the user to manually confirm or reject them. Founder workbook exports support manual LinkedIn review and manual connection work only: no connection request or message is ever sent. Research is restricted to YC companies and allowed public sources. Drafts and pipeline data stay private. Branded visuals are curiosity covers, not post summaries; source art must contain no text.";
 
 type YcProvider = { searchYcCompanies(query: CompanySearchQuery): Promise<CompanyResult[]> };
 type ConnectionStatus = {
@@ -109,6 +133,18 @@ export type CareerMcpDependencies = {
     "getProfile" | "createBrief" | "getProvenanceForMedia"
   >;
   brandRenderer?: Pick<BrandRenderService, "render">;
+  founderResearch?: {
+    applicationUrl: string;
+    runs: Pick<FounderResearchRunService, "startRun" | "processRun">;
+    candidates: Pick<FounderCandidateService, "saveCandidate" | "saveCandidateForRunItem" | "decideCandidate">;
+    outreach: Pick<FounderOutreachService, "saveBatch">;
+    exports: {
+      createExport(
+        input: CreateFounderResearchExportInput,
+        privateMetadataConsumer: PrivateFounderExportMetadataConsumer
+      ): Promise<FounderResearchExportMetadata>;
+    };
+  };
 };
 
 export type CareerMcpServerOptions = {
@@ -141,6 +177,11 @@ const brandRenderToolMetadata: Record<string, unknown> = {
 const reviewCardLauncherMetadata: Record<string, unknown> = {
   ...oauthToolMetadata,
   "openai/outputTemplate": LINKEDIN_REVIEW_CARD_URI,
+  "openai/widgetAccessible": true
+};
+const founderExportLauncherMetadata: Record<string, unknown> = {
+  ...oauthToolMetadata,
+  "openai/outputTemplate": FOUNDER_EXPORT_CARD_URI,
   "openai/widgetAccessible": true
 };
 
@@ -261,6 +302,70 @@ function modelSafePost(
   };
 }
 
+function modelSafeFounderRun(run: Awaited<ReturnType<FounderResearchRunService["getRun"]>>) {
+  return {
+    id: run.id,
+    state: run.state,
+    requestedLimit: run.requestedLimit,
+    selectedCount: run.selectedCount,
+    processedCount: run.processedCount,
+    completeCount: run.completeCount,
+    partialCount: run.partialCount,
+    ambiguousCount: run.ambiguousCount,
+    notFoundCount: run.notFoundCount,
+    failedCount: run.failedCount,
+    createdAt: run.createdAt,
+    startedAt: run.startedAt,
+    completedAt: run.completedAt,
+    updatedAt: run.updatedAt
+  };
+}
+
+function modelSafeFounderCandidate(
+  candidate: Awaited<ReturnType<FounderCandidateService["decideCandidate"]>>["candidate"]
+) {
+  return {
+    id: candidate.id,
+    runPersonId: candidate.runPersonId,
+    profileUrl: candidate.profileUrl,
+    status: candidate.status,
+    sourceKind: candidate.sourceKind,
+    searchQuery: candidate.searchQuery,
+    evidenceUrl: candidate.evidenceUrl,
+    evidenceTitle: candidate.evidenceTitle,
+    evidenceSnippet: candidate.evidenceSnippet,
+    checkedAt: candidate.checkedAt,
+    confidence: candidate.confidence,
+    createdAt: candidate.createdAt,
+    updatedAt: candidate.updatedAt
+  };
+}
+
+function founderNextAction(input: {
+  shouldContinue: boolean;
+  publicSearchTasks: readonly unknown[];
+}): "PROCESS" | "PUBLIC_SEARCH" | "EXPORT" | "COMPLETE" {
+  if (input.shouldContinue) return "PROCESS";
+  if (input.publicSearchTasks.length > 0) return "PUBLIC_SEARCH";
+  return "EXPORT";
+}
+
+function canonicalApplicationOrigin(value: string): string {
+  const parsed = new URL(value);
+  if (
+    parsed.protocol !== "https:"
+    || parsed.username !== ""
+    || parsed.password !== ""
+    || parsed.pathname !== "/"
+    || parsed.search !== ""
+    || parsed.hash !== ""
+    || parsed.origin !== value
+  ) {
+    throw new DomainError("DATA_INTEGRITY", "Founder export application origin is invalid");
+  }
+  return parsed.origin;
+}
+
 /** Creates the single-user MCP server. It has no hidden network side effects. */
 export function createCareerMcpServer(
   deps: CareerMcpDependencies,
@@ -273,6 +378,9 @@ export function createCareerMcpServer(
   );
   if (options.reviewCardResource !== undefined) {
     registerLinkedInReviewCardResource(server, options.reviewCardResource);
+  }
+  if (deps.founderResearch !== undefined) {
+    registerFounderExportCardResource(server, { applicationUrl: deps.founderResearch.applicationUrl });
   }
 
   function authenticatedMedia(): ModelMediaService {
@@ -324,6 +432,211 @@ export function createCareerMcpServer(
     }
     return deps.brandRenderer;
   }
+
+  function authenticatedFounderResearch(): NonNullable<CareerMcpDependencies["founderResearch"]> {
+    if (options.requestAuthContext === undefined) {
+      throw new DomainError("AUTH_REQUIRED", "Authenticated request identity is required");
+    }
+    if (deps.founderResearch === undefined) {
+      throw new DomainError("DATA_INTEGRITY", "Founder research services are unavailable");
+    }
+    return deps.founderResearch;
+  }
+
+  server.registerTool("start_yc_founder_research", {
+    title: "Start YC founder research",
+    description: "Create a private, owner-scoped YC founder research run. This does not fetch company pages or LinkedIn.",
+    inputSchema: startYcFounderResearchInput,
+    outputSchema: startYcFounderResearchOutput,
+    annotations: privateWrite,
+    _meta: oauthToolMetadata
+  }, async ({ limit, ...query }) => guarded(async () => {
+    const result = await authenticatedFounderResearch().runs.startRun(
+      withoutUndefined(query) as CompanySearchQuery,
+      limit
+    );
+    return {
+      run: modelSafeFounderRun(result.run),
+      selectedCompanyIds: [...result.selectedCompanyIds].slice(0, 50),
+      nextAction: "PROCESS" as const
+    };
+  }, ({ selectedCompanyIds }) => `Started private founder research for ${selectedCompanyIds.length} YC companies; no company page or LinkedIn profile was fetched.`)());
+
+  server.registerTool("process_yc_founder_research", {
+    title: "Process YC founder research",
+    description: "Process at most five private run items using YC and official company sources only. It never fetches LinkedIn.",
+    inputSchema: processYcFounderResearchInput,
+    outputSchema: processYcFounderResearchOutput,
+    annotations: attachmentWrite,
+    _meta: oauthToolMetadata
+  }, async ({ runId, maxCompanies }) => guarded(async () => {
+    const result = await authenticatedFounderResearch().runs.processRun(runId, maxCompanies);
+    const publicSearchTasks = result.publicSearchTasks.slice(0, 25).map((task) => ({
+      runItemId: task.runItemId,
+      companyId: task.companyId,
+      companyName: task.companyName,
+      ...(task.officialWebsiteUrl === undefined ? {} : { officialWebsiteUrl: task.officialWebsiteUrl }),
+      ...(task.knownPersonId === undefined ? {} : { knownPersonId: task.knownPersonId }),
+      ...(task.knownFounderName === undefined ? {} : { knownFounderName: task.knownFounderName }),
+      ...(task.knownFounderRole === undefined ? {} : { knownFounderRole: task.knownFounderRole }),
+      suggestedQueries: task.suggestedQueries.slice(0, 5),
+      reason: task.reason
+    }));
+    return {
+      run: modelSafeFounderRun(result.run),
+      leasedCount: Math.min(result.leasedCount, 5),
+      items: result.items.slice(0, 5).map((item) => ({
+        runItemId: item.runItemId,
+        companyId: item.companyId,
+        leaseAttempt: item.leaseAttempt,
+        state: item.state,
+        founderCount: item.founderCount,
+        verifiedProfileCount: item.verifiedProfileCount,
+        ...(item.errorCode === undefined ? {} : { errorCode: item.errorCode }),
+        ...(item.errorSummary === undefined ? {} : { errorSummary: boundedSummary(item.errorSummary) })
+      })),
+      publicSearchTasks,
+      shouldContinue: result.shouldContinue,
+      nextAction: founderNextAction({ shouldContinue: result.shouldContinue, publicSearchTasks })
+    };
+  }, ({ items, publicSearchTasks, nextAction }) => `Processed ${items.length} private founder-research items; ${publicSearchTasks.length} public-search tasks remain. Next action: ${nextAction}.`)());
+
+  server.registerTool("save_founder_profile_candidates", {
+    title: "Save founder profile candidates",
+    description: "Save up to 25 evidence-backed profile candidates without fetching LinkedIn. Manual confirmation is still required.",
+    inputSchema: saveFounderProfileCandidatesInput,
+    outputSchema: saveFounderProfileCandidatesOutput,
+    annotations: privateWrite,
+    _meta: oauthToolMetadata
+  }, async ({ runId, candidates }) => guarded(async () => {
+    const service = authenticatedFounderResearch().candidates;
+    const results = await Promise.all(candidates.map(async (candidate) => {
+      const result = candidate.runPersonId === undefined
+        ? await service.saveCandidateForRunItem({
+            runId,
+            runItemId: candidate.runItemId,
+            founderName: candidate.founderName,
+            founderRole: candidate.founderRole,
+            candidateProfileUrl: candidate.candidateProfileUrl,
+            searchQuery: candidate.searchQuery,
+            resultUrl: candidate.resultUrl,
+            ...(candidate.resultTitle === undefined ? {} : { resultTitle: candidate.resultTitle }),
+            ...(candidate.resultSnippet === undefined ? {} : { resultSnippet: candidate.resultSnippet }),
+            checkedAt: candidate.checkedAt,
+            confidence: candidate.confidence,
+            linkedInNotFetched: candidate.linkedInNotFetched
+          })
+        : await service.saveCandidate({
+            runId,
+            runItemId: candidate.runItemId,
+            runPersonId: candidate.runPersonId,
+            founderName: candidate.founderName,
+            founderRole: candidate.founderRole,
+            candidateProfileUrl: candidate.candidateProfileUrl,
+            searchQuery: candidate.searchQuery,
+            resultUrl: candidate.resultUrl,
+            ...(candidate.resultTitle === undefined ? {} : { resultTitle: candidate.resultTitle }),
+            ...(candidate.resultSnippet === undefined ? {} : { resultSnippet: candidate.resultSnippet }),
+            checkedAt: candidate.checkedAt,
+            confidence: candidate.confidence,
+            linkedInNotFetched: candidate.linkedInNotFetched
+          } as SaveFounderProfileCandidateInput);
+      return {
+        candidate: modelSafeFounderCandidate(result.candidate),
+        ...(result.canonical === undefined ? {} : { canonical: modelSafeFounderCandidate(result.canonical) }),
+        requiresManualReview: result.requiresManualReview
+      };
+    }));
+    return { results };
+  }, ({ results }) => `Saved ${results.length} private founder profile candidates without fetching LinkedIn; manual confirmation is required.`)());
+
+  server.registerTool("confirm_founder_profile_candidate", {
+    title: "Confirm founder profile candidate",
+    description: "Record a private manual confirmation or rejection. This does not open LinkedIn or send anything.",
+    inputSchema: confirmFounderProfileCandidateInput,
+    outputSchema: confirmFounderProfileCandidateOutput,
+    annotations: privateWrite,
+    _meta: oauthToolMetadata
+  }, async (input) => guarded(async () => {
+    const result = await authenticatedFounderResearch().candidates.decideCandidate({
+      candidateId: input.candidateId,
+      decision: input.decision,
+      ...(input.note === undefined ? {} : { note: input.note })
+    });
+    return {
+      candidate: modelSafeFounderCandidate(result.candidate),
+      ...(result.canonical === undefined ? {} : { canonical: modelSafeFounderCandidate(result.canonical) }),
+      requiresManualReview: result.requiresManualReview
+    };
+  }, ({ candidate }) => `Recorded a private manual ${candidate.status === "CONFIRMED" ? "confirmation" : "rejection"}; no LinkedIn page was opened and nothing was sent.`)());
+
+  server.registerTool("save_founder_outreach_batch", {
+    title: "Save founder outreach batch",
+    description: "Save up to 25 private, evidence-backed connection-note drafts. It never sends a LinkedIn message or connection request.",
+    inputSchema: saveFounderOutreachBatchInput,
+    outputSchema: saveFounderOutreachBatchOutput,
+    annotations: privateWrite,
+    _meta: oauthToolMetadata
+  }, async (input) => guarded(async () => {
+    const result = await authenticatedFounderResearch().outreach.saveBatch(input as SaveFounderOutreachBatchInput);
+    return {
+      drafts: result.drafts.slice(0, 25).map((draft) => ({
+        personId: draft.personId,
+        targetId: draft.targetId,
+        draftId: draft.draftId,
+        version: draft.version,
+        purpose: draft.purpose,
+        text: draft.text,
+        evidenceIds: [...draft.evidenceIds].slice(0, 25)
+      })),
+      needsVerification: result.needsVerification.slice(0, 25).map((entry) => ({
+        personId: entry.personId,
+        reason: entry.reason
+      }))
+    };
+  }, ({ drafts, needsVerification }) => `Saved ${drafts.length} private connection-note drafts; ${needsVerification.length} people still require profile verification. Nothing was sent.`)());
+
+  server.registerTool("export_founder_research_workbook", {
+    title: "Export founder research workbook",
+    description: "Create a private founder-research workbook for manual LinkedIn review. It never opens LinkedIn or sends a connection request or message.",
+    inputSchema: exportFounderResearchWorkbookInput,
+    outputSchema: exportFounderResearchWorkbookOutput,
+    annotations: privateWrite,
+    _meta: founderExportLauncherMetadata
+  }, async ({ runId }) => {
+    try {
+      const service = authenticatedFounderResearch();
+      const applicationOrigin = canonicalApplicationOrigin(service.applicationUrl);
+      let privateMetadata: { capability: string; expiresAt: string } | undefined;
+      const exportMetadata = await service.exports.createExport({
+        runId,
+        idempotencyKey: `founder-export:${runId}:v1`
+      }, (metadata) => { privateMetadata = metadata; });
+      if (privateMetadata === undefined) {
+        throw new DomainError("DATA_INTEGRITY", "Founder export capability was unavailable");
+      }
+      const data = {
+        export: {
+          id: exportMetadata.id,
+          runId: exportMetadata.runId,
+          createdAt: exportMetadata.createdAt,
+          expiresAt: exportMetadata.expiresAt,
+          rowCount: exportMetadata.rowCount,
+          sheetCount: exportMetadata.sheetCount,
+          checksumSha256: exportMetadata.checksumSha256
+        }
+      };
+      return {
+        ...response(data, `Created a private workbook with ${exportMetadata.rowCount} rows for manual review; no LinkedIn page was opened and nothing was sent.`),
+        _meta: {
+          downloadUrl: `${applicationOrigin}/research-exports/${exportMetadata.id}/download?capability=${privateMetadata.capability}`,
+          expiresAt: privateMetadata.expiresAt
+        }
+      };
+    } catch (error) {
+      return safeError(error);
+    }
+  });
 
   server.registerTool("search_yc_companies", {
     title: "Search YC companies",

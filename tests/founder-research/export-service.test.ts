@@ -106,6 +106,8 @@ describe("founder research export service", () => {
     );
 
     expect(result.exportMetadata.mimeType).toBe(XLSX_MIME);
+    expect(result.exportMetadata.runId).toBe(runId);
+    expect(result.exportMetadata.createdAt).toBe(START);
     expect(result.exportMetadata.rowCount).toBe(1);
     expect(result.exportMetadata.sheetCount).toBe(4);
     expect(result.exportMetadata.fileName).toMatch(/\.xlsx$/u);

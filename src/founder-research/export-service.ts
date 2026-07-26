@@ -25,6 +25,8 @@ export type CreateFounderResearchExportInput = Readonly<{
 
 export type FounderResearchExportMetadata = Readonly<{
   id: string;
+  runId: string;
+  createdAt: string;
   fileName: string;
   mimeType: typeof XLSX_MIME;
   byteSize: number;
@@ -235,6 +237,8 @@ function workbookInput(snapshot: FounderResearchExportSnapshot): FounderResearch
 
 function metadata(exportRow: {
   id: string;
+  runId: string;
+  createdAt: string;
   fileName: string;
   mimeType: string;
   byteSize: number;
@@ -245,6 +249,8 @@ function metadata(exportRow: {
 }): FounderResearchExportMetadata {
   return Object.freeze({
     id: exportRow.id,
+    runId: exportRow.runId,
+    createdAt: exportRow.createdAt,
     fileName: exportRow.fileName,
     mimeType: XLSX_MIME,
     byteSize: exportRow.byteSize,
