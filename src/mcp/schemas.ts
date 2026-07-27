@@ -157,45 +157,20 @@ const brandVisualBriefBase = {
   conceptSummary: z.string().trim().min(1).max(500),
   topicLabel: z.string().trim().min(1).max(24).optional()
 } as const;
-const editorialModelContentSchema = z.object({
-  kind: z.literal("model"),
-  subhead: z.string().trim().min(1).max(80),
-  stages: z.tuple([
-    z.object({
-      number: z.literal("01"),
-      label: z.string().trim().min(1).max(20),
-      items: z.array(z.string().trim().min(1).max(36)).min(2).max(3)
-    }).strict(),
-    z.object({
-      number: z.literal("02"),
-      label: z.string().trim().min(1).max(20),
-      items: z.array(z.string().trim().min(1).max(36)).min(2).max(3)
-    }).strict(),
-    z.object({
-      number: z.literal("03"),
-      label: z.string().trim().min(1).max(20),
-      items: z.array(z.string().trim().min(1).max(36)).min(2).max(3)
-    }).strict()
-  ]),
-  evidenceLine: z.string().trim().min(1).max(100)
+const editorialStageSchema = z.object({
+  number: z.enum(["01", "02", "03"]),
+  label: z.string().trim().min(1).max(20),
+  items: z.array(z.string().trim().min(1).max(36)).min(2).max(3)
 }).strict();
-const editorialEvidenceContentSchema = z.object({
-  kind: z.literal("evidence"),
+const editorialSignalSchema = z.object({
+  label: z.string().trim().min(1).max(20),
+  detail: z.string().trim().min(1).max(72)
+}).strict();
+const editorialVisualContentSchema = z.object({
+  kind: z.enum(["model", "evidence"]),
   subhead: z.string().trim().min(1).max(80),
-  signals: z.tuple([
-    z.object({
-      label: z.string().trim().min(1).max(20),
-      detail: z.string().trim().min(1).max(72)
-    }).strict(),
-    z.object({
-      label: z.string().trim().min(1).max(20),
-      detail: z.string().trim().min(1).max(72)
-    }).strict(),
-    z.object({
-      label: z.string().trim().min(1).max(20),
-      detail: z.string().trim().min(1).max(72)
-    }).strict()
-  ]),
+  stages: z.array(editorialStageSchema).min(3).max(3).optional(),
+  signals: z.array(editorialSignalSchema).min(3).max(3).optional(),
   evidenceLine: z.string().trim().min(1).max(100)
 }).strict();
 export const createBrandedVisualBriefInput = z.object({
@@ -206,10 +181,7 @@ export const createBrandedVisualBriefInput = z.object({
     "EDITORIAL_MODEL",
     "EDITORIAL_METAPHOR"
   ]),
-  visualContent: z.union([
-    editorialEvidenceContentSchema,
-    editorialModelContentSchema
-  ]).optional()
+  visualContent: editorialVisualContentSchema.optional()
 }).strict().superRefine((value, context) => {
   if (
     (value.visualMode === "EDITORIAL_EVIDENCE" || value.visualMode === "EDITORIAL_MODEL")
@@ -252,6 +224,54 @@ export const createBrandedVisualBriefInput = z.object({
       path: ["visualContent", "kind"],
       message: "EDITORIAL_EVIDENCE requires evidence visualContent"
     });
+  }
+  if (
+    value.visualMode === "EDITORIAL_MODEL"
+    && value.visualContent?.kind === "model"
+  ) {
+    if (value.visualContent.stages === undefined) {
+      context.addIssue({
+        code: "custom",
+        path: ["visualContent", "stages"],
+        message: "EDITORIAL_MODEL requires exactly three stages"
+      });
+    } else if (
+      value.visualContent.stages.some(
+        (stage, index) => stage.number !== ["01", "02", "03"][index]
+      )
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["visualContent", "stages"],
+        message: "EDITORIAL_MODEL stages must be ordered 01, 02, 03"
+      });
+    }
+    if (value.visualContent.signals !== undefined) {
+      context.addIssue({
+        code: "custom",
+        path: ["visualContent", "signals"],
+        message: "EDITORIAL_MODEL does not accept evidence signals"
+      });
+    }
+  }
+  if (
+    value.visualMode === "EDITORIAL_EVIDENCE"
+    && value.visualContent?.kind === "evidence"
+  ) {
+    if (value.visualContent.signals === undefined) {
+      context.addIssue({
+        code: "custom",
+        path: ["visualContent", "signals"],
+        message: "EDITORIAL_EVIDENCE requires exactly three signals"
+      });
+    }
+    if (value.visualContent.stages !== undefined) {
+      context.addIssue({
+        code: "custom",
+        path: ["visualContent", "stages"],
+        message: "EDITORIAL_EVIDENCE does not accept model stages"
+      });
+    }
   }
 });
 export const openAiFileSchema = z.object({

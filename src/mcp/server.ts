@@ -3,6 +3,7 @@ import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import type { RequestAuthContext } from "../auth/request-context.js";
 import { SUPABASE_OAUTH_SCOPES } from "../auth/resource-auth.js";
 import type { BrandBriefService } from "../brand/brief-service.js";
+import { validateBrandVisualContent } from "../brand/content.js";
 import type { BrandRenderService } from "../brand/render-service.js";
 import type { DraftService } from "../drafts/service.js";
 import { DomainError } from "../domain/errors.js";
@@ -450,15 +451,19 @@ export function createCareerMcpServer(
     annotations: privateWrite,
     _meta: oauthToolMetadata
   }, async (input) => guarded(async () => {
+    const visualContent = validateBrandVisualContent(
+      input.visualMode,
+      input.visualContent
+    );
     const result = await authenticatedBrand().createBrief({
       postId: input.postId,
       expectedVersion: input.expectedVersion,
       coverHook: input.coverHook,
       conceptSummary: input.conceptSummary,
       visualMode: input.visualMode,
-      ...(input.visualContent === undefined
+      ...(visualContent === undefined
         ? {}
-        : { visualContent: input.visualContent }
+        : { visualContent }
       ),
       ...(input.topicLabel === undefined
         ? {}

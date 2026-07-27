@@ -120,6 +120,28 @@ it("publishes strict bounded Brand Studio inputs", () => {
       evidenceLine: "Observed in current sources"
     }
   }).success).toBe(false);
+  expect(createBrandedVisualBriefInput.safeParse({
+    ...modelBrief,
+    visualContent: {
+      ...modelBrief.visualContent,
+      stages: [
+        modelBrief.visualContent.stages[1],
+        modelBrief.visualContent.stages[0],
+        modelBrief.visualContent.stages[2]
+      ]
+    }
+  }).success).toBe(false);
+  expect(createBrandedVisualBriefInput.safeParse({
+    ...modelBrief,
+    visualContent: {
+      ...modelBrief.visualContent,
+      signals: [
+        { label: "Signal one", detail: "Detail one" },
+        { label: "Signal two", detail: "Detail two" },
+        { label: "Signal three", detail: "Detail three" }
+      ]
+    }
+  }).success).toBe(false);
   expect(renderBrandedLinkedInCoverInput.parse(render)).toEqual(render);
   expect(renderBrandedLinkedInCoverInput.safeParse({ ...render, extra: true }).success).toBe(false);
   expect(renderBrandedLinkedInCoverInput.safeParse({
@@ -535,12 +557,40 @@ async function listTools() {
   return result.tools;
 }
 
+function findUnsupportedInputSchemaKeywords(
+  value: unknown,
+  path = "$"
+): string[] {
+  if (Array.isArray(value)) {
+    return value.flatMap((item, index) =>
+      findUnsupportedInputSchemaKeywords(item, `${path}[${index}]`)
+    );
+  }
+  if (typeof value !== "object" || value === null) {
+    return [];
+  }
+  const unsupported = new Set(["allOf", "anyOf", "oneOf", "prefixItems"]);
+  return Object.entries(value).flatMap(([key, item]) => [
+    ...(unsupported.has(key) ? [`${path}.${key}`] : []),
+    ...findUnsupportedInputSchemaKeywords(item, `${path}.${key}`)
+  ]);
+}
+
 it("registers exactly the approved Career MCP tools", async () => {
   const tools = await listTools();
   expect(tools.map((tool) => tool.name).sort()).toEqual([...expectedTools].sort());
   expect(tools.map((tool) => tool.name).some((name) => /scrape|message|schedule|batch/.test(name))).toBe(false);
   expect(tools.every((tool) => tool.inputSchema.additionalProperties === false)).toBe(true);
   expect(tools.every((tool) => tool.outputSchema !== undefined)).toBe(true);
+});
+
+it("publishes ChatGPT-compatible MCP input schemas", async () => {
+  const tools = await listTools();
+  const invalid = tools.flatMap((tool) =>
+    findUnsupportedInputSchemaKeywords(tool.inputSchema)
+      .map((path) => `${tool.name}:${path}`)
+  );
+  expect(invalid).toEqual([]);
 });
 
 it("keeps exact publishing app-only with capability-only input and secret-free output", async () => {
