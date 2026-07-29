@@ -162,10 +162,10 @@ describe("Brand brief service", () => {
     const profile = await service.getProfile();
 
     expect(profile).toMatchObject({
-      version: 1,
+      version: 2,
       publicName: "BHAGYASHREE NANDOSKAR",
       roleLine: "PRODUCT MARKETING",
-      seriesName: "PMM FIELD NOTES",
+      seriesName: "EDITORIAL INTELLIGENCE",
       monogram: "BN",
       recentUsage: []
     });
@@ -183,7 +183,7 @@ describe("Brand brief service", () => {
     expect(await queryTestDatabase(db, "select id from career_mcp.brand_profiles")).toEqual([]);
   });
 
-  it("initializes version one on the first brief write and saves a statement brief", async () => {
+  it("initializes version two on the first brief write and saves a statement brief", async () => {
     const owner = randomUUID();
     const briefId = randomUUID();
     const post = await addOwnedPost(owner);
@@ -199,7 +199,7 @@ describe("Brand brief service", () => {
       ownerSubject: owner,
       postDraftId: post.id,
       postVersion: post.version,
-      brandProfileVersion: 1,
+      brandProfileVersion: 2,
       templateId: "editorial-statement-v1",
       templateVersion: 1,
       promptFormatVersion: 1,
@@ -210,10 +210,10 @@ describe("Brand brief service", () => {
       state: "ready"
     });
     expect(result.profile).toMatchObject({
-      version: 1,
+      version: 2,
       publicName: "BHAGYASHREE NANDOSKAR",
       roleLine: "PRODUCT MARKETING",
-      seriesName: "PMM FIELD NOTES",
+      seriesName: "EDITORIAL INTELLIGENCE",
       monogram: "BN"
     });
     expect(result.profile.recentUsage).toEqual([{
@@ -243,10 +243,10 @@ describe("Brand brief service", () => {
       where owner_subject = '${owner}'
     `);
     expect(profiles).toEqual([{
-      version: 1,
+      version: 2,
       public_name: "BHAGYASHREE NANDOSKAR",
       role_line: "PRODUCT MARKETING",
-      series_name: "PMM FIELD NOTES",
+      series_name: "EDITORIAL INTELLIGENCE",
       monogram: "BN"
     }]);
   });
@@ -414,8 +414,8 @@ describe("Brand brief service", () => {
     `);
 
     expect(await service.getProvenanceForMedia(renderedMedia.id)).toEqual({
-      seriesName: "PMM FIELD NOTES",
-      profileVersion: 1,
+      seriesName: "EDITORIAL INTELLIGENCE",
+      profileVersion: 2,
       templateId: "editorial-statement-v1",
       templateVersion: 1,
       coverHook: "Clarity beats capability.",

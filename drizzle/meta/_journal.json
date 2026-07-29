@@ -57,6 +57,13 @@
       "when": 1785105453617,
       "tag": "0007_editorial_intelligence",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1785290400000,
+      "tag": "0008_brand_profile_v2",
+      "breakpoints": true
     }
   ]
 }

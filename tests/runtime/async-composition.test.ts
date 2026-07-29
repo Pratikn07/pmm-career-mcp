@@ -386,7 +386,7 @@ it("composes one lazy owner-scoped Brand Studio per authenticated request and fa
     });
     expect(profile.isError).not.toBe(true);
     expect(profile.structuredContent).toMatchObject({
-      data: { profile: { seriesName: "PMM FIELD NOTES" } }
+      data: { profile: { seriesName: "EDITORIAL INTELLIGENCE" } }
     });
     expect(getActive).toHaveBeenCalledOnce();
     expect(listRecent).toHaveBeenCalledOnce();

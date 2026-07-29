@@ -59,6 +59,7 @@ export type PersonWithEvidence = Person & { evidence: Evidence[] };
 export type BrandProfileDefaultInput = {
   id: string;
   ownerSubject: string;
+  version: number;
   publicName: string;
   roleLine: string;
   seriesName: string;
@@ -699,7 +700,7 @@ function profileMatchesDefaultInput(
   profile: BrandProfile,
   input: BrandProfileDefaultInput
 ): boolean {
-  return profile.version === 1
+  return profile.version === input.version
     && profile.publicName === input.publicName
     && profile.roleLine === input.roleLine
     && profile.seriesName === input.seriesName
@@ -1615,7 +1616,6 @@ export function createRepositories(database: Database) {
           }
           const [profile] = await transaction.insert(brandProfiles).values({
             ...input,
-            version: 1,
             state: "active",
             createdAt: nowIso()
           }).returning();
@@ -1673,7 +1673,6 @@ export function createRepositories(database: Database) {
           if (activeRow === undefined) {
             const [profileRow] = await transaction.insert(brandProfiles).values({
               ...input.profile,
-              version: 1,
               state: "active",
               createdAt: nowIso()
             }).returning();

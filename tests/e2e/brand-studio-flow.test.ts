@@ -163,7 +163,7 @@ it("keeps the complete scheduled statement-cover flow private until the widget l
   expect(profile).toMatchObject({
     publicName: "BHAGYASHREE NANDOSKAR",
     roleLine: "PRODUCT MARKETING",
-    seriesName: "PMM FIELD NOTES",
+    seriesName: "EDITORIAL INTELLIGENCE",
     monogram: "BN"
   });
 

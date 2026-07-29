@@ -346,10 +346,10 @@ function successfulDependencies(): CareerMcpDependencies {
     media: []
   };
   const brandProfile = {
-    version: 1 as const,
+    version: 2 as const,
     publicName: "BHAGYASHREE NANDOSKAR",
     roleLine: "PRODUCT MARKETING",
-    seriesName: "PMM FIELD NOTES",
+    seriesName: "EDITORIAL INTELLIGENCE",
     monogram: "BN",
     voice: {
       persona: "curious PMM practitioner",
@@ -526,8 +526,8 @@ function successfulDependencies(): CareerMcpDependencies {
       render: async () => ({
         post: renderedPost,
         provenance: {
-          seriesName: "PMM FIELD NOTES",
-          profileVersion: 1,
+          seriesName: "EDITORIAL INTELLIGENCE",
+          profileVersion: 2,
           templateId: "editorial-statement-v1",
           templateVersion: 1,
           coverHook: "Clarity beats capability.",
@@ -1115,8 +1115,8 @@ it("opens a non-writing review card and keeps signed URLs widget-private", async
     }]
   };
   const getProvenanceForMedia = vi.fn(async () => ({
-    seriesName: "PMM FIELD NOTES",
-    profileVersion: 1,
+    seriesName: "EDITORIAL INTELLIGENCE",
+    profileVersion: 2,
     templateId: "editorial-statement-v1",
     templateVersion: 1,
     coverHook: "Clarity beats capability.",
@@ -1166,8 +1166,8 @@ it("opens a non-writing review card and keeps signed URLs widget-private", async
       post,
       dailyBrief,
       brand: {
-        seriesName: "PMM FIELD NOTES",
-        profileVersion: 1,
+        seriesName: "EDITORIAL INTELLIGENCE",
+        profileVersion: 2,
         templateId: "editorial-statement-v1",
         templateVersion: 1,
         coverHook: "Clarity beats capability.",
@@ -1280,6 +1280,8 @@ it("makes publishing, research, and branded-cover safety rules prominent in inst
   expect(instructions).toContain("stop and report the validation error; never silently substitute or retry with altered content");
   expect(instructions).toContain("curiosity covers, not post summaries");
   expect(instructions).toContain("source art must contain no text");
+  expect(instructions).toContain("New visuals must never display any series label");
+  expect(instructions).not.toContain("PMM FIELD NOTES");
   expect(instructions).toContain("open_linkedin_review_card");
   expect(instructions).toContain("expectedImageCount: 1");
   expect(instructions).toContain("dailyBrief");

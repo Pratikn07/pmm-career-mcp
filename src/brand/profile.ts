@@ -5,7 +5,7 @@ export type BrandVisualMode =
   | "EDITORIAL_METAPHOR";
 
 export type PmmBrandProfile = Readonly<{
-  version: 1;
+  version: 2;
   publicName: string;
   roleLine: string;
   seriesName: string;
@@ -47,10 +47,10 @@ const VOICE_TRAITS = Object.freeze([
 ] as const);
 
 export const DEFAULT_PMM_BRAND_PROFILE: PmmBrandProfile = Object.freeze({
-  version: 1,
+  version: 2,
   publicName: "BHAGYASHREE NANDOSKAR",
   roleLine: "PRODUCT MARKETING",
-  seriesName: "PMM FIELD NOTES",
+  seriesName: "EDITORIAL INTELLIGENCE",
   monogram: "BN",
   voice: Object.freeze({
     persona: "curious PMM practitioner",

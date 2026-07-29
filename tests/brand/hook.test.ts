@@ -97,12 +97,12 @@ describe("normalizeTopicLabel", () => {
 });
 
 describe("the immutable brand registry", () => {
-  it("defines the exact PMM Field Notes identity and deeply frozen profile", () => {
+  it("defines the exact editorial intelligence identity and deeply frozen profile", () => {
     expect(DEFAULT_PMM_BRAND_PROFILE).toMatchObject({
-      version: 1,
+      version: 2,
       publicName: "BHAGYASHREE NANDOSKAR",
       roleLine: "PRODUCT MARKETING",
-      seriesName: "PMM FIELD NOTES",
+      seriesName: "EDITORIAL INTELLIGENCE",
       monogram: "BN",
       palette: {
         ivory: "#F6F1E8",

@@ -400,6 +400,7 @@ describe("PostgreSQL transaction retries", () => {
         : repositories.brandProfiles.ensureDefault({
             id: randomUUID(),
             ownerSubject: randomUUID(),
+            version: 2,
             publicName: "Bhagyashree Nandoskar",
             roleLine: "Product Marketing",
             seriesName: "PMM FIELD NOTES",
@@ -442,6 +443,7 @@ describe("PostgreSQL transaction retries", () => {
     await expect(repositories.brandProfiles.ensureDefault({
       id: randomUUID(),
       ownerSubject: randomUUID(),
+      version: 2,
       publicName: "Bhagyashree Nandoskar",
       roleLine: "Product Marketing",
       seriesName: "PMM FIELD NOTES",
@@ -467,6 +469,7 @@ describe("PostgreSQL transaction retries", () => {
       profile: {
         id: randomUUID(),
         ownerSubject: randomUUID(),
+        version: 2,
         publicName: "BHAGYASHREE NANDOSKAR",
         roleLine: "PRODUCT MARKETING",
         seriesName: "PMM FIELD NOTES",
@@ -559,9 +562,10 @@ describe("Brand Studio repositories", () => {
     return {
       id: randomUUID(),
       ownerSubject,
+      version: 2,
       publicName: "BHAGYASHREE NANDOSKAR",
       roleLine: "PRODUCT MARKETING",
-      seriesName: "PMM FIELD NOTES",
+      seriesName: "EDITORIAL INTELLIGENCE",
       monogram: "BN",
       voiceJson: {
         persona: "curious PMM practitioner",
@@ -676,6 +680,7 @@ describe("Brand Studio repositories", () => {
     const profile = await db.brandProfiles.ensureDefault({
       ownerSubject: owner,
       id: randomUUID(),
+      version: 1,
       publicName: "Bhagyashree Nandoskar",
       roleLine: "Product Marketing",
       seriesName: "PMM FIELD NOTES",
@@ -687,6 +692,7 @@ describe("Brand Studio repositories", () => {
     const existing = await db.brandProfiles.ensureDefault({
       ownerSubject: owner,
       id: randomUUID(),
+      version: 1,
       publicName: "Different name",
       roleLine: "Different role",
       seriesName: "Different series",
@@ -755,6 +761,7 @@ describe("Brand Studio repositories", () => {
     const profile = await db.brandProfiles.ensureDefault({
       ownerSubject: owner,
       id: randomUUID(),
+      version: 1,
       publicName: "Bhagyashree Nandoskar",
       roleLine: "Product Marketing",
       seriesName: "PMM FIELD NOTES",
@@ -811,6 +818,7 @@ describe("Brand Studio repositories", () => {
     const profile = await db.brandProfiles.ensureDefault({
       ownerSubject: owner,
       id: randomUUID(),
+      version: 1,
       publicName: "BHAGYASHREE NANDOSKAR",
       roleLine: "PRODUCT MARKETING",
       seriesName: "PMM FIELD NOTES",
@@ -915,7 +923,7 @@ describe("Brand Studio repositories", () => {
 
     expect(result.profile).toMatchObject({
       ownerSubject: owner,
-      version: 1,
+      version: 2,
       state: "active",
       publicName: "BHAGYASHREE NANDOSKAR",
       roleLine: "PRODUCT MARKETING"
@@ -923,7 +931,7 @@ describe("Brand Studio repositories", () => {
     expect(result.brief).toMatchObject({
       ownerSubject: owner,
       brandProfileId: result.profile.id,
-      brandProfileVersion: 1,
+      brandProfileVersion: 2,
       postDraftId: post.id,
       postVersion: post.version
     });
@@ -1052,6 +1060,7 @@ describe("Brand Studio repositories", () => {
     const profile = await db.brandProfiles.ensureDefault({
       ownerSubject: owner,
       id: randomUUID(),
+      version: 1,
       publicName: "BHAGYASHREE NANDOSKAR",
       roleLine: "PRODUCT MARKETING",
       seriesName: "PMM FIELD NOTES",
@@ -1099,6 +1108,7 @@ describe("Brand Studio repositories", () => {
     const profile = await db.brandProfiles.ensureDefault({
       ownerSubject: owner,
       id: randomUUID(),
+      version: 1,
       publicName: "Bhagyashree Nandoskar",
       roleLine: "Product Marketing",
       seriesName: "PMM FIELD NOTES",
@@ -1153,6 +1163,7 @@ describe("Brand Studio repositories", () => {
     const profile = await db.brandProfiles.ensureDefault({
       ownerSubject: owner,
       id: randomUUID(),
+      version: 1,
       publicName: "Bhagyashree Nandoskar",
       roleLine: "Product Marketing",
       seriesName: "PMM FIELD NOTES",

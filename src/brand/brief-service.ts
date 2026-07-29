@@ -172,6 +172,7 @@ function profileInput(id: string, ownerSubject: string) {
   return {
     id,
     ownerSubject,
+    version: profile.version,
     publicName: profile.publicName,
     roleLine: profile.roleLine,
     seriesName: profile.seriesName,

@@ -137,6 +137,23 @@ async function createPreOwnerDatabase(): Promise<PGlite> {
   return client;
 }
 
+async function createPreBrandProfileV2Database(): Promise<PGlite> {
+  const client = new PGlite();
+  for (const migration of [
+    "0000_initial.sql",
+    "0001_schema_hardening.sql",
+    "0002_linkedin_media_review.sql",
+    "0003_linkedin_preview_snapshot.sql",
+    "0004_pmm_brand_studio.sql",
+    "0005_brand_source_media_exclusive.sql",
+    "0006_brand_brief_source_claims.sql",
+    "0007_editorial_intelligence.sql"
+  ]) {
+    await client.exec(await readFile(resolve("drizzle", migration), "utf8"));
+  }
+  return client;
+}
+
 async function seedPreClaimUsage(client: PGlite, contradiction = false): Promise<{
   attachedMediaId: string;
   sourceMediaId: string;
@@ -309,6 +326,100 @@ describe("foreign-key indexing", () => {
         columns: "post_draft_id,version"
       }
     ]);
+  });
+});
+
+describe("brand profile version two migration", () => {
+  it("preserves historical version-one provenance and activates the corrected profile", async () => {
+    const client = await createPreBrandProfileV2Database();
+    const owner = randomUUID();
+    const legacyProfileId = randomUUID();
+    const logicalDraftId = randomUUID();
+    const postVersionId = randomUUID();
+    const briefId = randomUUID();
+    try {
+      await client.exec(`
+        insert into career_mcp.brand_profiles (
+          id, owner_subject, version, state, public_name, role_line, series_name,
+          monogram, voice_json, palette_json, hook_rules_json, created_at
+        ) values (
+          '${legacyProfileId}', '${owner}', 1, 'active',
+          'BHAGYASHREE NANDOSKAR', 'PRODUCT MARKETING', 'PMM FIELD NOTES', 'BN',
+          '{"persona":"curious PMM practitioner"}'::jsonb,
+          '{"ivory":"#F6F1E8"}'::jsonb,
+          '{"minWords":2}'::jsonb,
+          '2026-07-22T10:00:00.000Z'
+        );
+        insert into career_mcp.post_draft_owners (
+          draft_id, owner_subject, created_at
+        ) values (
+          '${logicalDraftId}', '${owner}', '2026-07-22T10:00:00.000Z'
+        );
+        insert into career_mcp.post_drafts (
+          id, draft_id, owner_subject, text, visibility, version, checksum,
+          state, created_at, updated_at
+        ) values (
+          '${postVersionId}', '${logicalDraftId}', '${owner}', 'Historical post',
+          'PUBLIC', 1, 'historical-post', 'draft',
+          '2026-07-22T10:00:00.000Z', '2026-07-22T10:00:00.000Z'
+        );
+        insert into career_mcp.brand_visual_briefs (
+          id, owner_subject, post_draft_id, post_version, brand_profile_id,
+          brand_profile_version, template_id, template_version,
+          prompt_format_version, visual_mode, cover_hook, concept_summary,
+          generation_prompt, negative_constraints_json, state, created_at
+        ) values (
+          '${briefId}', '${owner}', '${postVersionId}', 1, '${legacyProfileId}', 1,
+          'editorial-statement-v1', 1, 1, 'EDITORIAL_STATEMENT',
+          'Historical hook', 'Historical concept', 'Historical prompt',
+          '[]'::jsonb, 'ready', '2026-07-22T10:00:00.000Z'
+        )
+      `);
+
+      await client.exec(
+        await readFile(resolve("drizzle/0008_brand_profile_v2.sql"), "utf8")
+      );
+
+      expect((await client.query<{
+        id: string;
+        version: number;
+        state: string;
+        series_name: string;
+      }>(`
+        select id, version, state, series_name
+        from career_mcp.brand_profiles
+        where owner_subject = '${owner}'
+        order by version
+      `)).rows).toEqual([
+        {
+          id: legacyProfileId,
+          version: 1,
+          state: "retired",
+          series_name: "PMM FIELD NOTES"
+        },
+        {
+          id: expect.not.stringMatching(legacyProfileId),
+          version: 2,
+          state: "active",
+          series_name: "EDITORIAL INTELLIGENCE"
+        }
+      ]);
+      expect((await client.query(`
+        select brand_profile_id, brand_profile_version
+        from career_mcp.brand_visual_briefs
+        where id = '${briefId}'
+      `)).rows).toEqual([{
+        brand_profile_id: legacyProfileId,
+        brand_profile_version: 1
+      }]);
+      expect((await client.query<{ active_count: number }>(`
+        select count(*)::int as active_count
+        from career_mcp.brand_profiles
+        where owner_subject = '${owner}' and state = 'active'
+      `)).rows).toEqual([{ active_count: 1 }]);
+    } finally {
+      await client.close();
+    }
   });
 });
 

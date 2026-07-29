@@ -73,6 +73,7 @@ function canonicalProfile(ownerSubject: string) {
   return {
     id: randomUUID(),
     ownerSubject,
+    version: DEFAULT_PMM_BRAND_PROFILE.version,
     publicName: DEFAULT_PMM_BRAND_PROFILE.publicName,
     roleLine: DEFAULT_PMM_BRAND_PROFILE.roleLine,
     seriesName: DEFAULT_PMM_BRAND_PROFILE.seriesName,
@@ -341,8 +342,8 @@ describe("brand render service", () => {
       media: result.post.media
     }));
     expect(result.provenance).toEqual({
-      seriesName: "PMM FIELD NOTES",
-      profileVersion: 1,
+      seriesName: "EDITORIAL INTELLIGENCE",
+      profileVersion: 2,
       templateId: "editorial-statement-v1",
       templateVersion: 1,
       coverHook: "Clarity beats capability.",
