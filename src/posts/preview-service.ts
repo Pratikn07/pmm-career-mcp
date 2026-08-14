@@ -1,10 +1,14 @@
 import { createHash, randomBytes as secureRandomBytes } from "node:crypto";
 import type { CareerDatabase } from "../db/client.js";
-import type { PostDraft, PreviewConsumptionResult } from "../db/repositories.js";
+import type { PreviewConsumptionResult } from "../db/repositories.js";
 import type { PostVisibility } from "../drafts/service.js";
-import { DomainError, sqliteConstraintKind } from "../domain/errors.js";
+import { DomainError, postgresErrorKind } from "../domain/errors.js";
 
 export const PREVIEW_TOKEN_HASH_CONTEXT = "pmm-career-mcp.preview-token.sha256.v1";
+export const APPROVAL_CAPABILITY_HASH_CONTEXT =
+  "pmm-career-mcp.linkedin-preview-capability.sha256.v1";
+export const APPROVAL_CAPABILITY_OWNER_HASH_CONTEXT =
+  "pmm-career-mcp.linkedin-preview-capability-owner.sha256.v1";
 const TOKEN_BYTES = 32;
 const TOKEN_LIFETIME_MS = 15 * 60 * 1_000;
 const MAX_ID_LENGTH = 256;
@@ -29,15 +33,6 @@ export type PreviewExpected = {
   version: number;
   checksum: string;
   visibility: PostVisibility;
-};
-
-export type PreviewPublishClaim = {
-  postId: string;
-  versionId: string;
-  version: number;
-  checksum: string;
-  visibility: PostVisibility;
-  text: string;
 };
 
 export type PreviewServiceDependencies = {
@@ -86,6 +81,40 @@ export function hashPreviewToken(token: string): string {
     .digest("hex");
 }
 
+function parseApprovalCapability(value: unknown): Buffer {
+  if (typeof value !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(value)) {
+    throw new DomainError("PREVIEW_INVALID", "Approval capability is invalid");
+  }
+  const decoded = Buffer.from(value, "base64url");
+  if (decoded.length !== TOKEN_BYTES || decoded.toString("base64url") !== value) {
+    throw new DomainError("PREVIEW_INVALID", "Approval capability is invalid");
+  }
+  return decoded;
+}
+
+export function hashApprovalCapability(capability: string): string {
+  const bytes = parseApprovalCapability(capability);
+  return createHash("sha256")
+    .update(APPROVAL_CAPABILITY_HASH_CONTEXT, "utf8")
+    .update("\0", "utf8")
+    .update(bytes)
+    .digest("hex");
+}
+
+export function hashApprovalCapabilityForSubject(capability: string, subject: string): string {
+  const bytes = parseApprovalCapability(capability);
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(subject)) {
+    throw new DomainError("AUTH_REQUIRED", "Authenticated request identity is required");
+  }
+  return createHash("sha256")
+    .update(APPROVAL_CAPABILITY_OWNER_HASH_CONTEXT, "utf8")
+    .update("\0", "utf8")
+    .update(subject.toLowerCase(), "utf8")
+    .update("\0", "utf8")
+    .update(bytes)
+    .digest("hex");
+}
+
 function parseExpected(value: PreviewExpected): PreviewExpected {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw validationError("preview.expected", "must_be_object");
@@ -122,7 +151,7 @@ function mapPreviewPersistenceError(error: unknown): never {
   if (error instanceof DomainError) {
     throw error;
   }
-  const constraint = sqliteConstraintKind(error);
+  const constraint = postgresErrorKind(error);
   if (constraint === "unique") {
     throw new DomainError("CONFLICT", "Preview token could not be created", {
       entity: "preview"
@@ -133,13 +162,7 @@ function mapPreviewPersistenceError(error: unknown): never {
       entity: "post_draft"
     });
   }
-  if (
-    typeof error === "object"
-    && error !== null
-    && "code" in error
-    && typeof (error as { code?: unknown }).code === "string"
-    && /^SQLITE_(?:BUSY|LOCKED)/.test((error as { code: string }).code)
-  ) {
+  if (constraint === "retryable") {
     throw new DomainError("CONFLICT", "Preview operation could not be completed", {
       entity: "preview",
       retryable: true
@@ -182,7 +205,7 @@ export function createPreviewService(
   const randomBytes = dependencies.randomBytes ?? secureRandomBytes;
 
   return {
-    create(postIdInput: string, versionInput: number): PreviewResult {
+    async create(postIdInput: string, versionInput: number): Promise<PreviewResult> {
       const postId = validId("preview.postId", postIdInput);
       if (!Number.isSafeInteger(versionInput) || versionInput < 1) {
         throw validationError("preview.version", "must_be_positive_integer");
@@ -206,7 +229,7 @@ export function createPreviewService(
       const expiresAt = new Date(now.getTime() + TOKEN_LIFETIME_MS).toISOString();
 
       try {
-        const result = database.previews.createForLatest({
+        const result = await database.previews.createForLatest({
           draftId: postId,
           version: versionInput,
           tokenHash,
@@ -254,12 +277,12 @@ export function createPreviewService(
       }
     },
 
-    consume(tokenInput: string, expectedInput: PreviewExpected): void {
+    async consume(tokenInput: string, expectedInput: PreviewExpected): Promise<void> {
       const tokenHash = hashPreviewToken(tokenInput);
       const expected = parseExpected(expectedInput);
       const consumedAt = canonicalNow(clock).toISOString();
       try {
-        const result = database.previews.consumeExact({
+        const result = await database.previews.consumeExact({
           tokenHash,
           consumedAt,
           expected,
@@ -271,44 +294,7 @@ export function createPreviewService(
       } catch (error) {
         return mapPreviewPersistenceError(error);
       }
-    },
-
-    consumeForPublish(tokenInput: string, expectedInput: PreviewExpected): PreviewPublishClaim {
-      const tokenHash = hashPreviewToken(tokenInput);
-      const expected = parseExpected(expectedInput);
-      const consumedAt = canonicalNow(clock).toISOString();
-      try {
-        const result = database.previews.consumeExact({
-          tokenHash,
-          consumedAt,
-          expected,
-          allowedStates: PUBLISHABLE_STATES,
-          claimState: "publishing"
-        });
-        if (result.outcome !== "consumed") {
-          throwConsumptionOutcome(result);
-        }
-        return publicPublishClaim(result.post);
-      } catch (error) {
-        return mapPreviewPersistenceError(error);
-      }
     }
-  };
-}
-
-function publicPublishClaim(post: PostDraft): PreviewPublishClaim {
-  if (!POST_VISIBILITIES.has(post.visibility)) {
-    throw new DomainError("DATA_INTEGRITY", "Stored post visibility is invalid", {
-      entity: "post_draft"
-    });
-  }
-  return {
-    postId: post.draftId,
-    versionId: post.id,
-    version: post.version,
-    checksum: post.checksum,
-    visibility: post.visibility as PostVisibility,
-    text: post.text
   };
 }
 

@@ -1,9 +1,20 @@
 import { createHash } from "node:crypto";
 import type { CareerDatabase } from "../db/client.js";
-import type { OutreachDraft, PostDraft } from "../db/repositories.js";
-import { DomainError, sqliteConstraintKind } from "../domain/errors.js";
+import {
+  PostDraftVersionConflictError,
+  type OutreachDraft,
+  type PostDraft,
+  type PostDraftMediaWithMetadata
+} from "../db/repositories.js";
+import { DomainError, postgresErrorKind } from "../domain/errors.js";
+import {
+  checksumLinkedInPost,
+  type LinkedInPostChecksumMedia
+} from "../posts/post-checksum.js";
 
 export const POST_CHECKSUM_CONTRACT = "pmm-career-mcp.post-draft.sha256.v1";
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const POST_VISIBILITY_VALUES = ["PUBLIC", "CONNECTIONS"] as const;
 
 export type PostVisibility = typeof POST_VISIBILITY_VALUES[number];
@@ -33,11 +44,29 @@ export type CreatePostInput = {
 };
 
 /** `id` is the stable logical draft ID; `versionId` identifies one immutable row. */
-export type PostDraftVersion = Omit<PostDraft, "id" | "draftId" | "visibility"> & {
+export type PostDraftVersion = Omit<
+  PostDraft,
+  "id" | "draftId" | "ownerSubject" | "visibility"
+> & {
   id: string;
   versionId: string;
   visibility: PostVisibility;
+  media: readonly PostDraftMediaVersion[];
 };
+
+export type PostDraftMediaVersion = Readonly<{
+  position: number;
+  mediaId: string;
+  altText: string;
+  sha256: string;
+  mimeType: "image/jpeg" | "image/png" | "image/gif";
+  byteSize: number;
+  width: number;
+  height: number;
+  frameCount: number;
+  originalFilename: string | null;
+  createdAt: string;
+}>;
 
 function validationError(field: string, reason: string, maximum?: number): DomainError {
   return new DomainError("VALIDATION_ERROR", "Draft input is invalid", {
@@ -73,30 +102,54 @@ function isPostVisibility(value: unknown): value is PostVisibility {
   return typeof value === "string" && POST_VISIBILITY_SET.has(value);
 }
 
-function publicPostDraft(row: PostDraft): PostDraftVersion {
+function isDraftMediaMimeType(value: string): value is PostDraftMediaVersion["mimeType"] {
+  return value === "image/jpeg" || value === "image/png" || value === "image/gif";
+}
+
+function publicPostMedia(row: PostDraftMediaWithMetadata): PostDraftMediaVersion {
+  if (!isDraftMediaMimeType(row.mimeType)) {
+    throw new DomainError("DATA_INTEGRITY", "Stored draft media type is invalid", {
+      entity: "post_media"
+    });
+  }
+  const {
+    postDraftId: _postDraftId,
+    version: _version,
+    ownerSubject: _ownerSubject,
+    objectPath: _objectPath,
+    ...media
+  } = row;
+  return { ...media, mimeType: row.mimeType };
+}
+
+function publicPostDraft(
+  row: PostDraft,
+  media: readonly PostDraftMediaWithMetadata[] = []
+): PostDraftVersion {
   if (!isPostVisibility(row.visibility)) {
     throw new DomainError("DATA_INTEGRITY", "Stored post visibility is invalid", {
       entity: "post_draft"
     });
   }
-  const { id: versionId, draftId: id, visibility, ...version } = row;
-  return { ...version, id, versionId, visibility };
+  const {
+    id: versionId,
+    draftId: id,
+    ownerSubject: _ownerSubject,
+    visibility,
+    ...version
+  } = row;
+  return { ...version, id, versionId, visibility, media: media.map(publicPostMedia) };
 }
 
 function mapDraftPersistenceError(error: unknown, entity: "outreach_draft" | "post_draft"): never {
-  const constraint = sqliteConstraintKind(error);
+  const constraint = postgresErrorKind(error);
   if (constraint === "foreign_key") {
     throw new DomainError("NOT_FOUND", "Referenced draft record was not found", { entity });
   }
   if (constraint === "unique") {
     throw new DomainError("CONFLICT", "Draft version conflicts with existing data", { entity });
   }
-  if (
-    typeof error === "object"
-    && error !== null
-    && "code" in error
-    && (error as { code?: unknown }).code === "SQLITE_BUSY"
-  ) {
+  if (constraint === "retryable") {
     throw new DomainError("CONFLICT", "Draft write could not be completed", { entity });
   }
   throw new DomainError("DATA_INTEGRITY", "Draft could not be saved", { entity });
@@ -124,9 +177,16 @@ export function computePostChecksum(exactText: string, version: number): string 
 
 export type DraftService = ReturnType<typeof createDraftService>;
 
-export function createDraftService(database: CareerDatabase) {
+export function createDraftService(
+  database: CareerDatabase,
+  dependencies: { subject: string }
+) {
+  if (!UUID_PATTERN.test(dependencies.subject)) {
+    throw new DomainError("AUTH_REQUIRED", "Authenticated request identity is required");
+  }
+  const subject = dependencies.subject.toLowerCase();
   return {
-    createOutreach(input: CreateOutreachInput): OutreachDraft {
+    async createOutreach(input: CreateOutreachInput): Promise<OutreachDraft> {
       if (typeof input !== "object" || input === null) {
         throw validationError("outreach", "must_be_object");
       }
@@ -148,12 +208,12 @@ export function createDraftService(database: CareerDatabase) {
         });
       }
 
-      const target = database.targets.get(targetId);
+      const target = await database.targets.get(targetId);
       if (target === undefined) {
         throw new DomainError("NOT_FOUND", "Target was not found", { entity: "target" });
       }
       for (const evidenceId of evidenceIds) {
-        const item = database.evidence.get(evidenceId);
+        const item = await database.evidence.get(evidenceId);
         if (item === undefined) {
           throw new DomainError("NOT_FOUND", "Evidence was not found", { entity: "evidence" });
         }
@@ -167,7 +227,7 @@ export function createDraftService(database: CareerDatabase) {
       }
 
       try {
-        return database.outreachDrafts.createVersion({
+        return await database.outreachDrafts.createVersion({
           targetId,
           purpose,
           text,
@@ -178,7 +238,7 @@ export function createDraftService(database: CareerDatabase) {
       }
     },
 
-    createPost(input: CreatePostInput): PostDraftVersion {
+    async createPost(input: CreatePostInput): Promise<PostDraftVersion> {
       if (typeof input !== "object" || input === null || Array.isArray(input)) {
         throw validationError("post", "must_be_object");
       }
@@ -194,12 +254,21 @@ export function createDraftService(database: CareerDatabase) {
       }
 
       try {
-        return publicPostDraft(database.postDrafts.createVersion({
+        const created = await database.postDrafts.createVersionWithMedia({
+          ownerSubject: subject,
           text,
           visibility: input.visibility,
-          checksum: (version) => computePostChecksum(text, version),
-          state: "draft"
-        }));
+          checksum: (version, draftId) => checksumLinkedInPost({
+            draftId,
+            version,
+            text,
+            visibility: input.visibility,
+            media: []
+          }),
+          state: "draft",
+          media: []
+        });
+        return publicPostDraft(created.post, created.media);
       } catch (error) {
         if (error instanceof DomainError) {
           throw error;
@@ -208,10 +277,16 @@ export function createDraftService(database: CareerDatabase) {
       }
     },
 
-    revisePost(draftIdInput: string, textInput: string): PostDraftVersion {
+    async revisePost(draftIdInput: string, textInput: string): Promise<PostDraftVersion> {
       const draftId = normalizedId("post.id", draftIdInput);
       const text = normalizedText("post.text", textInput, MAX_POST_TEXT_LENGTH);
-      const latest = database.postDrafts.listVersions(draftId).at(-1);
+      const ownerSubject = await database.postDraftOwners.getOwner(draftId);
+      if (ownerSubject?.toLowerCase() !== subject) {
+        throw new DomainError("NOT_FOUND", "Post draft was not found", {
+          entity: "post_draft"
+        });
+      }
+      const latest = (await database.postDrafts.listVersions(draftId)).at(-1);
       if (latest === undefined) {
         throw new DomainError("NOT_FOUND", "Post draft was not found", {
           entity: "post_draft"
@@ -222,16 +297,33 @@ export function createDraftService(database: CareerDatabase) {
           entity: "post_draft"
         });
       }
+      const visibility = latest.visibility;
+      const latestMedia = await database.postDraftMedia.listForVersion(latest.id, latest.version);
 
       try {
-        return publicPostDraft(database.postDrafts.createVersion({
+        const revised = await database.postDrafts.createVersionWithMedia({
           draftId,
+          expectedVersion: latest.version,
+          ownerSubject: subject,
           text,
-          visibility: latest.visibility,
-          checksum: (version) => computePostChecksum(text, version),
-          state: "draft"
-        }));
+          visibility,
+          checksum: (version, actualDraftId, media) => checksumLinkedInPost({
+            draftId: actualDraftId,
+            version,
+            text,
+            visibility,
+            media: media as readonly LinkedInPostChecksumMedia[]
+          }),
+          state: "draft",
+          media: latestMedia.map(({ mediaId, altText }) => ({ mediaId, altText }))
+        });
+        return publicPostDraft(revised.post, revised.media);
       } catch (error) {
+        if (error instanceof PostDraftVersionConflictError) {
+          throw new DomainError("CONFLICT", "Post draft version is stale", {
+            entity: "post_draft"
+          });
+        }
         if (error instanceof DomainError) {
           throw error;
         }
@@ -239,18 +331,31 @@ export function createDraftService(database: CareerDatabase) {
       }
     },
 
-    getPostVersion(draftIdInput: string, version: number): PostDraftVersion | undefined {
+    async getPostVersion(
+      draftIdInput: string,
+      version: number
+    ): Promise<PostDraftVersion | undefined> {
       const draftId = normalizedId("post.id", draftIdInput);
       if (!Number.isSafeInteger(version) || version < 1) {
         throw validationError("post.version", "must_be_positive_integer");
       }
-      const row = database.postDrafts.getVersion(draftId, version);
-      return row === undefined ? undefined : publicPostDraft(row);
+      const ownerSubject = await database.postDraftOwners.getOwner(draftId);
+      if (ownerSubject?.toLowerCase() !== subject) return undefined;
+      const row = await database.postDrafts.getVersion(draftId, version);
+      if (row === undefined) return undefined;
+      const media = await database.postDraftMedia.listForVersion(row.id, row.version);
+      return publicPostDraft(row, media);
     },
 
-    getPostHistory(draftIdInput: string): PostDraftVersion[] {
+    async getPostHistory(draftIdInput: string): Promise<PostDraftVersion[]> {
       const draftId = normalizedId("post.id", draftIdInput);
-      return database.postDrafts.listVersions(draftId).map(publicPostDraft);
+      const ownerSubject = await database.postDraftOwners.getOwner(draftId);
+      if (ownerSubject?.toLowerCase() !== subject) return [];
+      const rows = await database.postDrafts.listVersions(draftId);
+      return await Promise.all(rows.map(async (row) => publicPostDraft(
+        row,
+        await database.postDraftMedia.listForVersion(row.id, row.version)
+      )));
     }
   };
 }

@@ -1,7 +1,8 @@
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createDatabase, type TestCareerDatabase } from "../../src/db/client.js";
+import { afterAll, afterEach, describe, expect, it } from "vitest";
+import { createTestDatabase, type TestCareerDatabase } from "../support/database.js";
+import { postgresErrorKind } from "../../src/domain/errors.js";
 import type { FetchedPage } from "../../src/research/fetch-page.js";
 import * as peopleDiscoveryModule from "../../src/research/people-discovery.js";
 import { createPeopleDiscovery } from "../../src/research/people-discovery.js";
@@ -14,6 +15,10 @@ const fixturePath = fileURLToPath(new URL("../fixtures/company-team.html", impor
 const CHECKED_AT = "2026-07-16T13:00:00.000Z";
 const HOME_URL = "https://acme.example/";
 const TEAM_URL = "https://acme.example/team";
+const database: TestCareerDatabase = await createTestDatabase();
+
+afterEach(async () => (await database.resetForTests()));
+afterAll(async () => (await database.close()));
 
 function fetchedPage(url: string, html: string, title: string): FetchedPage {
   return {
@@ -28,25 +33,17 @@ function fetchedPage(url: string, html: string, title: string): FetchedPage {
 }
 
 describe("public people discovery", () => {
-  let database: TestCareerDatabase;
-
-  beforeEach(() => {
-    database = createDatabase(":memory:");
-  });
-
-  afterEach(() => database.close());
-
   it("exports an explicit injected service factory without a misleading dependency-taking free function", () => {
     expect(Object.keys(peopleDiscoveryModule).sort()).toEqual(["createPeopleDiscovery"]);
   });
 
   it("discovers, normalizes, deduplicates, and persists people from official pages", async () => {
-    const company = database.companies.upsert({
+    const company = (await database.companies.upsert({
       ycId: "acme-ai",
       name: "Acme AI",
       websiteUrl: HOME_URL,
       checkedAt: "2026-07-15T00:00:00.000Z"
-    });
+    }));
     const teamHtml = await readFile(fixturePath, "utf8");
     const requestedUrls: string[] = [];
     const fetchPage = async (url: string): Promise<FetchedPage> => {
@@ -101,14 +98,14 @@ describe("public people discovery", () => {
     expect(result.people.find(({ name }) => name === "Priya Rao")?.publicProfileUrl).toBeUndefined();
     expect(requestedUrls).toEqual([HOME_URL, TEAM_URL]);
     expect(requestedUrls.some((url) => new URL(url).hostname.endsWith("linkedin.com"))).toBe(false);
-    expect(database.people.listByCompany(company.id)).toHaveLength(4);
+    expect((await database.people.listByCompany(company.id))).toHaveLength(4);
     expect(result.evidence).toHaveLength(4);
     expect(result.evidence.every(({ fact }) => fact.length < 100)).toBe(true);
     expect(result.evidence.map(({ fact }) => fact)).not.toContain(
       expect.stringContaining("large suite of workflow products")
     );
     for (const person of result.people) {
-      const persisted = database.people.getWithEvidence(person.id);
+      const persisted = (await database.people.getWithEvidence(person.id));
       expect(persisted?.evidence).toHaveLength(1);
       expect(persisted?.evidence[0]?.fact).toBe(`${person.name} — ${person.role}`);
       expect(persisted?.evidence[0]?.fact).not.toContain("large suite of workflow products");
@@ -116,11 +113,11 @@ describe("public people discovery", () => {
   });
 
   it("returns successful official-page findings with a partial warning when another source fails", async () => {
-    const company = database.companies.upsert({
+    const company = (await database.companies.upsert({
       ycId: "partial-people",
       name: "Partial People",
       websiteUrl: HOME_URL
-    });
+    }));
     const teamHtml = await readFile(fixturePath, "utf8");
     const fetchPage = async (url: string): Promise<FetchedPage> => {
       if (url === HOME_URL) {
@@ -147,11 +144,11 @@ describe("public people discovery", () => {
   });
 
   it("parses conventional semantic team cards without fixture-only data attributes", async () => {
-    const company = database.companies.upsert({
+    const company = (await database.companies.upsert({
       ycId: "semantic-people",
       name: "Semantic People",
       websiteUrl: HOME_URL
-    });
+    }));
     const fetchPage = async (url: string): Promise<FetchedPage> => {
       if (url === HOME_URL) {
         return fetchedPage(url, '<nav><a href="/leadership">Leadership</a></nav>', "Company");
@@ -184,11 +181,11 @@ describe("public people discovery", () => {
   });
 
   it("retains a sanitized non-fetching LinkedIn profile reference without requesting it", async () => {
-    const company = database.companies.upsert({
+    const company = (await database.companies.upsert({
       ycId: "non-fetching-profile-reference",
       name: "Non-fetching Profile Reference",
       websiteUrl: TEAM_URL
-    });
+    }));
     const requestedUrls: string[] = [];
     const result = await createPeopleDiscovery({
       repositories: database,
@@ -212,11 +209,11 @@ describe("public people discovery", () => {
   });
 
   it("returns a source-changed partial warning for an unrecognized discovered team page", async () => {
-    const company = database.companies.upsert({
+    const company = (await database.companies.upsert({
       ycId: "changed-people-layout",
       name: "Changed People Layout",
       websiteUrl: HOME_URL
-    });
+    }));
     const fetchPage = async (url: string): Promise<FetchedPage> => {
       if (url === HOME_URL) {
         return fetchedPage(url, '<a href="/team">Team</a>', "Company");
@@ -238,7 +235,7 @@ describe("public people discovery", () => {
   });
 
   it("rejects discovery when the stored company has no official website", async () => {
-    const company = database.companies.upsert({ ycId: "no-site", name: "No Site" });
+    const company = (await database.companies.upsert({ ycId: "no-site", name: "No Site" }));
 
     const service = createPeopleDiscovery({
       repositories: database,
@@ -261,11 +258,11 @@ describe("public people discovery", () => {
   });
 
   it("starts with the official site and does not retain LinkedIn links from search-extended pages", async () => {
-    const company = database.companies.upsert({
+    const company = (await database.companies.upsert({
       ycId: "search-extended-people",
       name: "Search Extended People",
       websiteUrl: HOME_URL
-    });
+    }));
     const events: string[] = [];
     const searchProvider: SearchProvider = {
       coverage: "search-extended",
@@ -310,11 +307,11 @@ describe("public people discovery", () => {
   });
 
   it("bounds official people-page fan-out and reports deterministic truncation", async () => {
-    const company = database.companies.upsert({
+    const company = (await database.companies.upsert({
       ycId: "bounded-official-people",
       name: "Bounded Official People",
       websiteUrl: HOME_URL
-    });
+    }));
     const requestedUrls: string[] = [];
     const links = Array.from({ length: 30 }, (_value, index) => {
       return `<a href="/team-${index}">Team ${index}</a>`;
@@ -351,11 +348,11 @@ describe("public people discovery", () => {
   });
 
   it("slices over-returned search results and enforces aggregate elapsed time", async () => {
-    const company = database.companies.upsert({
+    const company = (await database.companies.upsert({
       ycId: "bounded-search-people",
       name: "Bounded Search People",
       websiteUrl: HOME_URL
-    });
+    }));
     let elapsedMs = 0;
     const requestedUrls: string[] = [];
     const searchProvider: SearchProvider = {
@@ -405,11 +402,11 @@ describe("public people discovery", () => {
   });
 
   it("reports aggregate elapsed-budget exhaustion after the initial people page", async () => {
-    const company = database.companies.upsert({
+    const company = (await database.companies.upsert({
       ycId: "elapsed-root-people",
       name: "Elapsed Root People",
       websiteUrl: TEAM_URL
-    });
+    }));
     let elapsedMs = 0;
     const service = createPeopleDiscovery({
       repositories: database,
@@ -439,11 +436,11 @@ describe("public people discovery", () => {
   });
 
   it("returns at the company deadline when an injected fetch adapter ignores cancellation", async () => {
-    const company = database.companies.upsert({
+    const company = (await database.companies.upsert({
       ycId: "hard-fetch-deadline-people",
       name: "Hard Fetch Deadline People",
       websiteUrl: TEAM_URL
-    });
+    }));
     let adapterCompleted = false;
     let receivedSignal: AbortSignal | undefined;
     let adapterSettled!: () => void;
@@ -475,11 +472,11 @@ describe("public people discovery", () => {
   });
 
   it("returns at the company deadline when a search adapter ignores cancellation", async () => {
-    const company = database.companies.upsert({
+    const company = (await database.companies.upsert({
       ycId: "hard-search-deadline-people",
       name: "Hard Search Deadline People",
       websiteUrl: HOME_URL
-    });
+    }));
     let adapterCompleted = false;
     let receivedSignal: AbortSignal | undefined;
     let adapterSettled!: () => void;
@@ -518,11 +515,11 @@ describe("public people discovery", () => {
   });
 
   it("skips oversized names, roles, facts, and profile URLs before database writes", async () => {
-    const company = database.companies.upsert({
+    const company = (await database.companies.upsert({
       ycId: "bounded-person-fields",
       name: "Bounded Person Fields",
       websiteUrl: TEAM_URL
-    });
+    }));
     const service = createPeopleDiscovery({
       repositories: database,
       fetchPage: async () => fetchedPage(TEAM_URL, `
@@ -539,7 +536,7 @@ describe("public people discovery", () => {
     const result = await service.discoverPublicPeople(company.id);
 
     expect(result.people).toEqual([]);
-    expect(database.people.listByCompany(company.id)).toEqual([]);
+    expect((await database.people.listByCompany(company.id))).toEqual([]);
     expect(result.warnings.filter(({ code }) => code === "invalid-data")).toHaveLength(4);
     expect(result.warnings.map(({ message }) => message)).toEqual(expect.arrayContaining([
       expect.stringMatching(/name exceeds/i),
@@ -550,11 +547,11 @@ describe("public people discovery", () => {
   });
 
   it("accepts stale official evidence with an explicit age warning", async () => {
-    const company = database.companies.upsert({
+    const company = (await database.companies.upsert({
       ycId: "stale-people-source",
       name: "Stale People Source",
       websiteUrl: TEAM_URL
-    });
+    }));
     const service = createPeopleDiscovery({
       repositories: database,
       now: () => new Date("2026-07-16T13:00:00.000Z"),
@@ -577,11 +574,11 @@ describe("public people discovery", () => {
   });
 
   it("rejects future-dated official evidence before database writes", async () => {
-    const company = database.companies.upsert({
+    const company = (await database.companies.upsert({
       ycId: "future-people-source",
       name: "Future People Source",
       websiteUrl: TEAM_URL
-    });
+    }));
     const service = createPeopleDiscovery({
       repositories: database,
       now: () => new Date("2026-07-16T13:00:00.000Z"),
@@ -596,7 +593,7 @@ describe("public people discovery", () => {
     const result = await service.discoverPublicPeople(company.id);
 
     expect(result.people).toEqual([]);
-    expect(database.people.listByCompany(company.id)).toEqual([]);
+    expect((await database.people.listByCompany(company.id))).toEqual([]);
     expect(result.warnings).toContainEqual({
       code: "invalid-data",
       sourceUrl: TEAM_URL,
@@ -605,11 +602,11 @@ describe("public people discovery", () => {
   });
 
   it("validates stale and future timestamps supplied by a search adapter before fetching results", async () => {
-    const company = database.companies.upsert({
+    const company = (await database.companies.upsert({
       ycId: "dated-search-results",
       name: "Dated Search Results",
       websiteUrl: HOME_URL
-    });
+    }));
     const requestedUrls: string[] = [];
     const searchProvider: SearchProvider = {
       coverage: "search-extended",
@@ -656,11 +653,11 @@ describe("public people discovery", () => {
   });
 
   it("refreshes people and discovery evidence idempotently", async () => {
-    const company = database.companies.upsert({
+    const company = (await database.companies.upsert({
       ycId: "idempotent-people",
       name: "Idempotent People",
       websiteUrl: TEAM_URL
-    });
+    }));
     const service = createPeopleDiscovery({
       repositories: database,
       fetchPage: async () => fetchedPage(TEAM_URL, `
@@ -670,7 +667,7 @@ describe("public people discovery", () => {
 
     const first = await service.discoverPublicPeople(company.id);
     const second = await service.discoverPublicPeople(company.id);
-    const persisted = database.people.getWithEvidence(first.people[0]!.id);
+    const persisted = (await database.people.getWithEvidence(first.people[0]!.id));
 
     expect(second.people[0]?.id).toBe(first.people[0]?.id);
     expect(second.people[0]?.evidence[0]?.id).toBe(first.people[0]?.evidence[0]?.id);
@@ -678,11 +675,11 @@ describe("public people discovery", () => {
   });
 
   it("clears current discovery state for a person absent from the next complete authoritative snapshot", async () => {
-    const company = database.companies.upsert({
+    const company = (await database.companies.upsert({
       ycId: "authoritative-person-disappearance",
       name: "Authoritative Person Disappearance",
       websiteUrl: TEAM_URL
-    });
+    }));
     let html = `
       <article class="team-member">
         <h2>Ada Former</h2><p>Founder</p>
@@ -700,7 +697,7 @@ describe("public people discovery", () => {
     `;
 
     const second = await service.discoverPublicPeople(company.id);
-    const persistedAda = database.people.getWithEvidence(adaId);
+    const persistedAda = (await database.people.getWithEvidence(adaId));
 
     expect(second.people.map(({ name }) => name)).toEqual(["Bob Current"]);
     expect(persistedAda).toMatchObject({
@@ -712,11 +709,11 @@ describe("public people discovery", () => {
   });
 
   it("preserves prior discovery state when an authoritative refresh is only partially successful", async () => {
-    const company = database.companies.upsert({
+    const company = (await database.companies.upsert({
       ycId: "partial-authoritative-preservation",
       name: "Partial Authoritative Preservation",
       websiteUrl: HOME_URL
-    });
+    }));
     let phase = 1;
     const service = createPeopleDiscovery({
       repositories: database,
@@ -739,7 +736,7 @@ describe("public people discovery", () => {
     phase = 2;
 
     const second = await service.discoverPublicPeople(company.id);
-    const persistedAda = database.people.getWithEvidence(adaId);
+    const persistedAda = (await database.people.getWithEvidence(adaId));
 
     expect(second.people.map(({ name }) => name)).toEqual(["Bob Partial"]);
     expect(second.warnings).toContainEqual({
@@ -753,11 +750,11 @@ describe("public people discovery", () => {
   });
 
   it("preserves prior search-derived discovery state when the next optional-search page is invalid", async () => {
-    const company = database.companies.upsert({
+    const company = (await database.companies.upsert({
       ycId: "invalid-search-refresh-preservation",
       name: "Invalid Search Refresh Preservation",
       websiteUrl: TEAM_URL
-    });
+    }));
     const searchUrl = "https://press.example/ada-search";
     let phase = 1;
     const service = createPeopleDiscovery({
@@ -785,11 +782,11 @@ describe("public people discovery", () => {
     });
     const first = await service.discoverPublicPeople(company.id);
     const adaId = first.people.find(({ name }) => name === "Ada Search")!.id;
-    const priorAda = database.people.getWithEvidence(adaId)!;
+    const priorAda = (await database.people.getWithEvidence(adaId))!;
     phase = 2;
 
     const second = await service.discoverPublicPeople(company.id);
-    const persistedAda = database.people.getWithEvidence(adaId);
+    const persistedAda = (await database.people.getWithEvidence(adaId));
 
     expect(second.warnings).toContainEqual({
       code: "invalid-data",
@@ -801,11 +798,11 @@ describe("public people discovery", () => {
   });
 
   it("normalizes persistent identity across case and whitespace drift and clears a removed profile link", async () => {
-    const company = database.companies.upsert({
+    const company = (await database.companies.upsert({
       ycId: "normalized-refresh-people",
       name: "Normalized Refresh People",
       websiteUrl: TEAM_URL
-    });
+    }));
     let html = `
       <article class="team-member">
         <h2>Ada Example</h2><p>VP Product Marketing</p>
@@ -824,7 +821,7 @@ describe("public people discovery", () => {
     `;
 
     const second = await service.discoverPublicPeople(company.id);
-    const persisted = database.people.listByCompany(company.id);
+    const persisted = (await database.people.listByCompany(company.id));
 
     expect(persisted).toHaveLength(1);
     expect(second.people[0]?.id).toBe(first.people[0]?.id);
@@ -836,19 +833,19 @@ describe("public people discovery", () => {
   });
 
   it("rolls back an entire company refresh when one normalized identity cannot be updated", async () => {
-    const company = database.companies.upsert({
+    const company = (await database.companies.upsert({
       ycId: "rollback-refresh-people",
       name: "Rollback Refresh People",
       websiteUrl: TEAM_URL
-    });
-    const aaron = database.people.upsert({
+    }));
+    const aaron = (await database.people.upsert({
       companyId: company.id,
       name: "Aaron Changed",
       role: "Founder",
       publicProfileUrl: "https://www.linkedin.com/in/aaron-old"
-    });
-    database.people.upsert({ companyId: company.id, name: "Ada  Example", role: "CEO" });
-    database.people.upsert({ companyId: company.id, name: "Ada Example", role: "CEO" });
+    }));
+    (await database.people.upsert({ companyId: company.id, name: "Ada  Example", role: "CEO" }));
+    (await database.people.upsert({ companyId: company.id, name: "Ada Example", role: "CEO" }));
     const service = createPeopleDiscovery({
       repositories: database,
       fetchPage: async () => fetchedPage(TEAM_URL, `
@@ -860,20 +857,26 @@ describe("public people discovery", () => {
       `, "Team")
     });
 
-    await expect(service.discoverPublicPeople(company.id)).rejects.toThrow(/UNIQUE/i);
+    let persistenceError: unknown;
+    try {
+      await service.discoverPublicPeople(company.id);
+    } catch (error) {
+      persistenceError = error;
+    }
+    expect(postgresErrorKind(persistenceError)).toBe("unique");
 
-    expect(database.people.get(aaron.id)?.publicProfileUrl).toBe(
+    expect((await database.people.get(aaron.id))?.publicProfileUrl).toBe(
       "https://www.linkedin.com/in/aaron-old"
     );
-    expect(database.evidence.listForPerson(aaron.id)).toEqual([]);
+    expect((await database.evidence.listForPerson(aaron.id))).toEqual([]);
   });
 
   it("rejects missing search freshness and oversized search URLs before fetching", async () => {
-    const company = database.companies.upsert({
+    const company = (await database.companies.upsert({
       ycId: "invalid-search-fields",
       name: "Invalid Search Fields",
       websiteUrl: HOME_URL
-    });
+    }));
     const requestedUrls: string[] = [];
     const searchProvider = {
       coverage: "search-extended" as const,
@@ -907,11 +910,11 @@ describe("public people discovery", () => {
   });
 
   it("rejects an oversized official people candidate URL before fetching", async () => {
-    const company = database.companies.upsert({
+    const company = (await database.companies.upsert({
       ycId: "oversized-official-person-url",
       name: "Oversized Official Person URL",
       websiteUrl: HOME_URL
-    });
+    }));
     const requestedUrls: string[] = [];
     const service = createPeopleDiscovery({
       repositories: database,

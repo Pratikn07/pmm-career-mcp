@@ -1,12 +1,68 @@
 {
   "version": "7",
-  "dialect": "sqlite",
+  "dialect": "postgresql",
   "entries": [
     {
       "idx": 0,
-      "version": "6",
-      "when": 1784264324696,
+      "version": "7",
+      "when": 1784320390851,
       "tag": "0000_initial",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1784393902713,
+      "tag": "0001_schema_hardening",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1784576727300,
+      "tag": "0002_linkedin_media_review",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1784605168669,
+      "tag": "0003_linkedin_preview_snapshot",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1784785471216,
+      "tag": "0004_pmm_brand_studio",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1784800753271,
+      "tag": "0005_brand_source_media_exclusive",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1784804706167,
+      "tag": "0006_brand_brief_source_claims",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1785105453617,
+      "tag": "0007_editorial_intelligence",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1785290400000,
+      "tag": "0008_brand_profile_v2",
       "breakpoints": true
     }
   ]

@@ -1,0 +1,2234 @@
+{
+  "id": "841e3b55-f23f-4505-ae80-705db5c7d6b0",
+  "prevId": "3da76028-75bf-4c7a-8040-18062ed7c995",
+  "version": "7",
+  "dialect": "postgresql",
+  "tables": {
+    "career_mcp.brand_profiles": {
+      "name": "brand_profiles",
+      "schema": "career_mcp",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "owner_subject": {
+          "name": "owner_subject",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "version": {
+          "name": "version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "state": {
+          "name": "state",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "public_name": {
+          "name": "public_name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "role_line": {
+          "name": "role_line",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "series_name": {
+          "name": "series_name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "monogram": {
+          "name": "monogram",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "voice_json": {
+          "name": "voice_json",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "palette_json": {
+          "name": "palette_json",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "hook_rules_json": {
+          "name": "hook_rules_json",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {
+        "brand_profiles_one_active_owner_unique": {
+          "name": "brand_profiles_one_active_owner_unique",
+          "columns": [
+            {
+              "expression": "owner_subject",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"career_mcp\".\"brand_profiles\".\"state\" = 'active'",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "brand_profiles_row_version_unique": {
+          "name": "brand_profiles_row_version_unique",
+          "nullsNotDistinct": false,
+          "columns": [
+            "id",
+            "version"
+          ]
+        },
+        "brand_profiles_owner_version_unique": {
+          "name": "brand_profiles_owner_version_unique",
+          "nullsNotDistinct": false,
+          "columns": [
+            "owner_subject",
+            "version"
+          ]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {
+        "brand_profiles_version_check": {
+          "name": "brand_profiles_version_check",
+          "value": "\"career_mcp\".\"brand_profiles\".\"version\" >= 1"
+        },
+        "brand_profiles_state_check": {
+          "name": "brand_profiles_state_check",
+          "value": "\"career_mcp\".\"brand_profiles\".\"state\" in ('active','retired')"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "career_mcp.brand_visual_briefs": {
+      "name": "brand_visual_briefs",
+      "schema": "career_mcp",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "owner_subject": {
+          "name": "owner_subject",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "post_draft_id": {
+          "name": "post_draft_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "post_version": {
+          "name": "post_version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "brand_profile_id": {
+          "name": "brand_profile_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "brand_profile_version": {
+          "name": "brand_profile_version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "template_id": {
+          "name": "template_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "template_version": {
+          "name": "template_version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "prompt_format_version": {
+          "name": "prompt_format_version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "visual_mode": {
+          "name": "visual_mode",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "cover_hook": {
+          "name": "cover_hook",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "concept_summary": {
+          "name": "concept_summary",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "topic_label": {
+          "name": "topic_label",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "generation_prompt": {
+          "name": "generation_prompt",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "negative_constraints_json": {
+          "name": "negative_constraints_json",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "state": {
+          "name": "state",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {
+        "brand_visual_briefs_post_version_idx": {
+          "name": "brand_visual_briefs_post_version_idx",
+          "columns": [
+            {
+              "expression": "post_draft_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "post_version",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "brand_visual_briefs_profile_version_idx": {
+          "name": "brand_visual_briefs_profile_version_idx",
+          "columns": [
+            {
+              "expression": "brand_profile_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "brand_profile_version",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "brand_visual_briefs_owner_created_idx": {
+          "name": "brand_visual_briefs_owner_created_idx",
+          "columns": [
+            {
+              "expression": "owner_subject",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "brand_visual_briefs_post_version_fk": {
+          "name": "brand_visual_briefs_post_version_fk",
+          "tableFrom": "brand_visual_briefs",
+          "tableTo": "post_drafts",
+          "schemaTo": "career_mcp",
+          "columnsFrom": [
+            "post_draft_id",
+            "post_version"
+          ],
+          "columnsTo": [
+            "id",
+            "version"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "brand_visual_briefs_profile_version_fk": {
+          "name": "brand_visual_briefs_profile_version_fk",
+          "tableFrom": "brand_visual_briefs",
+          "tableTo": "brand_profiles",
+          "schemaTo": "career_mcp",
+          "columnsFrom": [
+            "brand_profile_id",
+            "brand_profile_version"
+          ],
+          "columnsTo": [
+            "id",
+            "version"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "brand_visual_briefs_mode_check": {
+          "name": "brand_visual_briefs_mode_check",
+          "value": "\"career_mcp\".\"brand_visual_briefs\".\"visual_mode\" in ('EDITORIAL_STATEMENT','EDITORIAL_METAPHOR')"
+        },
+        "brand_visual_briefs_state_check": {
+          "name": "brand_visual_briefs_state_check",
+          "value": "\"career_mcp\".\"brand_visual_briefs\".\"state\" in ('ready','rendered')"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "career_mcp.brand_visual_renders": {
+      "name": "brand_visual_renders",
+      "schema": "career_mcp",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "owner_subject": {
+          "name": "owner_subject",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "brief_id": {
+          "name": "brief_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "version": {
+          "name": "version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "source_media_id": {
+          "name": "source_media_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "rendered_media_id": {
+          "name": "rendered_media_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "alt_text": {
+          "name": "alt_text",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "render_checksum": {
+          "name": "render_checksum",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "renderer_version": {
+          "name": "renderer_version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {
+        "brand_visual_renders_brief_id_idx": {
+          "name": "brand_visual_renders_brief_id_idx",
+          "columns": [
+            {
+              "expression": "brief_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "brand_visual_renders_source_media_id_idx": {
+          "name": "brand_visual_renders_source_media_id_idx",
+          "columns": [
+            {
+              "expression": "source_media_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "brand_visual_renders_rendered_media_id_idx": {
+          "name": "brand_visual_renders_rendered_media_id_idx",
+          "columns": [
+            {
+              "expression": "rendered_media_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "brand_visual_renders_brief_id_brand_visual_briefs_id_fk": {
+          "name": "brand_visual_renders_brief_id_brand_visual_briefs_id_fk",
+          "tableFrom": "brand_visual_renders",
+          "tableTo": "brand_visual_briefs",
+          "schemaTo": "career_mcp",
+          "columnsFrom": [
+            "brief_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "brand_visual_renders_source_media_id_post_media_id_fk": {
+          "name": "brand_visual_renders_source_media_id_post_media_id_fk",
+          "tableFrom": "brand_visual_renders",
+          "tableTo": "post_media",
+          "schemaTo": "career_mcp",
+          "columnsFrom": [
+            "source_media_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "brand_visual_renders_rendered_media_id_post_media_id_fk": {
+          "name": "brand_visual_renders_rendered_media_id_post_media_id_fk",
+          "tableFrom": "brand_visual_renders",
+          "tableTo": "post_media",
+          "schemaTo": "career_mcp",
+          "columnsFrom": [
+            "rendered_media_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "brand_visual_renders_brief_version_unique": {
+          "name": "brand_visual_renders_brief_version_unique",
+          "nullsNotDistinct": false,
+          "columns": [
+            "brief_id",
+            "version"
+          ]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {
+        "brand_visual_renders_version_check": {
+          "name": "brand_visual_renders_version_check",
+          "value": "\"career_mcp\".\"brand_visual_renders\".\"version\" >= 1"
+        },
+        "brand_visual_renders_renderer_version_check": {
+          "name": "brand_visual_renders_renderer_version_check",
+          "value": "\"career_mcp\".\"brand_visual_renders\".\"renderer_version\" >= 1"
+        },
+        "brand_visual_renders_checksum_check": {
+          "name": "brand_visual_renders_checksum_check",
+          "value": "\"career_mcp\".\"brand_visual_renders\".\"render_checksum\" ~ '^[0-9a-f]{64}$'"
+        },
+        "brand_visual_renders_alt_text_check": {
+          "name": "brand_visual_renders_alt_text_check",
+          "value": "char_length(\"career_mcp\".\"brand_visual_renders\".\"alt_text\") between 1 and 120"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "career_mcp.companies": {
+      "name": "companies",
+      "schema": "career_mcp",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "yc_id": {
+          "name": "yc_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "batch": {
+          "name": "batch",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "website_url": {
+          "name": "website_url",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "yc_url": {
+          "name": "yc_url",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "location": {
+          "name": "location",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "industry": {
+          "name": "industry",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "is_hiring": {
+          "name": "is_hiring",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "checked_at": {
+          "name": "checked_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "companies_yc_id_unique": {
+          "name": "companies_yc_id_unique",
+          "nullsNotDistinct": false,
+          "columns": [
+            "yc_id"
+          ]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "career_mcp.evidence": {
+      "name": "evidence",
+      "schema": "career_mcp",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "person_id": {
+          "name": "person_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "source_url": {
+          "name": "source_url",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "title": {
+          "name": "title",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "fact_type": {
+          "name": "fact_type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "fact": {
+          "name": "fact",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "checked_at": {
+          "name": "checked_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "confidence": {
+          "name": "confidence",
+          "type": "double precision",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {
+        "evidence_person_id_idx": {
+          "name": "evidence_person_id_idx",
+          "columns": [
+            {
+              "expression": "person_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "evidence_person_id_people_id_fk": {
+          "name": "evidence_person_id_people_id_fk",
+          "tableFrom": "evidence",
+          "tableTo": "people",
+          "schemaTo": "career_mcp",
+          "columnsFrom": [
+            "person_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "evidence_confidence_range_check": {
+          "name": "evidence_confidence_range_check",
+          "value": "\"career_mcp\".\"evidence\".\"confidence\" >= 0 and \"career_mcp\".\"evidence\".\"confidence\" <= 1"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "career_mcp.media_usage_claims": {
+      "name": "media_usage_claims",
+      "schema": "career_mcp",
+      "columns": {
+        "media_id": {
+          "name": "media_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "owner_subject": {
+          "name": "owner_subject",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "purpose": {
+          "name": "purpose",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {
+        "media_usage_claims_owner_subject_idx": {
+          "name": "media_usage_claims_owner_subject_idx",
+          "columns": [
+            {
+              "expression": "owner_subject",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "media_usage_claims_media_id_fk": {
+          "name": "media_usage_claims_media_id_fk",
+          "tableFrom": "media_usage_claims",
+          "tableTo": "post_media",
+          "schemaTo": "career_mcp",
+          "columnsFrom": [
+            "media_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "media_usage_claims_pkey": {
+          "name": "media_usage_claims_pkey",
+          "columns": [
+            "media_id"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "media_usage_claims_purpose_check": {
+          "name": "media_usage_claims_purpose_check",
+          "value": "\"career_mcp\".\"media_usage_claims\".\"purpose\" in ('attached','brand_source')"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "career_mcp.oauth_tokens": {
+      "name": "oauth_tokens",
+      "schema": "career_mcp",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "provider": {
+          "name": "provider",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "ciphertext": {
+          "name": "ciphertext",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "refresh_metadata_ciphertext": {
+          "name": "refresh_metadata_ciphertext",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "expires_at": {
+          "name": "expires_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "oauth_tokens_provider_unique": {
+          "name": "oauth_tokens_provider_unique",
+          "nullsNotDistinct": false,
+          "columns": [
+            "provider"
+          ]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "career_mcp.outreach_drafts": {
+      "name": "outreach_drafts",
+      "schema": "career_mcp",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "target_id": {
+          "name": "target_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "purpose": {
+          "name": "purpose",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "text": {
+          "name": "text",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "version": {
+          "name": "version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "evidence_ids_json": {
+          "name": "evidence_ids_json",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {
+        "outreach_target_purpose_version_unique": {
+          "name": "outreach_target_purpose_version_unique",
+          "columns": [
+            {
+              "expression": "target_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "purpose",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "version",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "outreach_drafts_target_id_targets_id_fk": {
+          "name": "outreach_drafts_target_id_targets_id_fk",
+          "tableFrom": "outreach_drafts",
+          "tableTo": "targets",
+          "schemaTo": "career_mcp",
+          "columnsFrom": [
+            "target_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "outreach_drafts_version_check": {
+          "name": "outreach_drafts_version_check",
+          "value": "\"career_mcp\".\"outreach_drafts\".\"version\" >= 1"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "career_mcp.people": {
+      "name": "people",
+      "schema": "career_mcp",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "company_id": {
+          "name": "company_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "role": {
+          "name": "role",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "public_profile_url": {
+          "name": "public_profile_url",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "checked_at": {
+          "name": "checked_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {
+        "people_company_name_role_unique": {
+          "name": "people_company_name_role_unique",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "name",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "role",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "people_company_id_companies_id_fk": {
+          "name": "people_company_id_companies_id_fk",
+          "tableFrom": "people",
+          "tableTo": "companies",
+          "schemaTo": "career_mcp",
+          "columnsFrom": [
+            "company_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "career_mcp.post_draft_media": {
+      "name": "post_draft_media",
+      "schema": "career_mcp",
+      "columns": {
+        "post_draft_id": {
+          "name": "post_draft_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "version": {
+          "name": "version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "position": {
+          "name": "position",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "media_id": {
+          "name": "media_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "alt_text": {
+          "name": "alt_text",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {
+        "post_draft_media_media_id_idx": {
+          "name": "post_draft_media_media_id_idx",
+          "columns": [
+            {
+              "expression": "media_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "post_draft_media_exact_version_fk": {
+          "name": "post_draft_media_exact_version_fk",
+          "tableFrom": "post_draft_media",
+          "tableTo": "post_drafts",
+          "schemaTo": "career_mcp",
+          "columnsFrom": [
+            "post_draft_id",
+            "version"
+          ],
+          "columnsTo": [
+            "id",
+            "version"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "post_draft_media_media_id_fk": {
+          "name": "post_draft_media_media_id_fk",
+          "tableFrom": "post_draft_media",
+          "tableTo": "post_media",
+          "schemaTo": "career_mcp",
+          "columnsFrom": [
+            "media_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "post_draft_media_pkey": {
+          "name": "post_draft_media_pkey",
+          "columns": [
+            "post_draft_id",
+            "version",
+            "position"
+          ]
+        }
+      },
+      "uniqueConstraints": {
+        "post_draft_media_version_media_unique": {
+          "name": "post_draft_media_version_media_unique",
+          "nullsNotDistinct": false,
+          "columns": [
+            "post_draft_id",
+            "version",
+            "media_id"
+          ]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {
+        "post_draft_media_position_check": {
+          "name": "post_draft_media_position_check",
+          "value": "\"career_mcp\".\"post_draft_media\".\"position\" between 0 and 3"
+        },
+        "post_draft_media_alt_text_check": {
+          "name": "post_draft_media_alt_text_check",
+          "value": "char_length(\"career_mcp\".\"post_draft_media\".\"alt_text\") between 1 and 120"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "career_mcp.post_drafts": {
+      "name": "post_drafts",
+      "schema": "career_mcp",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "draft_id": {
+          "name": "draft_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "text": {
+          "name": "text",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "visibility": {
+          "name": "visibility",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "version": {
+          "name": "version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "checksum": {
+          "name": "checksum",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "state": {
+          "name": "state",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "post_draft_version_unique": {
+          "name": "post_draft_version_unique",
+          "nullsNotDistinct": false,
+          "columns": [
+            "draft_id",
+            "version"
+          ]
+        },
+        "post_draft_row_version_unique": {
+          "name": "post_draft_row_version_unique",
+          "nullsNotDistinct": false,
+          "columns": [
+            "id",
+            "version"
+          ]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {
+        "post_drafts_version_check": {
+          "name": "post_drafts_version_check",
+          "value": "\"career_mcp\".\"post_drafts\".\"version\" >= 1"
+        },
+        "post_drafts_visibility_check": {
+          "name": "post_drafts_visibility_check",
+          "value": "\"career_mcp\".\"post_drafts\".\"visibility\" in ('PUBLIC', 'CONNECTIONS')"
+        },
+        "post_drafts_state_check": {
+          "name": "post_drafts_state_check",
+          "value": "\"career_mcp\".\"post_drafts\".\"state\" in (\n      'draft',\n      'ready_for_preview',\n      'ready_for_review',\n      'previewed',\n      'uploading_media',\n      'publishing',\n      'published',\n      'media_upload_failed',\n      'media_upload_unknown',\n      'publish_failed',\n      'publish_unknown'\n    )"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "career_mcp.post_media": {
+      "name": "post_media",
+      "schema": "career_mcp",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "owner_subject": {
+          "name": "owner_subject",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "object_path": {
+          "name": "object_path",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "sha256": {
+          "name": "sha256",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "mime_type": {
+          "name": "mime_type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "byte_size": {
+          "name": "byte_size",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "width": {
+          "name": "width",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "height": {
+          "name": "height",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "frame_count": {
+          "name": "frame_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 1
+        },
+        "original_filename": {
+          "name": "original_filename",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {
+        "post_media_owner_sha_unique": {
+          "name": "post_media_owner_sha_unique",
+          "columns": [
+            {
+              "expression": "owner_subject",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "sha256",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "post_media_object_path_unique": {
+          "name": "post_media_object_path_unique",
+          "columns": [
+            {
+              "expression": "object_path",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "post_media_sha256_check": {
+          "name": "post_media_sha256_check",
+          "value": "\"career_mcp\".\"post_media\".\"sha256\" ~ '^[0-9a-f]{64}$'"
+        },
+        "post_media_mime_check": {
+          "name": "post_media_mime_check",
+          "value": "\"career_mcp\".\"post_media\".\"mime_type\" in ('image/jpeg','image/png','image/gif')"
+        },
+        "post_media_size_check": {
+          "name": "post_media_size_check",
+          "value": "\"career_mcp\".\"post_media\".\"byte_size\" between 1 and 20971520"
+        },
+        "post_media_dimensions_check": {
+          "name": "post_media_dimensions_check",
+          "value": "\"career_mcp\".\"post_media\".\"width\" > 0 and \"career_mcp\".\"post_media\".\"height\" > 0 and (\"career_mcp\".\"post_media\".\"width\"::bigint * \"career_mcp\".\"post_media\".\"height\"::bigint) < 36152320"
+        },
+        "post_media_frames_check": {
+          "name": "post_media_frames_check",
+          "value": "\"career_mcp\".\"post_media\".\"frame_count\" between 1 and 250"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "career_mcp.post_previews": {
+      "name": "post_previews",
+      "schema": "career_mcp",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "post_draft_id": {
+          "name": "post_draft_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "version": {
+          "name": "version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "token_hash": {
+          "name": "token_hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "snapshot_checksum": {
+          "name": "snapshot_checksum",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "expires_at": {
+          "name": "expires_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "consumed_at": {
+          "name": "consumed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {
+        "post_previews_post_draft_version_idx": {
+          "name": "post_previews_post_draft_version_idx",
+          "columns": [
+            {
+              "expression": "post_draft_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "version",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "post_previews_exact_version_fk": {
+          "name": "post_previews_exact_version_fk",
+          "tableFrom": "post_previews",
+          "tableTo": "post_drafts",
+          "schemaTo": "career_mcp",
+          "columnsFrom": [
+            "post_draft_id",
+            "version"
+          ],
+          "columnsTo": [
+            "id",
+            "version"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "post_previews_token_hash_unique": {
+          "name": "post_previews_token_hash_unique",
+          "nullsNotDistinct": false,
+          "columns": [
+            "token_hash"
+          ]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "career_mcp.publish_attempt_media": {
+      "name": "publish_attempt_media",
+      "schema": "career_mcp",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "publish_attempt_id": {
+          "name": "publish_attempt_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "media_id": {
+          "name": "media_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "position": {
+          "name": "position",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "state": {
+          "name": "state",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'pending'"
+        },
+        "linkedin_image_urn": {
+          "name": "linkedin_image_urn",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {
+        "publish_attempt_media_publish_attempt_id_idx": {
+          "name": "publish_attempt_media_publish_attempt_id_idx",
+          "columns": [
+            {
+              "expression": "publish_attempt_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "publish_attempt_media_media_id_idx": {
+          "name": "publish_attempt_media_media_id_idx",
+          "columns": [
+            {
+              "expression": "media_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "publish_attempt_media_publish_attempt_id_fk": {
+          "name": "publish_attempt_media_publish_attempt_id_fk",
+          "tableFrom": "publish_attempt_media",
+          "tableTo": "publish_attempts",
+          "schemaTo": "career_mcp",
+          "columnsFrom": [
+            "publish_attempt_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "publish_attempt_media_media_id_fk": {
+          "name": "publish_attempt_media_media_id_fk",
+          "tableFrom": "publish_attempt_media",
+          "tableTo": "post_media",
+          "schemaTo": "career_mcp",
+          "columnsFrom": [
+            "media_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "publish_attempt_media_position_unique": {
+          "name": "publish_attempt_media_position_unique",
+          "nullsNotDistinct": false,
+          "columns": [
+            "publish_attempt_id",
+            "position"
+          ]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {
+        "publish_attempt_media_state_check": {
+          "name": "publish_attempt_media_state_check",
+          "value": "\"career_mcp\".\"publish_attempt_media\".\"state\" in ('pending','initialized','uploaded','definite_failure','unknown')"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "career_mcp.publish_attempts": {
+      "name": "publish_attempts",
+      "schema": "career_mcp",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "post_draft_id": {
+          "name": "post_draft_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "version": {
+          "name": "version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "requested_at": {
+          "name": "requested_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "phase": {
+          "name": "phase",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'preflight'"
+        },
+        "media_count": {
+          "name": "media_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "response_category": {
+          "name": "response_category",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "post_urn": {
+          "name": "post_urn",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "sanitized_error": {
+          "name": "sanitized_error",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "completed_at": {
+          "name": "completed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {
+        "publish_attempts_post_draft_version_idx": {
+          "name": "publish_attempts_post_draft_version_idx",
+          "columns": [
+            {
+              "expression": "post_draft_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "version",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "publish_attempts_exact_version_fk": {
+          "name": "publish_attempts_exact_version_fk",
+          "tableFrom": "publish_attempts",
+          "tableTo": "post_drafts",
+          "schemaTo": "career_mcp",
+          "columnsFrom": [
+            "post_draft_id",
+            "version"
+          ],
+          "columnsTo": [
+            "id",
+            "version"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "publish_attempts_response_category_check": {
+          "name": "publish_attempts_response_category_check",
+          "value": "\"career_mcp\".\"publish_attempts\".\"response_category\" in (\n      'pending',\n      'published',\n      'definite_rejection',\n      'ambiguous',\n      'media_definite_rejection',\n      'media_ambiguous'\n    )"
+        },
+        "publish_attempts_phase_check": {
+          "name": "publish_attempts_phase_check",
+          "value": "\"career_mcp\".\"publish_attempts\".\"phase\" in ('preflight','uploading_media','creating_post','complete')"
+        },
+        "publish_attempts_media_count_check": {
+          "name": "publish_attempts_media_count_check",
+          "value": "\"career_mcp\".\"publish_attempts\".\"media_count\" between 0 and 4"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "career_mcp.settings": {
+      "name": "settings",
+      "schema": "career_mcp",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "key": {
+          "name": "key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "value_json": {
+          "name": "value_json",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "settings_key_unique": {
+          "name": "settings_key_unique",
+          "nullsNotDistinct": false,
+          "columns": [
+            "key"
+          ]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "career_mcp.shortlist_entries": {
+      "name": "shortlist_entries",
+      "schema": "career_mcp",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "shortlist_id": {
+          "name": "shortlist_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "target_id": {
+          "name": "target_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "position": {
+          "name": "position",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {
+        "shortlist_target_unique": {
+          "name": "shortlist_target_unique",
+          "columns": [
+            {
+              "expression": "shortlist_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "target_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "shortlist_position_unique": {
+          "name": "shortlist_position_unique",
+          "columns": [
+            {
+              "expression": "shortlist_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "position",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "shortlist_entries_target_id_idx": {
+          "name": "shortlist_entries_target_id_idx",
+          "columns": [
+            {
+              "expression": "target_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "shortlist_entries_shortlist_id_shortlists_id_fk": {
+          "name": "shortlist_entries_shortlist_id_shortlists_id_fk",
+          "tableFrom": "shortlist_entries",
+          "tableTo": "shortlists",
+          "schemaTo": "career_mcp",
+          "columnsFrom": [
+            "shortlist_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "shortlist_entries_target_id_targets_id_fk": {
+          "name": "shortlist_entries_target_id_targets_id_fk",
+          "tableFrom": "shortlist_entries",
+          "tableTo": "targets",
+          "schemaTo": "career_mcp",
+          "columnsFrom": [
+            "target_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "shortlist_entries_position_check": {
+          "name": "shortlist_entries_position_check",
+          "value": "\"career_mcp\".\"shortlist_entries\".\"position\" >= 0"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "career_mcp.shortlists": {
+      "name": "shortlists",
+      "schema": "career_mcp",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "career_mcp.target_notes": {
+      "name": "target_notes",
+      "schema": "career_mcp",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "target_id": {
+          "name": "target_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "text": {
+          "name": "text",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {
+        "target_notes_target_id_idx": {
+          "name": "target_notes_target_id_idx",
+          "columns": [
+            {
+              "expression": "target_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "target_notes_target_id_targets_id_fk": {
+          "name": "target_notes_target_id_targets_id_fk",
+          "tableFrom": "target_notes",
+          "tableTo": "targets",
+          "schemaTo": "career_mcp",
+          "columnsFrom": [
+            "target_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "career_mcp.targets": {
+      "name": "targets",
+      "schema": "career_mcp",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "person_id": {
+          "name": "person_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "pmm_opportunity": {
+          "name": "pmm_opportunity",
+          "type": "double precision",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "referral_potential": {
+          "name": "referral_potential",
+          "type": "double precision",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "network_value": {
+          "name": "network_value",
+          "type": "double precision",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "total_score": {
+          "name": "total_score",
+          "type": "double precision",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "confidence": {
+          "name": "confidence",
+          "type": "double precision",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "rationale": {
+          "name": "rationale",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "targets_person_id_people_id_fk": {
+          "name": "targets_person_id_people_id_fk",
+          "tableFrom": "targets",
+          "tableTo": "people",
+          "schemaTo": "career_mcp",
+          "columnsFrom": [
+            "person_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "targets_person_id_unique": {
+          "name": "targets_person_id_unique",
+          "nullsNotDistinct": false,
+          "columns": [
+            "person_id"
+          ]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {
+        "targets_pmm_opportunity_range_check": {
+          "name": "targets_pmm_opportunity_range_check",
+          "value": "\"career_mcp\".\"targets\".\"pmm_opportunity\" >= 0 and \"career_mcp\".\"targets\".\"pmm_opportunity\" <= 100"
+        },
+        "targets_referral_potential_range_check": {
+          "name": "targets_referral_potential_range_check",
+          "value": "\"career_mcp\".\"targets\".\"referral_potential\" >= 0 and \"career_mcp\".\"targets\".\"referral_potential\" <= 100"
+        },
+        "targets_network_value_range_check": {
+          "name": "targets_network_value_range_check",
+          "value": "\"career_mcp\".\"targets\".\"network_value\" >= 0 and \"career_mcp\".\"targets\".\"network_value\" <= 100"
+        },
+        "targets_total_score_range_check": {
+          "name": "targets_total_score_range_check",
+          "value": "\"career_mcp\".\"targets\".\"total_score\" >= 0 and \"career_mcp\".\"targets\".\"total_score\" <= 100"
+        },
+        "targets_confidence_range_check": {
+          "name": "targets_confidence_range_check",
+          "value": "\"career_mcp\".\"targets\".\"confidence\" >= 0 and \"career_mcp\".\"targets\".\"confidence\" <= 1"
+        },
+        "targets_status_check": {
+          "name": "targets_status_check",
+          "value": "\"career_mcp\".\"targets\".\"status\" in (\n      'discovered',\n      'shortlisted',\n      'connect_planned',\n      'connected',\n      'contacted',\n      'replied',\n      'archived'\n    )"
+        }
+      },
+      "isRLSEnabled": false
+    }
+  },
+  "enums": {},
+  "schemas": {
+    "career_mcp": "career_mcp"
+  },
+  "sequences": {},
+  "roles": {},
+  "policies": {},
+  "views": {},
+  "_meta": {
+    "columns": {},
+    "schemas": {},
+    "tables": {}
+  }
+}

@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createDatabase, type TestCareerDatabase } from "../../src/db/client.js";
+import { afterAll, afterEach, describe, expect, it } from "vitest";
+import { createTestDatabase, type TestCareerDatabase } from "../support/database.js";
 import type { FetchedPage } from "../../src/research/fetch-page.js";
 import * as jobDiscoveryModule from "../../src/research/job-discovery.js";
 import { createJobDiscovery } from "../../src/research/job-discovery.js";
@@ -11,6 +11,10 @@ const CHECKED_AT = "2026-07-16T14:00:00.000Z";
 const HOME_URL = "https://acme.example/";
 const CAREERS_URL = "https://acme.example/careers";
 const publicDns = async () => ["93.184.216.34"];
+const database: TestCareerDatabase = await createTestDatabase();
+
+afterEach(async () => (await database.resetForTests()));
+afterAll(async () => (await database.close()));
 
 function fetchedPage(url: string, html: string, title: string): FetchedPage {
   return {
@@ -25,25 +29,17 @@ function fetchedPage(url: string, html: string, title: string): FetchedPage {
 }
 
 describe("PMM opportunity discovery", () => {
-  let database: TestCareerDatabase;
-
-  beforeEach(() => {
-    database = createDatabase(":memory:");
-  });
-
-  afterEach(() => database.close());
-
   it("exports an explicit injected service factory without a misleading dependency-taking free function", () => {
     expect(Object.keys(jobDiscoveryModule).sort()).toEqual(["createJobDiscovery"]);
   });
 
   it("finds configured active marketing roles from official careers HTML", async () => {
-    const company = database.companies.upsert({
+    const company = (await database.companies.upsert({
       ycId: "acme-ai-jobs",
       name: "Acme AI",
       websiteUrl: HOME_URL,
       industry: "B2B / AI"
-    });
+    }));
     const careersHtml = await readFile(fixturePath, "utf8");
     const requestedUrls: string[] = [];
     const fetchPage = async (url: string): Promise<FetchedPage> => {
@@ -97,12 +93,12 @@ describe("PMM opportunity discovery", () => {
   });
 
   it("uses configured locations and company industries as filters", async () => {
-    const company = database.companies.upsert({
+    const company = (await database.companies.upsert({
       ycId: "filter-jobs",
       name: "Filter Jobs",
       websiteUrl: CAREERS_URL,
       industry: "B2B / AI"
-    });
+    }));
     const careersHtml = await readFile(fixturePath, "utf8");
     const service = createJobDiscovery({
       repositories: database,
@@ -126,12 +122,12 @@ describe("PMM opportunity discovery", () => {
   });
 
   it("parses conventional semantic job cards without fixture-only data attributes", async () => {
-    const company = database.companies.upsert({
+    const company = (await database.companies.upsert({
       ycId: "semantic-jobs",
       name: "Semantic Jobs",
       websiteUrl: HOME_URL,
       industry: "AI"
-    });
+    }));
     const fetchPage = async (url: string): Promise<FetchedPage> => {
       if (url === HOME_URL) {
         return fetchedPage(url, '<nav><a href="/careers">Careers</a></nav>', "Company");
@@ -161,12 +157,12 @@ describe("PMM opportunity discovery", () => {
   });
 
   it("rejects non-public job citations and DNS-to-private ATS hosts while retaining a public ATS", async () => {
-    const company = database.companies.upsert({
+    const company = (await database.companies.upsert({
       ycId: "public-job-citations",
       name: "Public Job Citations",
       websiteUrl: CAREERS_URL,
       industry: "AI"
-    });
+    }));
     const resolvedHosts: string[] = [];
     const result = await createJobDiscovery({
       repositories: database,
@@ -199,12 +195,12 @@ describe("PMM opportunity discovery", () => {
   });
 
   it("returns a source-changed partial warning for an unrecognized discovered careers page", async () => {
-    const company = database.companies.upsert({
+    const company = (await database.companies.upsert({
       ycId: "changed-job-layout",
       name: "Changed Job Layout",
       websiteUrl: HOME_URL,
       industry: "AI"
-    });
+    }));
     const fetchPage = async (url: string): Promise<FetchedPage> => {
       if (url === HOME_URL) {
         return fetchedPage(url, '<a href="/careers">Careers</a>', "Company");
@@ -230,18 +226,18 @@ describe("PMM opportunity discovery", () => {
   });
 
   it("returns successful jobs with a deterministic partial warning when another source fails", async () => {
-    const workingCompany = database.companies.upsert({
+    const workingCompany = (await database.companies.upsert({
       ycId: "working-jobs",
       name: "Working Jobs",
       websiteUrl: CAREERS_URL,
       industry: "AI"
-    });
-    const failedCompany = database.companies.upsert({
+    }));
+    const failedCompany = (await database.companies.upsert({
       ycId: "failed-jobs",
       name: "Failed Jobs",
       websiteUrl: "https://failed.example/",
       industry: "AI"
-    });
+    }));
     const careersHtml = await readFile(fixturePath, "utf8");
     const service = createJobDiscovery({
       repositories: database,
@@ -275,12 +271,12 @@ describe("PMM opportunity discovery", () => {
   });
 
   it("treats invalid source freshness as a partial source failure", async () => {
-    const company = database.companies.upsert({
+    const company = (await database.companies.upsert({
       ycId: "invalid-job-time",
       name: "Invalid Job Time",
       websiteUrl: CAREERS_URL,
       industry: "AI"
-    });
+    }));
     const careersHtml = await readFile(fixturePath, "utf8");
     const service = createJobDiscovery({
       repositories: database,
@@ -304,12 +300,12 @@ describe("PMM opportunity discovery", () => {
   });
 
   it("bounds official careers-page fan-out per company and reports truncation", async () => {
-    const company = database.companies.upsert({
+    const company = (await database.companies.upsert({
       ycId: "bounded-careers",
       name: "Bounded Careers",
       websiteUrl: HOME_URL,
       industry: "AI"
-    });
+    }));
     const requestedUrls: string[] = [];
     const links = Array.from({ length: 30 }, (_value, index) => {
       return `<a href="/careers-${index}">Careers ${index}</a>`;
@@ -357,12 +353,12 @@ describe("PMM opportunity discovery", () => {
   });
 
   it("skips oversized job titles and URLs with explicit invalid-data warnings", async () => {
-    const company = database.companies.upsert({
+    const company = (await database.companies.upsert({
       ycId: "bounded-job-fields",
       name: "Bounded Job Fields",
       websiteUrl: CAREERS_URL,
       industry: "AI"
-    });
+    }));
     const service = createJobDiscovery({
       repositories: database,
       fetchPage: async () => fetchedPage(CAREERS_URL, `
@@ -392,18 +388,18 @@ describe("PMM opportunity discovery", () => {
   });
 
   it("accepts stale careers evidence with a warning and rejects future-dated evidence", async () => {
-    const staleCompany = database.companies.upsert({
+    const staleCompany = (await database.companies.upsert({
       ycId: "stale-job-source",
       name: "Stale Job Source",
       websiteUrl: "https://stale.example/careers",
       industry: "AI"
-    });
-    const futureCompany = database.companies.upsert({
+    }));
+    const futureCompany = (await database.companies.upsert({
       ycId: "future-job-source",
       name: "Future Job Source",
       websiteUrl: "https://future.example/careers",
       industry: "AI"
-    });
+    }));
     const service = createJobDiscovery({
       repositories: database,
       now: () => new Date("2026-07-16T14:00:00.000Z"),
@@ -440,12 +436,12 @@ describe("PMM opportunity discovery", () => {
   });
 
   it("reports aggregate elapsed-budget exhaustion even when the initial careers page has jobs", async () => {
-    const company = database.companies.upsert({
+    const company = (await database.companies.upsert({
       ycId: "elapsed-root-jobs",
       name: "Elapsed Root Jobs",
       websiteUrl: CAREERS_URL,
       industry: "AI"
-    });
+    }));
     let elapsedMs = 0;
     const service = createJobDiscovery({
       repositories: database,
@@ -477,12 +473,12 @@ describe("PMM opportunity discovery", () => {
   });
 
   it("returns at the company deadline when an injected careers fetch ignores cancellation", async () => {
-    const company = database.companies.upsert({
+    const company = (await database.companies.upsert({
       ycId: "hard-fetch-deadline-jobs",
       name: "Hard Fetch Deadline Jobs",
       websiteUrl: CAREERS_URL,
       industry: "AI"
-    });
+    }));
     let adapterCompleted = false;
     let receivedSignal: AbortSignal | undefined;
     let adapterSettled!: () => void;
@@ -518,12 +514,12 @@ describe("PMM opportunity discovery", () => {
   });
 
   it("rejects an oversized official careers candidate URL before fetching", async () => {
-    const company = database.companies.upsert({
+    const company = (await database.companies.upsert({
       ycId: "oversized-official-job-url",
       name: "Oversized Official Job URL",
       websiteUrl: HOME_URL,
       industry: "AI"
-    });
+    }));
     const requestedUrls: string[] = [];
     const service = createJobDiscovery({
       repositories: database,

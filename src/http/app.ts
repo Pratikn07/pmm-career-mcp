@@ -6,10 +6,21 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { AppConfig } from "../config.js";
 import { createResourceAuth, protectedResourceMetadata } from "../auth/resource-auth.js";
+import {
+  REQUEST_AUTH_CONTEXT,
+  type AuthenticatedLocals,
+  type RequestAuthContext
+} from "../auth/request-context.js";
+import { applyConsentSecurityHeaders, hasConsentPageConfiguration, invalidConsentPage, renderConsentPage } from "../oauth/consent-page.js";
+import { isSupabaseAuthorizationId } from "../oauth/authorization-id.js";
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
 
 type CommonHttpDependencies = {
   /** Required by hosted OAuth deployments; omitted only for existing local test handlers. */
   config?: AppConfig;
+  /** A lightweight query that confirms the migrated database is reachable. */
+  checkReady?: () => Promise<void>;
 };
 
 type LegacyHttpDependencies = CommonHttpDependencies & {
@@ -18,7 +29,7 @@ type LegacyHttpDependencies = CommonHttpDependencies & {
 
 type StreamableMcpDependencies = CommonHttpDependencies & {
   /** A fresh server prevents one stateless request leaking state into another. */
-  mcpServerFactory: () => McpServer;
+  mcpServerFactory: (context: RequestAuthContext | undefined) => McpServer;
 };
 
 export type HttpDependencies = LegacyHttpDependencies | StreamableMcpDependencies;
@@ -57,26 +68,45 @@ const mcpJsonBodyError: ErrorRequestHandler = (error, request, response, next) =
   }
 };
 
-function streamableMcpHandler(factory: () => McpServer): RequestHandler {
+function streamableMcpHandler(
+  factory: (context: RequestAuthContext | undefined) => McpServer
+): RequestHandler {
   return async (request, response) => {
     let server: McpServer | undefined;
+    let closeServer: (() => Promise<void>) | undefined;
     try {
-      server = factory();
+      const locals: AuthenticatedLocals = response.locals;
+      server = factory(locals[REQUEST_AUTH_CONTEXT]);
+      closeServer = registerMcpServerCleanup(response, server);
       // SDK 1.29's declaration omits `undefined`, although it is the documented
       // and runtime-supported stateless setting.
       const transport = new StreamableHTTPServerTransport(
         { sessionIdGenerator: undefined } as never
       );
-      response.once("finish", () => { void server?.close(); });
       await server.connect(transport as unknown as Transport);
       await transport.handleRequest(request, response, request.body);
     } catch {
       if (!response.headersSent) {
         response.status(500).json({ error: "MCP request could not be completed" });
       }
-      await server?.close();
+      await closeServer?.();
     }
   };
+}
+
+/** Closes a stateless per-request MCP server once, regardless of response termination order. */
+export function registerMcpServerCleanup(
+  response: Pick<express.Response, "once">,
+  server: Pick<McpServer, "close">
+): () => Promise<void> {
+  let closePromise: Promise<void> | undefined;
+  const closeOnce = (): Promise<void> => {
+    closePromise ??= Promise.resolve(server.close()).catch(() => undefined);
+    return closePromise;
+  };
+  response.once("finish", () => { void closeOnce(); });
+  response.once("close", () => { void closeOnce(); });
+  return closeOnce;
 }
 
 export function createHttpApp(deps: HttpDependencies): Express {
@@ -95,6 +125,57 @@ export function createHttpApp(deps: HttpDependencies): Express {
   app.get("/health", (_request, response) => {
     response.json({ status: "ok" });
   });
+  app.get("/ready", async (_request, response) => {
+    if (deps.checkReady === undefined) {
+      response.status(503).json({ status: "not_ready" });
+      return;
+    }
+    try {
+      await deps.checkReady();
+      response.json({ status: "ready" });
+    } catch {
+      response.status(503).json({ status: "not_ready" });
+    }
+  });
+  app.get("/review-card-client.js", (_request, response) => {
+    const publicDirectory = resolve(process.cwd(), "dist/public");
+    if (!existsSync(resolve(publicDirectory, "review-card-client.js"))) {
+      response.status(404).end();
+      return;
+    }
+    response.setHeader("Cache-Control", "no-cache");
+    response.setHeader("X-Content-Type-Options", "nosniff");
+    response.type("application/javascript").sendFile("review-card-client.js", {
+      root: publicDirectory,
+      dotfiles: "allow"
+    });
+  });
+  const consentConfig = deps.config;
+  if (consentConfig !== undefined && hasConsentPageConfiguration(consentConfig)) {
+    app.get("/oauth/consent", (request, response) => {
+      const authorizationId = typeof request.query.authorization_id === "string" ? request.query.authorization_id : undefined;
+      if (authorizationId === undefined || !isSupabaseAuthorizationId(authorizationId)) {
+        applyConsentSecurityHeaders(response);
+        response.status(400).type("html").send(invalidConsentPage());
+        return;
+      }
+      applyConsentSecurityHeaders(response, consentConfig.supabaseUrl);
+      response.type("html").send(renderConsentPage(consentConfig, authorizationId));
+    });
+    app.get("/oauth/consent-client.js", (_request, response) => {
+      const publicDirectory = resolve(process.cwd(), "dist/public");
+      if (!existsSync(resolve(publicDirectory, "consent-client.js"))) {
+        response.status(404).end();
+        return;
+      }
+      response.setHeader("Cache-Control", "no-cache");
+      response.setHeader("X-Content-Type-Options", "nosniff");
+      response.type("application/javascript").sendFile("consent-client.js", {
+        root: publicDirectory,
+        dotfiles: "allow"
+      });
+    });
+  }
   if (deps.config !== undefined && deps.config.authMode === "oauth") {
     app.get("/.well-known/oauth-protected-resource", (_request, response) => {
       response.json(protectedResourceMetadata(deps.config!));

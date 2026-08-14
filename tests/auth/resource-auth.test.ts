@@ -11,11 +11,14 @@ type IssuerFixture = {
   config: AppConfig;
   server: Server;
   key: Awaited<ReturnType<typeof generateKeyPair>>["privateKey"];
-  token(overrides?: { audience?: string; subject?: string; expiresIn?: string }): Promise<string>;
+  token(overrides?: { audience?: string | string[]; subject?: string; expiresIn?: string; scope?: string | null }): Promise<string>;
   tokenWithoutExpiry(): Promise<string>;
 };
 
-async function startIssuer(): Promise<IssuerFixture> {
+async function startIssuer(
+  discoveryExtras: Record<string, unknown> = {},
+  options: { failDiscoveryAttempts?: number; discoveryDelayMs?: number; discoveryTimeoutMs?: number } = {}
+): Promise<IssuerFixture> {
   const { privateKey, publicKey } = await generateKeyPair("RS256");
   const publicJwk = await exportJWK(publicKey);
   publicJwk.kid = "test-key";
@@ -28,8 +31,25 @@ async function startIssuer(): Promise<IssuerFixture> {
   const address = server.address();
   if (address === null || typeof address === "string") throw new Error("No test issuer address");
   const issuer = `http://127.0.0.1:${address.port}`;
+  let discoveryAttempts = 0;
   issuerApp.get("/.well-known/openid-configuration", (_request, response) => {
-    response.json({ issuer, jwks_uri: `${issuer}/jwks` });
+    discoveryAttempts += 1;
+    if (discoveryAttempts <= (options.failDiscoveryAttempts ?? 0)) {
+      response.sendStatus(503);
+      return;
+    }
+    const sendMetadata = () => response.json({
+      issuer,
+      jwks_uri: `${issuer}/jwks`,
+      authorization_endpoint: `${issuer}/authorize`,
+      token_endpoint: `${issuer}/token`,
+      response_types_supported: ["code"],
+      subject_types_supported: ["public"],
+      id_token_signing_alg_values_supported: ["RS256"],
+      ...discoveryExtras
+    });
+    if (options.discoveryDelayMs === undefined) sendMetadata();
+    else setTimeout(sendMetadata, options.discoveryDelayMs);
   });
   issuerApp.get("/jwks", (_request, response) => response.json({ keys: [publicJwk] }));
 
@@ -40,25 +60,28 @@ async function startIssuer(): Promise<IssuerFixture> {
       AUTH_MODE: "oauth",
       BASE_URL: "http://127.0.0.1:3000/",
       OIDC_ISSUER: issuer,
-      OIDC_AUDIENCE: "career-mcp",
-      ALLOWED_SUBJECT: "user-123",
-      TOKEN_ENCRYPTION_KEY: "a".repeat(64)
+      OIDC_AUDIENCE: "http://127.0.0.1:3000",
+      ALLOWED_SUBJECT: "123e4567-e89b-12d3-a456-426614174000",
+      TOKEN_ENCRYPTION_KEY: "a".repeat(64),
+      OIDC_DISCOVERY_TIMEOUT_MS: String(options.discoveryTimeoutMs ?? 5_000)
     }),
     server,
     key: privateKey,
-    token: async (overrides = {}) => new SignJWT({})
+    token: async (overrides = {}) => {
+      const token = new SignJWT(overrides.scope === null ? {} : { scope: overrides.scope ?? "openid email" })
+        .setProtectedHeader({ alg: "RS256", kid: "test-key" })
+        .setIssuer(issuer)
+        .setAudience(overrides.audience ?? "http://127.0.0.1:3000")
+        .setSubject(overrides.subject ?? "123e4567-e89b-12d3-a456-426614174000")
+        .setIssuedAt()
+        .setExpirationTime(overrides.expiresIn ?? "5m");
+      return token.sign(privateKey);
+    },
+    tokenWithoutExpiry: async () => new SignJWT({ scope: "openid email" })
       .setProtectedHeader({ alg: "RS256", kid: "test-key" })
       .setIssuer(issuer)
-      .setAudience(overrides.audience ?? "career-mcp")
-      .setSubject(overrides.subject ?? "user-123")
-      .setIssuedAt()
-      .setExpirationTime(overrides.expiresIn ?? "5m")
-      .sign(privateKey),
-    tokenWithoutExpiry: async () => new SignJWT({})
-      .setProtectedHeader({ alg: "RS256", kid: "test-key" })
-      .setIssuer(issuer)
-      .setAudience("career-mcp")
-      .setSubject("user-123")
+      .setAudience("http://127.0.0.1:3000")
+      .setSubject("123e4567-e89b-12d3-a456-426614174000")
       .setIssuedAt()
       .sign(privateKey)
   };
@@ -74,9 +97,22 @@ describe("protected resource authentication", () => {
     expect(protectedResourceMetadata(fixture.config)).toEqual({
       resource: "http://127.0.0.1:3000",
       authorization_servers: [fixture.issuer],
-      scopes_supported: ["mcp"],
-      resource_documentation: "http://127.0.0.1:3000/docs"
+      scopes_supported: ["openid", "email"]
     });
+  });
+
+  it("refuses a credentialed resource URL before protected-resource metadata can expose it", () => {
+    expect(() => protectedResourceMetadata({
+      ...fixture.config,
+      baseUrl: "https://metadata-user:metadata-password@career.example"
+    })).toThrow(/credentials/);
+  });
+
+  it("refuses a credentialed authorization server before metadata can expose it", () => {
+    expect(() => protectedResourceMetadata({
+      ...fixture.config,
+      oidcIssuer: "https://issuer-user:issuer-password@issuer.example"
+    })).toThrow(/credentials/);
   });
 
   it("accepts a correctly signed, issuer-bound, audience-bound token for the configured subject", async () => {
@@ -89,6 +125,102 @@ describe("protected resource authentication", () => {
     expect(response.body).toEqual({ ok: true });
   });
 
+  it("stores the validated subject and bearer token in an immutable response-local context", async () => {
+    const app = express();
+    let capturedLocals: object | undefined;
+    app.use((_request, response, next) => {
+      response.once("finish", () => { capturedLocals = response.locals; });
+      next();
+    });
+    app.use(createResourceAuth(fixture.config));
+    app.get("/protected", (_request, response) => response.json({ ok: true }));
+    const token = await fixture.token();
+
+    const response = await request(app).get("/protected").set("authorization", `Bearer ${token}`);
+
+    const locals = capturedLocals ?? {};
+    const symbols = Object.getOwnPropertySymbols(locals);
+    expect(response.status).toBe(200);
+    expect(symbols).toHaveLength(1);
+    expect(symbols[0]?.description).toBe("pmm-career-mcp.request-auth-context");
+    const captured = (locals as Record<PropertyKey, unknown>)[symbols[0]!];
+    expect(captured).toEqual({
+      subject: "123e4567-e89b-12d3-a456-426614174000",
+      accessToken: token
+    });
+    expect(Object.isFrozen(captured)).toBe(true);
+    expect(response.text).not.toContain(token);
+  });
+
+  it("does not store request auth context when token validation fails", async () => {
+    const app = express();
+    let capturedLocals: object | undefined;
+    app.use((_request, response, next) => {
+      response.once("finish", () => { capturedLocals = response.locals; });
+      next();
+    });
+    app.use(createResourceAuth(fixture.config));
+    app.get("/protected", (_request, response) => response.json({ ok: true }));
+    const token = await fixture.token({ subject: "someone-else" });
+
+    const response = await request(app).get("/protected").set("authorization", `Bearer ${token}`);
+
+    expect(response.status).toBe(401);
+    expect(Object.getOwnPropertySymbols(capturedLocals ?? {})).toHaveLength(0);
+    expect(response.text).not.toContain(token);
+  });
+
+  it("accepts real-world OIDC discovery metadata with additional standard fields", async () => {
+    const metadataFixture = await startIssuer({
+      scopes_supported: ["openid", "email"],
+      claims_supported: ["iss", "aud", "sub", "exp"]
+    });
+    const app = express();
+    app.use(createResourceAuth(metadataFixture.config));
+    app.get("/protected", (_request, response) => response.json({ ok: true }));
+
+    try {
+      const response = await request(app).get("/protected").set("authorization", `Bearer ${await metadataFixture.token()}`);
+      expect(response.status).toBe(200);
+      expect(response.body).toEqual({ ok: true });
+    } finally {
+      await new Promise<void>((resolve, reject) => metadataFixture.server.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+
+  it("retries discovery after a prior discovery request failed", async () => {
+    const retryFixture = await startIssuer({}, { failDiscoveryAttempts: 1 });
+    const app = express();
+    app.use(createResourceAuth(retryFixture.config));
+    app.get("/protected", (_request, response) => response.json({ ok: true }));
+
+    try {
+      const token = await retryFixture.token();
+      expect((await request(app).get("/protected").set("authorization", `Bearer ${token}`)).status).toBe(401);
+      const retried = await request(app).get("/protected").set("authorization", `Bearer ${token}`);
+      expect(retried.status).toBe(200);
+      expect(retried.body).toEqual({ ok: true });
+    } finally {
+      await new Promise<void>((resolve, reject) => retryFixture.server.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+
+  it("aborts OIDC discovery at the configured bounded timeout", async () => {
+    const slowFixture = await startIssuer({}, { discoveryDelayMs: 250, discoveryTimeoutMs: 20 });
+    const app = express();
+    app.use(createResourceAuth(slowFixture.config));
+    app.get("/protected", (_request, response) => response.json({ ok: true }));
+
+    try {
+      const startedAt = performance.now();
+      const response = await request(app).get("/protected").set("authorization", `Bearer ${await slowFixture.token()}`);
+      expect(response.status).toBe(401);
+      expect(performance.now() - startedAt).toBeLessThan(200);
+    } finally {
+      await new Promise<void>((resolve, reject) => slowFixture.server.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+
   it("returns generic responses for missing, invalid, expired, and unauthorized-subject tokens", async () => {
     const app = express();
     app.use(createResourceAuth(fixture.config));
@@ -97,9 +229,15 @@ describe("protected resource authentication", () => {
     const cases = [
       { label: "missing", token: undefined, status: 401 },
       { label: "wrong audience", token: await fixture.token({ audience: "other" }), status: 401 },
+      { label: "array audience", token: await fixture.token({ audience: ["http://127.0.0.1:3000"] }), status: 401 },
       { label: "expired", token: await fixture.token({ expiresIn: "-1s" }), status: 401 },
       { label: "missing expiry", token: await fixture.tokenWithoutExpiry(), status: 401 },
-      { label: "wrong subject", token: await fixture.token({ subject: "someone-else" }), status: 403 }
+      { label: "wrong subject", token: await fixture.token({ subject: "someone-else" }), status: 401 },
+      { label: "missing scope", token: await fixture.token({ scope: null }), status: 401 },
+      { label: "missing email scope", token: await fixture.token({ scope: "openid" }), status: 401 },
+      { label: "missing openid scope", token: await fixture.token({ scope: "email" }), status: 401 },
+      { label: "unexpected scope", token: await fixture.token({ scope: "openid email profile" }), status: 401 },
+      { label: "duplicate scope", token: await fixture.token({ scope: "openid email email" }), status: 401 }
     ] as const;
 
     for (const candidate of cases) {
@@ -108,7 +246,7 @@ describe("protected resource authentication", () => {
         .set(candidate.token === undefined ? {} : { authorization: `Bearer ${candidate.token}` });
       expect(response.status, candidate.label).toBe(candidate.status);
       expect(response.body, candidate.label).toEqual({ error: "Access to this MCP resource is denied" });
-      expect(response.text, candidate.label).not.toMatch(/user-123|someone-else|aud|claim|jwt|expired/i);
+      expect(response.text, candidate.label).not.toMatch(/123e4567|someone-else|aud|claim|jwt|expired/i);
     }
   });
 
@@ -117,7 +255,8 @@ describe("protected resource authentication", () => {
       ...fixture.config,
       nodeEnv: "production",
       baseUrl: "https://career.example",
-      oidcIssuer: "https://issuer.example"
+      oidcIssuer: "https://issuer.example",
+      oidcAudience: "https://career.example"
     };
     const fetchSpy = vi.fn().mockResolvedValue(new Response(JSON.stringify({
       issuer: "https://issuer.example",

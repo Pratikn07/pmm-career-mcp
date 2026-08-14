@@ -1,15 +1,18 @@
-import { createHash, randomBytes as nodeRandomBytes } from "node:crypto";
+import { randomBytes as nodeRandomBytes } from "node:crypto";
 import type { CareerDatabase } from "../db/client.js";
 import { DomainError } from "../domain/errors.js";
 import { encryptJson } from "../security/crypto.js";
+import {
+  LINKEDIN_REQUIRED_SCOPES,
+  scopesFromTokenResponse
+} from "./scopes.js";
 
 const AUTHORIZATION_ENDPOINT = "https://www.linkedin.com/oauth/v2/authorization";
 const TOKEN_ENDPOINT = "https://www.linkedin.com/oauth/v2/accessToken";
 const USERINFO_ENDPOINT = "https://api.linkedin.com/v2/userinfo";
 const OAUTH_STATE_TTL_MS = 10 * 60 * 1_000;
-const REQUIRED_SCOPES = Object.freeze(["openid", "profile", "w_member_social"]);
 
-type PendingState = Readonly<{ codeVerifier: string; expiresAt: number }>;
+type PendingState = Readonly<{ expiresAt: number }>;
 
 export type LinkedInOAuthDependencies = {
   clientId: string;
@@ -23,8 +26,22 @@ export type LinkedInOAuthDependencies = {
 
 export type OAuthCallbackInput = Readonly<{ code: string; state: string }>;
 
-function providerError(): DomainError {
-  return new DomainError("OAUTH_PROVIDER_ERROR", "LinkedIn authorization could not be completed");
+type OAuthProviderFailureStage =
+  | "token_network"
+  | "token_http"
+  | "token_body"
+  | "token_expiry"
+  | "token_scope"
+  | "userinfo_network"
+  | "userinfo_http"
+  | "userinfo_identity";
+
+function providerError(stage: OAuthProviderFailureStage): DomainError {
+  return new DomainError(
+    "OAUTH_PROVIDER_ERROR",
+    "LinkedIn authorization could not be completed",
+    { stage }
+  );
 }
 
 function stateError(): DomainError {
@@ -91,21 +108,18 @@ export function createLinkedInOAuth(database: CareerDatabase, dependencies: Link
   function createAuthorizationUrl(): string {
     const now = currentTime(clock);
     const state = randomBytes(32).toString("base64url");
-    const codeVerifier = randomBytes(32).toString("base64url");
-    if (!/^[A-Za-z0-9_-]{43}$/.test(state) || !/^[A-Za-z0-9_-]{43}$/.test(codeVerifier)) {
+    if (!/^[A-Za-z0-9_-]{43}$/.test(state)) {
       throw new DomainError("DATA_INTEGRITY", "OAuth random source returned an invalid value");
     }
-    const codeChallenge = createHash("sha256").update(codeVerifier, "utf8").digest("base64url");
-    pendingStates.set(state, { codeVerifier, expiresAt: now + OAUTH_STATE_TTL_MS });
+    pendingStates.set(state, { expiresAt: now + OAUTH_STATE_TTL_MS });
 
     const url = new URL(AUTHORIZATION_ENDPOINT);
     url.searchParams.set("response_type", "code");
+    url.searchParams.set("enable_extended_login", "true");
     url.searchParams.set("client_id", dependencies.clientId);
     url.searchParams.set("redirect_uri", dependencies.redirectUri);
-    url.searchParams.set("scope", REQUIRED_SCOPES.join(" "));
+    url.searchParams.set("scope", LINKEDIN_REQUIRED_SCOPES.join(" "));
     url.searchParams.set("state", state);
-    url.searchParams.set("code_challenge", codeChallenge);
-    url.searchParams.set("code_challenge_method", "S256");
     return url.href;
   }
 
@@ -130,23 +144,26 @@ export function createLinkedInOAuth(database: CareerDatabase, dependencies: Link
           code: input.code,
           redirect_uri: dependencies.redirectUri,
           client_id: dependencies.clientId,
-          client_secret: dependencies.clientSecret,
-          code_verifier: pending.codeVerifier
+          client_secret: dependencies.clientSecret
         }).toString()
       });
     } catch {
-      throw providerError();
+      throw providerError("token_network");
     }
     if (!tokenResponse.ok) {
-      throw providerError();
+      throw providerError("token_http");
     }
     const token = await jsonObject(tokenResponse);
     if (token === undefined || !nonEmptyString(token.access_token)) {
-      throw providerError();
+      throw providerError("token_body");
     }
     const expiresIn = token.expires_in;
     if (typeof expiresIn !== "number" || !Number.isSafeInteger(expiresIn) || expiresIn <= 0) {
-      throw providerError();
+      throw providerError("token_expiry");
+    }
+    const grantedScopes = scopesFromTokenResponse(token.scope);
+    if (grantedScopes === undefined) {
+      throw providerError("token_scope");
     }
 
     let identityResponse: Response;
@@ -155,10 +172,10 @@ export function createLinkedInOAuth(database: CareerDatabase, dependencies: Link
         headers: { authorization: `Bearer ${token.access_token}` }
       });
     } catch {
-      throw providerError();
+      throw providerError("userinfo_network");
     }
     if (!identityResponse.ok) {
-      throw providerError();
+      throw providerError("userinfo_http");
     }
     const identity = await jsonObject(identityResponse);
     if (
@@ -166,18 +183,20 @@ export function createLinkedInOAuth(database: CareerDatabase, dependencies: Link
       || !nonEmptyString(identity.sub, 512)
       || !/^[A-Za-z0-9_-]+$/.test(identity.sub)
     ) {
-      throw providerError();
+      throw providerError("userinfo_identity");
     }
 
     const authorUrn = `urn:li:person:${identity.sub}`;
     const refreshToken = nonEmptyString(token.refresh_token) ? token.refresh_token : undefined;
     const expiresAt = new Date(currentTime(clock) + expiresIn * 1_000).toISOString();
     try {
-      database.oauthTokens.upsert({
+      await database.oauthTokens.upsert({
         provider: "linkedin",
         ciphertext: JSON.stringify(encryptJson({
+          credentialVersion: 1,
           accessToken: token.access_token,
-          authorUrn
+          authorUrn,
+          grantedScopes
         }, dependencies.tokenEncryptionKey)),
         ...(refreshToken === undefined
           ? {}

@@ -2,11 +2,28 @@ import type { CareerDatabase } from "../db/client.js";
 import type { PostVisibility } from "../drafts/service.js";
 import { DomainError } from "../domain/errors.js";
 import { decryptJson, type EncryptedEnvelope } from "../security/crypto.js";
+import { exactLinkedInScopes } from "./scopes.js";
 
 const POSTS_ENDPOINT = "https://api.linkedin.com/rest/posts";
 const ALLOWED_VISIBILITIES: ReadonlySet<string> = new Set(["PUBLIC", "CONNECTIONS"]);
 
-type StoredLinkedInCredential = Readonly<{ accessToken: string; authorUrn: string }>;
+export type StoredLinkedInCredential = Readonly<{
+  credentialVersion: 1;
+  accessToken: string;
+  authorUrn: string;
+  grantedScopes: readonly string[];
+}>;
+
+export type LinkedInPostMedia = Readonly<{
+  imageUrn: string;
+  altText: string;
+}>;
+
+export type LinkedInPostCreateInput = Readonly<{
+  text: string;
+  visibility: PostVisibility;
+  media: readonly LinkedInPostMedia[];
+}>;
 
 export type LinkedInPostsClientDependencies = {
   tokenEncryptionKey: string;
@@ -27,15 +44,23 @@ function parseCredential(value: unknown): StoredLinkedInCredential {
     throw credentialError();
   }
   const credential = value as Record<string, unknown>;
+  const grantedScopes = exactLinkedInScopes(credential.grantedScopes);
   if (
-    typeof credential.accessToken !== "string"
+    credential.credentialVersion !== 1
+    || typeof credential.accessToken !== "string"
     || credential.accessToken.length === 0
     || typeof credential.authorUrn !== "string"
     || !/^urn:li:person:[A-Za-z0-9_-]+$/.test(credential.authorUrn)
+    || grantedScopes === undefined
   ) {
     throw credentialError();
   }
-  return { accessToken: credential.accessToken, authorUrn: credential.authorUrn };
+  return {
+    credentialVersion: 1,
+    accessToken: credential.accessToken,
+    authorUrn: credential.authorUrn,
+    grantedScopes
+  };
 }
 
 function parseEnvelope(value: string): EncryptedEnvelope {
@@ -46,8 +71,16 @@ function parseEnvelope(value: string): EncryptedEnvelope {
   }
 }
 
-function loadCredential(database: CareerDatabase, encryptionKey: string): StoredLinkedInCredential {
-  const stored = database.oauthTokens.getByProvider("linkedin");
+export async function loadLinkedInCredential(
+  database: CareerDatabase,
+  encryptionKey: string
+): Promise<StoredLinkedInCredential> {
+  let stored;
+  try {
+    stored = await database.oauthTokens.getByProvider("linkedin");
+  } catch {
+    throw credentialError();
+  }
   if (stored === undefined) {
     throw credentialError();
   }
@@ -65,6 +98,58 @@ function validVersion(value: string): boolean {
   return /^\d{6}$/.test(value);
 }
 
+function validImageUrn(value: string): boolean {
+  return /^urn:li:image:[A-Za-z0-9_-]+$/.test(value);
+}
+
+function validAltText(value: string): boolean {
+  const length = [...value].length;
+  return length >= 1 && length <= 120;
+}
+
+function isDenseMediaArray(media: readonly LinkedInPostMedia[]): boolean {
+  for (let index = 0; index < media.length; index += 1) {
+    if (!Object.prototype.hasOwnProperty.call(media, index)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function validatePostInput(input: LinkedInPostCreateInput): void {
+  if (
+    typeof input?.text !== "string"
+    || input.text.length === 0
+    || !ALLOWED_VISIBILITIES.has(input.visibility)
+    || !Array.isArray(input.media)
+    || input.media.length > 4
+    || !isDenseMediaArray(input.media)
+    || input.media.some((media) => (
+      typeof media !== "object"
+      || media === null
+      || !validImageUrn(media.imageUrn)
+      || !validAltText(media.altText)
+    ))
+  ) {
+    throw new DomainError("VALIDATION_ERROR", "LinkedIn post input is invalid");
+  }
+}
+
+function contentFor(media: readonly LinkedInPostMedia[]): Record<string, unknown> | undefined {
+  if (media.length === 0) {
+    return undefined;
+  }
+  if (media.length === 1) {
+    const image = media[0]!;
+    return { media: { id: image.imageUrn, altText: image.altText } };
+  }
+  return {
+    multiImage: {
+      images: media.map(({ imageUrn, altText }) => ({ id: imageUrn, altText }))
+    }
+  };
+}
+
 /** A one-shot adapter for the official, versioned LinkedIn Posts API. */
 export function createLinkedInPostsClient(
   database: CareerDatabase,
@@ -75,19 +160,15 @@ export function createLinkedInPostsClient(
   }
   const fetch = dependencies.fetch ?? globalThis.fetch;
 
-  async function createTextPost(input: { text: string; visibility: PostVisibility }): Promise<LinkedInPostCreateResult> {
-    if (
-      typeof input?.text !== "string"
-      || input.text.length === 0
-      || !ALLOWED_VISIBILITIES.has(input.visibility)
-    ) {
-      throw new DomainError("VALIDATION_ERROR", "LinkedIn post input is invalid");
-    }
-    const credential = loadCredential(database, dependencies.tokenEncryptionKey);
+  async function createPost(input: LinkedInPostCreateInput): Promise<LinkedInPostCreateResult> {
+    validatePostInput(input);
+    const credential = await loadLinkedInCredential(database, dependencies.tokenEncryptionKey);
+    const content = contentFor(input.media);
     let response: Response;
     try {
       response = await fetch(POSTS_ENDPOINT, {
         method: "POST",
+        redirect: "manual",
         headers: {
           authorization: `Bearer ${credential.accessToken}`,
           "content-type": "application/json",
@@ -103,6 +184,7 @@ export function createLinkedInPostsClient(
             targetEntities: [],
             thirdPartyDistributionChannels: []
           },
+          ...(content === undefined ? {} : { content }),
           lifecycleState: "PUBLISHED",
           isReshareDisabledByAuthor: false
         })
@@ -123,5 +205,9 @@ export function createLinkedInPostsClient(
     return { status: response.status };
   }
 
-  return { createTextPost };
+  async function createTextPost(input: { text: string; visibility: PostVisibility }): Promise<LinkedInPostCreateResult> {
+    return createPost({ ...input, media: [] });
+  }
+
+  return { createPost, createTextPost };
 }

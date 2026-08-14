@@ -1,10 +1,22 @@
 import { describe, expect, it } from "vitest";
 import * as urlPolicyModule from "../../src/research/url-policy.js";
-import { assertFetchableUrl } from "../../src/research/url-policy.js";
+import {
+  assertFetchableUrl,
+  assertFetchableUrlLocation
+} from "../../src/research/url-policy.js";
 
 describe("assertFetchableUrl", () => {
-  it("exposes only the resolved-address policy function", () => {
-    expect(Object.keys(urlPolicyModule)).toEqual(["assertFetchableUrl"]);
+  it("exposes only the location preflight and resolved-address policy functions", () => {
+    expect(Object.keys(urlPolicyModule).sort()).toEqual([
+      "assertFetchableUrl",
+      "assertFetchableUrlLocation"
+    ]);
+  });
+
+  it("supports location-only preflight without requiring DNS results", () => {
+    expect(() => assertFetchableUrlLocation(new URL("https://acme.example/team"))).not.toThrow();
+    expect(() => assertFetchableUrlLocation(new URL("https://user@acme.example/team")))
+      .toThrow(/credentials/i);
   });
 
   it.each([
